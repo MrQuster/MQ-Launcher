@@ -50,6 +50,13 @@ try {
 
     $installPs1 = Join-Path $RepoRoot "packaging\windows\install.ps1"
     Assert-True (Test-Path $installPs1) "install.ps1 not found at $installPs1"
+    $rootInstallPs1 = Join-Path $RepoRoot "install.ps1"
+    Assert-True (Test-Path $rootInstallPs1) "root install.ps1 not found at $rootInstallPs1"
+    $pkgBytes = [System.IO.File]::ReadAllBytes($installPs1)
+    $rootBytes = [System.IO.File]::ReadAllBytes($rootInstallPs1)
+    Assert-True ([System.Linq.Enumerable]::SequenceEqual($pkgBytes, $rootBytes)) "install.ps1 and packaging\windows\install.ps1 have drifted"
+    $nonAsciiPkg = @($pkgBytes | Where-Object { $_ -gt 127 }).Count
+    Assert-True ($nonAsciiPkg -eq 0) "install.ps1 contains $nonAsciiPkg non-ASCII byte(s); Windows PowerShell 5.1 irm|iex requires pure 7-bit ASCII"
 
     $baseTemp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
     $tempRoot = Join-Path $baseTemp ("mq-ps1-test-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -118,11 +125,12 @@ try {
     Assert-True $ready "Local HTTP artifact server failed to start on $baseUrl"
 
     $cmdInfo = Get-Command $installPs1
-    $hasBaseUrl = $cmdInfo.Parameters.ContainsKey("BaseUrl")
+    $scriptText = Get-Content -Path $installPs1 -Raw
+    $hasBaseUrl = ($cmdInfo.Parameters.ContainsKey("BaseUrl")) -or ($scriptText -match '\$BaseUrl')
     Assert-True $hasBaseUrl "install.ps1 must support -BaseUrl parameter for local artifact testing"
-    $hasSilent = $cmdInfo.Parameters.ContainsKey("Silent")
-    $hasInstallDir = $cmdInfo.Parameters.ContainsKey("InstallDir")
-    $hasNoDesktop = $cmdInfo.Parameters.ContainsKey("NoDesktopShortcut")
+    $hasSilent = ($cmdInfo.Parameters.ContainsKey("Silent")) -or ($scriptText -match '\$Silent')
+    $hasInstallDir = ($cmdInfo.Parameters.ContainsKey("InstallDir")) -or ($scriptText -match '\$InstallDir')
+    $hasNoDesktop = ($cmdInfo.Parameters.ContainsKey("NoDesktopShortcut")) -or ($scriptText -match '\$NoDesktopShortcut')
 
     $targetInstallDir = if ($hasInstallDir) { $installDir } else { Join-Path $env:LOCALAPPDATA "MQ-Portable" }
     $installedExe = Join-Path $targetInstallDir "mq.exe"
@@ -175,6 +183,35 @@ try {
     if ($hasInstallDir) {
         Assert-True (-not (Test-Path $installedExe)) "mq.exe still exists after -Uninstall"
     }
+
+    # 5. Simulate `irm ... | iex` execution via Invoke-Expression
+    Write-Host "Test 5: Pipe install.ps1 to Invoke-Expression (irm | iex simulation)"
+    $iexInstallDir = Join-Path $tempRoot "iex-installed"
+    $prevEnv = @{
+        MQ_BASE_URL   = $env:MQ_BASE_URL
+        MQ_VERSION    = $env:MQ_VERSION
+        MQ_PORTABLE   = $env:MQ_PORTABLE
+        MQ_INSTALL_DIR = $env:MQ_INSTALL_DIR
+        MQ_SILENT     = $env:MQ_SILENT
+    }
+    try {
+        $env:MQ_BASE_URL = $baseUrl
+        $env:MQ_VERSION = $ver
+        $env:MQ_PORTABLE = "1"
+        $env:MQ_INSTALL_DIR = $iexInstallDir
+        $env:MQ_SILENT = "1"
+        Get-Content -Path $installPs1 -Raw | Invoke-Expression
+    }
+    finally {
+        foreach ($k in $prevEnv.Keys) {
+            if ($null -eq $prevEnv[$k]) {
+                Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+            } else {
+                Set-Item "Env:$k" $prevEnv[$k]
+            }
+        }
+    }
+    Assert-True (Test-Path (Join-Path $iexInstallDir "mq.exe")) "mq.exe not found after Invoke-Expression (irm | iex) simulation"
 
     Write-Host "ALL INSTALL.PS1 TESTS PASSED ($ver)" -ForegroundColor Green
 }
