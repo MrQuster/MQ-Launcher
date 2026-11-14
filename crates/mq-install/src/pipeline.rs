@@ -481,6 +481,7 @@ async fn install_game_transactional(
         .map_err(|e| (current_stage, MqError::Metadata(e.localized_details)))?;
 
     // 3. ModLoader resolution if requested
+    let mut prepared_forge: Option<crate::forge::PreparedForge> = None;
     if req.loader != ModLoaderKind::Vanilla {
         current_stage = InstallStage::ModLoader;
         let _ = journal.record_stage(
@@ -564,7 +565,30 @@ async fn install_game_transactional(
                 resolved_ver =
                     merge_inherits_from(&resolved_ver, &profile).map_err(|e| (current_stage, e))?;
             }
-            _ => {}
+            ModLoaderKind::Forge => {
+                let prep = crate::forge::prepare_forge_installation(
+                    &client,
+                    paths,
+                    &installing_dir,
+                    &req.mc_version,
+                    req.loader_version.as_deref(),
+                    req.mock_base_url.as_deref(),
+                    &mut resolved_ver,
+                )
+                .await
+                .map_err(|e| (current_stage, e))?;
+                state.loader_version = Some(prep.resolved_loader_version.clone());
+                prepared_forge = Some(prep);
+            }
+            ModLoaderKind::NeoForge => {
+                return Err((
+                    current_stage,
+                    MqError::Metadata(
+                        "NeoForge installation is not yet supported".to_string(),
+                    ),
+                ));
+            }
+            ModLoaderKind::Vanilla => {}
         }
     }
 
@@ -588,9 +612,11 @@ async fn install_game_transactional(
     let java_dir = paths.data_dir.join("java");
     let req_major = resolved_ver.java_version.major_version;
     let comp_hint = Some(resolved_ver.java_version.component.as_str());
+    let mut java_exec_path = PathBuf::from("java");
 
     match mq_launch::ensure_java_runtime(&client, &java_dir, req_major, comp_hint, None).await {
         Ok(selected) => {
+            java_exec_path = selected.runtime.path.clone();
             tracing::info!(
                 major = selected.runtime.major_version,
                 source = ?selected.source,
@@ -753,16 +779,25 @@ async fn install_game_transactional(
         .versions_dir()
         .join(&resolved_ver.mc_version)
         .join(format!("{}.jar", resolved_ver.mc_version));
-    hardlink_targets.push((client_jar_blob, ver_jar_dest));
+    hardlink_targets.push((client_jar_blob, ver_jar_dest.clone()));
 
-    // 6b. Libraries
+    // 6b. Libraries (game libraries + any Forge installer processor libraries)
     let lib_base = paths.libraries_dir();
     let mut native_jars = Vec::new();
     let mut native_excludes = Vec::new();
+    let mut queued_dest_paths = std::collections::HashSet::new();
 
-    for lib in &resolved_ver.libraries {
+    let all_libs = resolved_ver.libraries.iter().chain(
+        prepared_forge
+            .as_ref()
+            .map(|f| f.installer_libraries.as_slice())
+            .unwrap_or(&[]),
+    );
+
+    for lib in all_libs {
         if let Some(art) = &lib.artifact {
             let target = lib_base.join(&art.path);
+            let url_empty = art.url.trim().is_empty();
             let blob_dest = if let Some(sha1) = art.sha1 {
                 cas.blob_path(&sha1)
             } else {
@@ -770,7 +805,7 @@ async fn install_game_transactional(
             };
 
             let in_cas = art.sha1.is_some_and(|sha1| cas.has_blob(&sha1));
-            if !in_cas {
+            if !in_cas && !url_empty && queued_dest_paths.insert(blob_dest.clone()) {
                 let mut spec = DownloadSpec {
                     id: format!("lib_{}", lib.name),
                     urls: vec![art.url.clone()],
@@ -782,7 +817,7 @@ async fn install_game_transactional(
                 add_mojang_mirror_if_hashed(&mut spec);
                 download_specs.push(spec);
             }
-            if blob_dest != target {
+            if blob_dest != target && (!url_empty || in_cas) {
                 hardlink_targets.push((blob_dest, target));
             }
         }
@@ -924,6 +959,26 @@ async fn install_game_transactional(
                 let _ = fs::copy(&src, &dst);
             }
         }
+    }
+
+    // 8c. Run Forge installer processors (if Forge was prepared) after client.jar and libraries exist
+    if let Some(ref forge) = prepared_forge {
+        current_stage = InstallStage::ModLoader;
+        let _ = journal.record_stage(
+            paths,
+            "forge_processors",
+            "Выполнение процессоров установщика Forge",
+        );
+        crate::forge::run_forge_processors(
+            &java_exec_path,
+            paths,
+            &req.instance_dir,
+            &resolved_ver.mc_version,
+            &ver_jar_dest,
+            forge,
+        )
+        .await
+        .map_err(|e| (current_stage, e))?;
     }
 
     // 9. Extract Natives into `<instance_dir>/.installing/natives`

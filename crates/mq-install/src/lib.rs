@@ -4,6 +4,7 @@
 #![deny(clippy::await_holding_lock)]
 
 pub mod cas;
+pub mod forge;
 pub mod natives;
 pub mod pipeline;
 pub mod state;

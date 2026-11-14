@@ -1,7 +1,7 @@
 //! Fabric, Quilt, Forge, NeoForge and local `inheritsFrom` modloader profile
 //! metadata resolution, Maven coordinate artifact mapping, and library duplicate resolution.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use mq_core::{ModLoaderKind, MqError, MqResult, Sha1Digest};
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -27,6 +27,14 @@ pub const FORGE_MAVEN_URL: &str = "https://maven.minecraftforge.net";
 
 /// Default Maven repository URL for NeoForged artifacts.
 pub const NEOFORGE_MAVEN_URL: &str = "https://maven.neoforged.net/releases";
+
+/// Official Forge promotions JSON endpoint (`recommended` / `latest` per MC version).
+pub const FORGE_PROMOTIONS_URL: &str =
+    "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
+
+/// Official Forge Maven metadata XML endpoint listing all published Forge versions.
+pub const FORGE_MAVEN_METADATA_URL: &str =
+    "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
 
 /// Fallback Maven repository URL when a profile library omits both `downloads.artifact` and `url`.
 pub const DEFAULT_LIBRARIES_BASE_URL: &str = "https://libraries.minecraft.net";
@@ -1084,6 +1092,186 @@ pub async fn fetch_quilt_profile(
     parse_loader_profile(&body, ModLoaderKind::Quilt, Some(loader.to_owned()))
 }
 
+/// Parsed `install_profile.json` embedded inside a modern Forge (1.13+) installer JAR.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForgeInstallProfile {
+    #[serde(default)]
+    pub spec: Option<u32>,
+    #[serde(default)]
+    pub minecraft: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub libraries: Vec<RawLoaderLibrary>,
+    #[serde(default)]
+    pub data: HashMap<String, ForgeDataEntry>,
+    #[serde(default)]
+    pub processors: Vec<ForgeProcessor>,
+}
+
+/// Side-specific data value in Forge `install_profile.json`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForgeDataEntry {
+    #[serde(default)]
+    pub client: String,
+    #[serde(default)]
+    pub server: String,
+}
+
+/// A single post-download processor step in Forge `install_profile.json`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForgeProcessor {
+    #[serde(default)]
+    pub sides: Vec<String>,
+    pub jar: String,
+    #[serde(default)]
+    pub classpath: Vec<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub outputs: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgePromotionsResponse {
+    #[serde(default)]
+    promos: HashMap<String, String>,
+}
+
+/// Parses a Forge `install_profile.json` string into [`ForgeInstallProfile`].
+///
+/// Rejects legacy (pre-1.13) `install_profile.json` files that lack `processors`
+/// and use `install` / `versionInfo` instead.
+pub fn parse_forge_install_profile(json_str: &str) -> MqResult<ForgeInstallProfile> {
+    let value: serde_json::Value = serde_json::from_str(json_str)?;
+    if value.get("versionInfo").is_some() && value.get("processors").is_none() {
+        return Err(MqError::Metadata(
+            "legacy Forge install_profile.json (pre-1.13 versionInfo format) is not supported"
+                .to_owned(),
+        ));
+    }
+    let profile: ForgeInstallProfile = serde_json::from_value(value)?;
+    Ok(profile)
+}
+
+/// Normalizes a Forge version string into `(short_forge_version, full_maven_version)`,
+/// e.g. `("47.3.0", "1.20.1-47.3.0")` for `mc_version = "1.20.1"`.
+pub fn normalize_forge_version(mc_version: &str, forge_version: &str) -> MqResult<(String, String)> {
+    let mc = mc_version.trim();
+    let raw = forge_version.trim();
+    if mc.is_empty() || raw.is_empty() {
+        return Err(MqError::Metadata(
+            "Minecraft version and Forge version must not be empty".to_owned(),
+        ));
+    }
+
+    let prefix = format!("{mc}-");
+    let short = raw.strip_prefix(&prefix).unwrap_or(raw).to_owned();
+    let full = format!("{mc}-{short}");
+    if !is_safe_coord_token(&short) || !is_safe_coord_token(&full) {
+        return Err(MqError::Metadata(format!(
+            "unsafe Forge version string '{forge_version}'"
+        )));
+    }
+    Ok((short, full))
+}
+
+/// Builds the Forge installer JAR download URL for `mc_version` and `forge_version`.
+pub fn forge_installer_url(
+    base_url: Option<&str>,
+    mc_version: &str,
+    forge_version: &str,
+) -> MqResult<String> {
+    let base = base_url
+        .map(|u| u.trim().trim_end_matches('/'))
+        .filter(|u| !u.is_empty())
+        .unwrap_or(FORGE_MAVEN_URL);
+    let (_, full) = normalize_forge_version(mc_version, forge_version)?;
+    Ok(format!(
+        "{base}/net/minecraftforge/forge/{full}/forge-{full}-installer.jar"
+    ))
+}
+
+/// Extracts Forge versions for `mc_version` from Maven `maven-metadata.xml` content,
+/// ordered newest-first.
+pub fn parse_forge_maven_metadata_versions(xml: &str, mc_version: &str) -> Vec<String> {
+    let prefix = format!("{}-", mc_version.trim());
+    let mut versions = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<version>") {
+        let after_open = &rest[start + "<version>".len()..];
+        let Some(end) = after_open.find("</version>") else {
+            break;
+        };
+        let ver = after_open[..end].trim();
+        if let Some(short) = ver.strip_prefix(&prefix) {
+            if !short.is_empty() {
+                versions.push(short.to_owned());
+            }
+        }
+        rest = &after_open[end + "</version>".len()..];
+    }
+    versions.reverse();
+    versions
+}
+
+/// Fetches available Forge versions for `mc_version` (newest first) from Forge Maven metadata.
+pub async fn fetch_forge_loader_versions(
+    client: &reqwest::Client,
+    base_url: Option<&str>,
+    mc_version: &str,
+) -> MqResult<Vec<String>> {
+    let url_str = match base_url {
+        Some(base) => format!(
+            "{}/net/minecraftforge/forge/maven-metadata.xml",
+            base.trim().trim_end_matches('/')
+        ),
+        None => FORGE_MAVEN_METADATA_URL.to_owned(),
+    };
+    let url = Url::parse(&url_str)
+        .map_err(|err| MqError::Metadata(format!("invalid Forge metadata URL '{url_str}': {err}")))?;
+    let body = get_text_checked(client, url).await?;
+    Ok(parse_forge_maven_metadata_versions(&body, mc_version))
+}
+
+/// Fetches the recommended (or latest) Forge version for `mc_version` via Forge promotions JSON,
+/// falling back to `maven-metadata.xml` if promotions does not list `mc_version`.
+pub async fn fetch_forge_recommended_version(
+    client: &reqwest::Client,
+    base_url: Option<&str>,
+    mc_version: &str,
+) -> MqResult<String> {
+    let mc = mc_version.trim();
+    let promo_url_str = match base_url {
+        Some(base) => format!(
+            "{}/net/minecraftforge/forge/promotions_slim.json",
+            base.trim().trim_end_matches('/')
+        ),
+        None => FORGE_PROMOTIONS_URL.to_owned(),
+    };
+    if let Ok(url) = Url::parse(&promo_url_str) {
+        if let Ok(body) = get_text_checked(client, url).await {
+            if let Ok(parsed) = serde_json::from_str::<ForgePromotionsResponse>(&body) {
+                if let Some(ver) = parsed.promos.get(&format!("{mc}-recommended")) {
+                    if !ver.trim().is_empty() {
+                        return Ok(ver.trim().to_owned());
+                    }
+                }
+                if let Some(ver) = parsed.promos.get(&format!("{mc}-latest")) {
+                    if !ver.trim().is_empty() {
+                        return Ok(ver.trim().to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    let versions = fetch_forge_loader_versions(client, base_url, mc).await?;
+    versions.into_iter().next().ok_or_else(|| {
+        MqError::Metadata(format!("no Forge loader version found for {mc}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1492,5 +1680,70 @@ mod tests {
         ));
 
         server.await.expect("mock server finished");
+    }
+
+    #[test]
+    fn parses_forge_install_profile_and_normalizes_versions() {
+        let json = r#"{
+            "spec": 1,
+            "minecraft": "1.20.1",
+            "version": "1.20.1-forge-47.3.0",
+            "libraries": [
+                {
+                    "name": "net.minecraftforge:installertools:1.4.1",
+                    "downloads": {
+                        "artifact": {
+                            "path": "net/minecraftforge/installertools/1.4.1/installertools-1.4.1.jar",
+                            "url": "https://maven.minecraftforge.net/net/minecraftforge/installertools/1.4.1/installertools-1.4.1.jar"
+                        }
+                    }
+                }
+            ],
+            "data": {
+                "BINPATCH": {
+                    "client": "/data/client.lzma",
+                    "server": "/data/server.lzma"
+                }
+            },
+            "processors": [
+                {
+                    "sides": ["client"],
+                    "jar": "net.minecraftforge:installertools:1.4.1",
+                    "classpath": ["net.md-5:SpecialSource:1.11.0"],
+                    "args": ["--task", "MCP_DATA", "--input", "{MINECRAFT_JAR}"]
+                }
+            ]
+        }"#;
+
+        let profile = parse_forge_install_profile(json).expect("parse forge install profile");
+        assert_eq!(profile.spec, Some(1));
+        assert_eq!(profile.minecraft, "1.20.1");
+        assert_eq!(profile.libraries.len(), 1);
+        assert_eq!(profile.processors.len(), 1);
+        assert_eq!(
+            profile.data.get("BINPATCH").unwrap().client,
+            "/data/client.lzma"
+        );
+
+        let (short, full) =
+            normalize_forge_version("1.20.1", "1.20.1-47.3.0").expect("normalize");
+        assert_eq!(short, "47.3.0");
+        assert_eq!(full, "1.20.1-47.3.0");
+
+        let url = forge_installer_url(None, "1.20.1", "47.3.0").expect("installer url");
+        assert_eq!(
+            url,
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.3.0/forge-1.20.1-47.3.0-installer.jar"
+        );
+
+        let xml = "<metadata><versioning><versions>\
+            <version>1.19.4-45.1.0</version>\
+            <version>1.20.1-47.2.0</version>\
+            <version>1.20.1-47.3.0</version>\
+            </versions></versioning></metadata>";
+        assert_eq!(
+            parse_forge_maven_metadata_versions(xml, "1.20.1"),
+            vec!["47.3.0".to_owned(), "47.2.0".to_owned()]
+        );
     }
 }
