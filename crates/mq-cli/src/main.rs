@@ -844,6 +844,20 @@ fn default_cpu_threads() -> usize {
         .unwrap_or(4)
 }
 
+fn resolve_mojang_mock_base_url(paths: &MqPaths) -> Option<String> {
+    if let Ok(val) = std::env::var(mq_core::config::ENV_MOJANG_BASE_URL) {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    AppConfig::load_or_default(paths)
+        .ok()
+        .and_then(|c| c.mock_url)
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
 fn is_mrpack_arg(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -1132,7 +1146,7 @@ async fn cmd_install(args: InstallArgs, paths: MqPaths, threads: Option<usize>) 
         loader,
         loader_version: args.loader_version,
         instance_dir: inst_dir.clone(),
-        mock_base_url: None,
+        mock_base_url: resolve_mojang_mock_base_url(&paths),
     };
 
     let started = Instant::now();
@@ -1553,7 +1567,7 @@ async fn cmd_install_worker(
         loader: inst.loader,
         loader_version: inst.loader_version.clone(),
         instance_dir: inst_dir,
-        mock_base_url: None,
+        mock_base_url: resolve_mojang_mock_base_url(&paths),
     };
 
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();

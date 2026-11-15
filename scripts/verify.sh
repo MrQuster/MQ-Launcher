@@ -62,6 +62,16 @@ else
     run_check "CurseForge key not committed (working tree)" "! rg -nF -f '${CF_KEY_FILE}' crates/ docs/ README* CHANGELOG.md testsupport/ scripts/" "5"
 fi
 
+# 6. Ensure test-hooks markers are absent from release builds (and not in default features)
+RELEASE_BIN="${CARGO_TARGET_DIR}/release/mq"
+if [ "${MQ_VERIFY_RELEASE:-0}" = "1" ] || [ "${1:-}" = "--release" ]; then
+    run_check "No test-hooks markers in release binary (built)" "cargo build --release --locked --bin mq && ! strings '${RELEASE_BIN}' | grep -qE 'MQ_TEST_(ACTION|MOCK_URL|CANCEL_AFTER_MS|EXIT_ON_FINISH)'" "6"
+elif [ -x "${RELEASE_BIN}" ]; then
+    run_check "No test-hooks markers in target/release/mq" "! strings '${RELEASE_BIN}' | grep -qE 'MQ_TEST_(ACTION|MOCK_URL|CANCEL_AFTER_MS|EXIT_ON_FINISH)'" "6"
+else
+    run_check "No test-hooks in default features (release bin not built)" "! rg -n 'default[[:space:]]*=.*test-hooks' crates/*/Cargo.toml" "6"
+fi
+
 # Print Table
 echo ""
 echo "================================================================================"

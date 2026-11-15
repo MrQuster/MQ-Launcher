@@ -486,14 +486,19 @@ impl ModrinthClient {
         Self::with_base_url(DEFAULT_MODRINTH_API_URL)
     }
 
-    /// Creates a [`ModrinthClient`] honoring `config.mock_url` when configured.
+    /// Creates a [`ModrinthClient`] honoring `$MQ_MODRINTH_BASE_URL` or `config.mock_url` when configured.
     pub fn from_config(config: &AppConfig) -> MqResult<Self> {
-        let base_url = match config
-            .mock_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
+        let env_override = std::env::var(mq_core::config::ENV_MODRINTH_BASE_URL)
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        let base_url = match env_override.as_deref().or_else(|| {
+            config
+                .mock_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        }) {
             Some(mock) => {
                 let trimmed = mock.trim_end_matches('/');
                 if trimmed.ends_with("/modrinth/v2") || trimmed.ends_with("/v2") {
