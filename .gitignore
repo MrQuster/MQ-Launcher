@@ -11,6 +11,7 @@ dist/
 # Agent and internal documents
 .agent/
 .agents/
+qa-out/
 graphify-out/
 .gemini/
 GEMINI.md
