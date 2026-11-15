@@ -401,8 +401,11 @@ impl CatalogView {
                     .min_size(Vec2::new(96.0, 32.0));
                 let resp = ui.add(btn);
                 register_widget(
+                    ui,
                     &resp,
-                    ElementMeta::new(ElementKind::Tab, tab.label()).interactive(true),
+                    ElementMeta::new(ElementKind::Tab)
+                        .label(tab.label())
+                        .interactive(true),
                 );
                 if resp.clicked() && !selected {
                     cat.tab = tab;
@@ -453,8 +456,11 @@ impl CatalogView {
         ] {
             let resp = ui.selectable_label(cat.source == filter, label);
             register_widget(
+                ui,
                 &resp,
-                ElementMeta::new(ElementKind::Button, label).interactive(true),
+                ElementMeta::new(ElementKind::Button)
+                    .label(label)
+                    .interactive(true),
             );
             if resp.clicked() && cat.source != filter {
                 cat.source = filter;
