@@ -238,10 +238,16 @@ fn read_jar_main_class(jar_path: &Path) -> MqResult<String> {
 }
 
 /// Resolves a `[group:artifact:version[:classifier][@ext]]` bracketed Maven coordinate
-/// into an absolute path inside `libs_dir`.
+/// into an absolute path inside `libs_dir` using native OS separators.
 fn resolve_maven_bracketed_path(coord: &str, libs_dir: &Path) -> MqResult<PathBuf> {
     let art = maven_coord_to_artifact(coord, None, None, 0)?;
-    Ok(libs_dir.join(art.path))
+    let mut path = libs_dir.to_path_buf();
+    for seg in art.path.split('/') {
+        if !seg.is_empty() {
+            path.push(seg);
+        }
+    }
+    Ok(path)
 }
 
 /// Resolves a single Forge processor argument template.
@@ -335,8 +341,7 @@ pub async fn run_forge_processors(
             continue;
         }
 
-        let jar_art = maven_coord_to_artifact(&proc.jar, None, None, 0)?;
-        let jar_path = libs_dir.join(&jar_art.path);
+        let jar_path = resolve_maven_bracketed_path(&proc.jar, &libs_dir)?;
         if !jar_path.is_file() {
             return Err(MqError::Archive(format!(
                 "Forge processor JAR missing: {}",
@@ -349,8 +354,7 @@ pub async fn run_forge_processors(
         let mut cp_entries = Vec::with_capacity(1 + proc.classpath.len());
         cp_entries.push(jar_path.to_string_lossy().into_owned());
         for cp_coord in &proc.classpath {
-            let cp_art = maven_coord_to_artifact(cp_coord, None, None, 0)?;
-            let cp_path = libs_dir.join(&cp_art.path);
+            let cp_path = resolve_maven_bracketed_path(cp_coord, &libs_dir)?;
             cp_entries.push(cp_path.to_string_lossy().into_owned());
         }
         let mut cp_sep_buf = [0u8; 4];
@@ -512,17 +516,19 @@ mod tests {
             "/tmp/forge-data/data/client.lzma"
         );
         assert_eq!(
-            resolve_processor_arg(
-                "{MC_SRG}",
-                "1.20.1",
-                inst_dir,
-                mc_jar,
-                &forge.installer_jar_path,
-                libs,
-                &forge
-            )
-            .unwrap(),
-            "/data/libraries/net/minecraft/client/1.20.1/client-1.20.1-srg.jar"
+            PathBuf::from(
+                resolve_processor_arg(
+                    "{MC_SRG}",
+                    "1.20.1",
+                    inst_dir,
+                    mc_jar,
+                    &forge.installer_jar_path,
+                    libs,
+                    &forge
+                )
+                .unwrap()
+            ),
+            PathBuf::from("/data/libraries/net/minecraft/client/1.20.1/client-1.20.1-srg.jar")
         );
         assert_eq!(
             resolve_processor_arg(
