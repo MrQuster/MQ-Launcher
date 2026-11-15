@@ -433,15 +433,22 @@ impl ThemeConfig {
         }
         let serialized = toml::to_string_pretty(self)?;
         let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)?;
-        file.write_all(serialized.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp_path, path)?;
+        let write_res = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            file.write_all(serialized.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp_path, path)?;
+            Ok(())
+        })();
+        if let Err(err) = write_res {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(MqError::Io(err));
+        }
         Ok(())
     }
 }

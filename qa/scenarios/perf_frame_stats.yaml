@@ -1,0 +1,73 @@
+name: perf_frame_stats
+description: Measure frame_stats (p99/max/histogram) across heavy UI navigation, dialogs, catalog, and theme switches.
+deterministic: false
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - frame_stats: reset
+  - goto: Catalog
+  - wait_idle:
+      timeout_ms: 8000
+      frames: 5
+  - scroll:
+      dx: 0.0
+      dy: -400.0
+      x: 640.0
+      y: 400.0
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - goto: Downloads
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - goto: Performance
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - goto: Accounts
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - goto: Settings
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - goto: Instances
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - click:
+      label: "Создать инстанс"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - dump_ui: {}
+  - key:
+      key: Escape
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - click:
+      label: "Импорт сборки"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - key:
+      key: Escape
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - set_theme:
+      preset: LightClean
+  - set_theme:
+      preset: CatppuccinMocha
+  - set_theme:
+      preset: MatteDark
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - frame_stats: get
+  - state: {}
+  - quit: {}

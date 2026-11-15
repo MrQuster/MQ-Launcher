@@ -1,0 +1,41 @@
+name: resilience_stress_data
+description: Stress test with 1000+ instances, 200-character instance name, and Cyrillic account nickname.
+deterministic: false
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - frame_stats: reset
+  - goto: Instances
+  - wait_idle:
+      timeout_ms: 8000
+      frames: 5
+  - dump_ui: {}
+  - scroll:
+      dx: 0.0
+      dy: -1200.0
+      x: 640.0
+      y: 400.0
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - scroll:
+      dx: 0.0
+      dy: -1200.0
+      x: 640.0
+      y: 400.0
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - goto: Accounts
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - dump_ui: {}
+  - goto: Instances
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - frame_stats: get
+  - state: {}
+  - quit: {}

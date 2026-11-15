@@ -1,0 +1,612 @@
+name: resilience_dialogs_cancel
+description: 100 cycles open/close dialog + 50 cycles start/cancel.
+deterministic: true
+viewport:
+  width: 1280
+  height: 800
+steps:
+- frame_stats: reset
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- key:
+    key: Escape
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- click:
+    label: Отмена
+- frame_stats: get
+- dump_ui: {}
+- state: {}
+- quit: {}

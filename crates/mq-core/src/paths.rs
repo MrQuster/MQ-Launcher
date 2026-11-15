@@ -148,7 +148,35 @@ impl MqPaths {
         for dir in dirs {
             fs::create_dir_all(dir)?;
         }
+        let cleaned = self.cleanup_stale_part_files();
+        if cleaned > 0 {
+            tracing::info!(
+                cleaned_files = cleaned,
+                "Cleaned up stale .part/.tmp artifacts from previous interrupted session"
+            );
+        }
         Ok(())
+    }
+
+    /// Removes stale `.part` download fragments and transient `.tmp` config files left behind
+    /// by an interrupted session (`SIGKILL`, power loss). Returns the number of removed files.
+    pub fn cleanup_stale_part_files(&self) -> usize {
+        let mut removed = 0usize;
+        let part_roots = [
+            self.temp_dir(),
+            self.data_dir.join("cache"),
+            self.cache_dir.clone(),
+            self.versions_dir(),
+            self.libraries_dir(),
+            self.assets_dir(),
+        ];
+        for root in &part_roots {
+            removed += remove_matching_files_recursive(root, &|name| name.ends_with(".part"));
+        }
+        removed += remove_matching_files_in_dir(&self.config_dir, &|name| {
+            name.contains(".tmp.") || name.contains(".tmp_")
+        });
+        removed
     }
 
     /// Content-addressable blob store root (`<data_dir>/cas`).
@@ -386,6 +414,44 @@ pub fn resolve_safe_path(base: &Path, untrusted_rel: &str) -> MqResult<PathBuf> 
     Ok(base.join(clean_rel))
 }
 
+fn remove_matching_files_in_dir(dir: &Path, predicate: &dyn Fn(&str) -> bool) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if predicate(name) && fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
+fn remove_matching_files_recursive(dir: &Path, predicate: &dyn Fn(&str) -> bool) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            removed += remove_matching_files_recursive(&path, predicate);
+        } else if path.is_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if predicate(name) && fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +631,38 @@ mod tests {
             let err = resolve_safe_path(base, "escape_dir/payload.jar").unwrap_err();
             assert!(matches!(err, MqError::ZipSlip { .. }));
         }
+    }
+
+    #[test]
+    fn ensure_dirs_cleans_up_stale_part_and_tmp_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path().to_path_buf());
+        paths.ensure_dirs().expect("initial ensure_dirs");
+
+        let stale_tmp_part = paths.temp_dir().join("artifact.jar.e1.part");
+        let stale_cache_part = paths.data_dir.join("cache").join("modpack.mrpack.part");
+        let stale_cfg_tmp = paths.config_dir.join("config.toml.tmp.99999");
+        let valid_cfg = paths.config_file();
+
+        fs::write(&stale_tmp_part, b"partial").expect("write stale tmp part");
+        fs::write(&stale_cache_part, b"partial").expect("write stale cache part");
+        fs::write(&stale_cfg_tmp, b"partial").expect("write stale cfg tmp");
+        fs::write(&valid_cfg, b"launcher_locale = \"ru_RU\"\n").expect("write valid cfg");
+
+        paths.ensure_dirs().expect("recovery ensure_dirs");
+
+        assert!(
+            !stale_tmp_part.exists(),
+            "stale .part in tmp must be removed"
+        );
+        assert!(
+            !stale_cache_part.exists(),
+            "stale .part in cache must be removed"
+        );
+        assert!(
+            !stale_cfg_tmp.exists(),
+            "stale .tmp in config_dir must be removed"
+        );
+        assert!(valid_cfg.exists(), "valid config.toml must be preserved");
     }
 }
