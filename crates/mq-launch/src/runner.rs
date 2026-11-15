@@ -22,6 +22,19 @@ pub async fn spawn_and_stream_game(
     secrets: Vec<String>,
     event_bus: Option<EventBus>,
 ) -> MqResult<ExitStatus> {
+    spawn_and_stream_game_with_pid(cmd, instance_id, secrets, event_bus, None).await
+}
+
+/// Spawns the configured Minecraft JVM (or wrapper) child process, optionally notifies `pid_tx`
+/// with the child OS PID immediately after spawn, streams `stdout` and `stderr` asynchronously,
+/// scrubs sensitive tokens, and publishes [`Event::GameLog`] entries to `event_bus`.
+pub async fn spawn_and_stream_game_with_pid(
+    cmd: &BuiltLaunchCommand,
+    instance_id: &str,
+    secrets: Vec<String>,
+    event_bus: Option<EventBus>,
+    pid_tx: Option<tokio::sync::oneshot::Sender<u32>>,
+) -> MqResult<ExitStatus> {
     if !cmd.working_dir.as_os_str().is_empty() {
         fs::create_dir_all(&cmd.working_dir)?;
     }
@@ -51,6 +64,10 @@ pub async fn spawn_and_stream_game(
             cmd.program.display()
         ))
     })?;
+
+    if let (Some(tx), Some(pid)) = (pid_tx, child.id()) {
+        let _ = tx.send(pid);
+    }
 
     let shared_secrets = Arc::new(secrets);
     let instance_slug = instance_id.to_owned();
@@ -115,9 +132,24 @@ async fn stream_log_lines<R>(
     }
 }
 
+/// Extracts a process exit code, preserving Unix signal termination as `128 + signal`.
+pub fn exit_status_code(status: &ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    -1
+}
+
 /// Terminates a game process and all of its descendant child processes.
 /// On Windows, executes `taskkill /F /T /PID <pid>`.
-/// On Unix, terminates the process via SIGKILL.
+/// On Unix, collects descendant PIDs from `/proc` and terminates the tree via SIGKILL.
 pub fn kill_process_tree(pid: u32) -> Result<(), std::io::Error> {
     #[cfg(target_os = "windows")]
     {
@@ -128,9 +160,56 @@ pub fn kill_process_tree(pid: u32) -> Result<(), std::io::Error> {
     }
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output();
+        let mut pids = collect_descendant_pids(pid);
+        pids.push(pid);
+        for target in pids {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &target.to_string()])
+                .output();
+        }
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn collect_descendant_pids(root_pid: u32) -> Vec<u32> {
+    let mut children_map: std::collections::HashMap<u32, Vec<u32>> =
+        std::collections::HashMap::new();
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(pid_str) = name.to_str() else {
+                continue;
+            };
+            let Ok(child_pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
+            let stat_path = entry.path().join("stat");
+            if let Ok(stat) = fs::read_to_string(stat_path) {
+                if let Some(rparen) = stat.rfind(')') {
+                    let rest = &stat[rparen + 1..];
+                    let mut fields = rest.split_whitespace();
+                    let _state = fields.next();
+                    if let Some(ppid_str) = fields.next() {
+                        if let Ok(ppid) = ppid_str.parse::<u32>() {
+                            children_map.entry(ppid).or_default().push(child_pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut stack = vec![root_pid];
+    while let Some(curr) = stack.pop() {
+        if let Some(kids) = children_map.get(&curr) {
+            for &kid in kids {
+                result.push(kid);
+                stack.push(kid);
+            }
+        }
+    }
+    result.reverse();
+    result
 }

@@ -1,0 +1,97 @@
+name: ui_screens_nav
+description: Navigate all main tabs and all Settings sections, plus Accounts tabs.
+deterministic: true
+steps:
+  - set_scale:
+      scale: 1.0
+  - frame_stats: reset
+  - goto:
+      tab: Downloads
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Performance
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Accounts
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - click:
+      label: "Офлайн (только ник)"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Settings
+      section: Customization
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Settings
+      section: Launch
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Settings
+      section: Localization
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Settings
+      section: NetworkAndApi
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Settings
+      section: Catalog
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Settings
+      section: Updates
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Settings
+      section: About
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - goto:
+      tab: Catalog
+  - dump_ui: {}
+  - screenshot: {}
+  - frame_stats: get
+  - quit: {}

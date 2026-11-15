@@ -1,0 +1,41 @@
+name: content_catalog
+description: Catalog search on Modrinth and CurseForge, project details view, and frame_stats.
+deterministic: true
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - frame_stats: reset
+  - goto:
+      tab: "catalog"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - wait_for:
+      label: "Поиск по названию"
+      timeout_ms: 8000
+  - screenshot: {}
+  - dump_ui: {}
+  - click:
+      label: "Modrinth"
+  - type:
+      label: "Поиск по названию"
+      text: "sodium"
+      clear: true
+  - key:
+      key: "Enter"
+  - wait_for:
+      label: "Подробнее"
+      timeout_ms: 15000
+  - screenshot: {}
+  - dump_ui: {}
+  - click:
+      label: "CurseForge"
+  - wait_for:
+      label: "Подробнее"
+      timeout_ms: 15000
+  - screenshot: {}
+  - dump_ui: {}
+  - frame_stats: get
+  - state: {}
+  - quit: {}

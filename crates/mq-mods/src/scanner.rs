@@ -117,6 +117,13 @@ pub async fn scan_mods_directory(
                 if standard_builtins.contains(dep.as_str()) {
                     continue;
                 }
+                if (dep.starts_with("fabric-")
+                    && (enabled_ids.contains_key("fabric-api")
+                        || enabled_ids.contains_key("quilted_fabric_api")))
+                    || (dep == "fabric-api" && enabled_ids.contains_key("quilted_fabric_api"))
+                {
+                    continue;
+                }
                 if !enabled_ids.contains_key(&dep) {
                     conflicts.push(ModConflict::MissingDependency {
                         mod_id,
@@ -626,6 +633,308 @@ pub async fn identify_manual_files(
     Ok(total)
 }
 
+/// Issue detected during preflight validation of an instance's `mods/` directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreflightIssue {
+    DuplicateModId {
+        mod_id: String,
+        files: Vec<String>,
+    },
+    MissingDependency {
+        mod_id: String,
+        file_name: String,
+        required_dep: String,
+    },
+    WrongLoader {
+        mod_id: String,
+        file_name: String,
+        mod_loader: ModLoaderKind,
+        instance_loader: ModLoaderKind,
+    },
+    WrongMcVersion {
+        mod_id: String,
+        file_name: String,
+        required_mc: String,
+        instance_mc: String,
+    },
+}
+
+/// Result of preflight validation before launching an instance.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PreflightReport {
+    pub issues: Vec<PreflightIssue>,
+}
+
+impl PreflightReport {
+    pub fn is_clean(&self) -> bool {
+        self.issues.is_empty()
+    }
+}
+
+fn is_loader_compatible(mod_loader: ModLoaderKind, instance_loader: ModLoaderKind) -> bool {
+    match instance_loader {
+        ModLoaderKind::Vanilla => false,
+        ModLoaderKind::Quilt => matches!(mod_loader, ModLoaderKind::Fabric | ModLoaderKind::Quilt),
+        other => mod_loader == other,
+    }
+}
+
+fn parse_mc_tuple(s: &str) -> Option<(u32, u32, u32)> {
+    let clean = s
+        .trim()
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .split(['-', '+', ' '])
+        .next()?;
+    let mut parts = clean.split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+fn match_single_clause(inst: (u32, u32, u32), clause: &str) -> bool {
+    let c = clause.trim();
+    if c.is_empty() || c == "*" {
+        return true;
+    }
+    if let Some(rest) = c.strip_prefix(">=") {
+        return parse_mc_tuple(rest).is_none_or(|v| inst >= v);
+    }
+    if let Some(rest) = c.strip_prefix("<=") {
+        return parse_mc_tuple(rest).is_none_or(|v| inst <= v);
+    }
+    if let Some(rest) = c.strip_prefix('>') {
+        return parse_mc_tuple(rest).is_none_or(|v| inst > v);
+    }
+    if let Some(rest) = c.strip_prefix('<') {
+        return parse_mc_tuple(rest).is_none_or(|v| inst < v);
+    }
+    if let Some(rest) = c.strip_prefix('~') {
+        return parse_mc_tuple(rest).is_none_or(|v| inst.0 == v.0 && inst.1 == v.1 && inst >= v);
+    }
+    if let Some(rest) = c.strip_prefix('=') {
+        return parse_mc_tuple(rest).is_none_or(|v| inst == v);
+    }
+    if c.ends_with(".x") || c.ends_with(".*") {
+        let prefix = c.trim_end_matches(".x").trim_end_matches(".*");
+        return parse_mc_tuple(prefix).is_none_or(|v| inst.0 == v.0 && inst.1 == v.1);
+    }
+    if (c.starts_with('[') || c.starts_with('(')) && (c.ends_with(']') || c.ends_with(')')) {
+        let inc_low = c.starts_with('[');
+        let inc_high = c.ends_with(']');
+        let inner = &c[1..c.len() - 1];
+        if let Some((lo_s, hi_s)) = inner.split_once(',') {
+            let lo_ok = if lo_s.trim().is_empty() {
+                true
+            } else {
+                parse_mc_tuple(lo_s).is_none_or(|lo| if inc_low { inst >= lo } else { inst > lo })
+            };
+            let hi_ok = if hi_s.trim().is_empty() {
+                true
+            } else {
+                parse_mc_tuple(hi_s).is_none_or(|hi| if inc_high { inst <= hi } else { inst < hi })
+            };
+            return lo_ok && hi_ok;
+        }
+    }
+    parse_mc_tuple(c).is_none_or(|v| inst == v)
+}
+
+/// Checks whether `instance_mc` satisfies a Fabric/Quilt/Forge/NeoForge `minecraft` version constraint.
+pub fn satisfies_mc_version_constraint(instance_mc: &str, constraint: &str) -> bool {
+    let Some(inst) = parse_mc_tuple(instance_mc) else {
+        return true;
+    };
+    let trimmed = constraint.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return true;
+    }
+    trimmed.split("||").any(|or_part| {
+        let part = or_part.trim();
+        if (part.starts_with('[') || part.starts_with('('))
+            && (part.ends_with(']') || part.ends_with(')'))
+        {
+            match_single_clause(inst, part)
+        } else {
+            part.split_whitespace()
+                .all(|clause| match_single_clause(inst, clause))
+        }
+    })
+}
+
+fn extract_jar_mc_constraint(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let mut archive = ZipArchive::new(file).ok()?;
+
+    if let Ok(entry) = archive.by_name("fabric.mod.json") {
+        let mut content = Vec::new();
+        let _ = entry
+            .take(MAX_DESCRIPTOR_SIZE as u64)
+            .read_to_end(&mut content);
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&content) {
+            if let Some(mc) = val.get("depends").and_then(|d| d.get("minecraft")) {
+                if let Some(s) = mc.as_str() {
+                    return Some(s.to_string());
+                }
+                if let Some(arr) = mc.as_array() {
+                    let joined: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                    if !joined.is_empty() {
+                        return Some(joined.join(" || "));
+                    }
+                }
+            }
+        }
+    }
+
+    for toml_path in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+        if let Ok(entry) = archive.by_name(toml_path) {
+            let mut content = Vec::new();
+            let _ = entry
+                .take(MAX_DESCRIPTOR_SIZE as u64)
+                .read_to_end(&mut content);
+            if let Ok(text) = std::str::from_utf8(&content) {
+                if let Ok(val) = toml::from_str::<toml::Value>(text) {
+                    if let Some(deps_table) = val.get("dependencies").and_then(|v| v.as_table()) {
+                        for arr in deps_table.values().filter_map(|v| v.as_array()) {
+                            for dep in arr {
+                                let is_mc = dep
+                                    .get("modId")
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(|id| id.eq_ignore_ascii_case("minecraft"));
+                                if is_mc {
+                                    if let Some(range) =
+                                        dep.get("versionRange").and_then(|v| v.as_str())
+                                    {
+                                        return Some(range.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Runs preflight validation on `<mods_dir>` for a specific instance loader and Minecraft version.
+pub async fn preflight_check_mods(
+    mods_dir: &Path,
+    instance_loader: ModLoaderKind,
+    instance_mc_version: &str,
+    compute_pool: &ComputePool,
+    epoch_guard: &EpochGuard,
+) -> MqResult<PreflightReport> {
+    let scan = scan_mods_directory(mods_dir, compute_pool, epoch_guard).await?;
+    let mut issues = Vec::new();
+
+    for c in scan.conflicts {
+        match c {
+            ModConflict::DuplicateModId { mod_id, files } => {
+                issues.push(PreflightIssue::DuplicateModId { mod_id, files });
+            }
+            ModConflict::MissingDependency {
+                mod_id,
+                file_name,
+                required_dep,
+            } => {
+                issues.push(PreflightIssue::MissingDependency {
+                    mod_id,
+                    file_name,
+                    required_dep,
+                });
+            }
+        }
+    }
+
+    for m in &scan.mods {
+        if !m.enabled {
+            continue;
+        }
+        if let Some(mod_loader) = m.loader {
+            if !is_loader_compatible(mod_loader, instance_loader) {
+                issues.push(PreflightIssue::WrongLoader {
+                    mod_id: m.mod_id.clone(),
+                    file_name: m.file_name.clone(),
+                    mod_loader,
+                    instance_loader,
+                });
+            }
+        }
+        if let Some(constraint) = extract_jar_mc_constraint(&m.path) {
+            if !satisfies_mc_version_constraint(instance_mc_version, &constraint) {
+                issues.push(PreflightIssue::WrongMcVersion {
+                    mod_id: m.mod_id.clone(),
+                    file_name: m.file_name.clone(),
+                    required_mc: constraint,
+                    instance_mc: instance_mc_version.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(PreflightReport { issues })
+}
+
+/// Automatically fixes fixable preflight issues in `<mods_dir>` by disabling duplicate,
+/// wrong-loader, and wrong-MC-version mods (`.jar` -> `.jar.disabled`).
+pub fn auto_fix_preflight(mods_dir: &Path, report: &PreflightReport) -> MqResult<Vec<String>> {
+    let mut actions = Vec::new();
+    let mut disabled = BTreeSet::new();
+
+    for issue in &report.issues {
+        match issue {
+            PreflightIssue::DuplicateModId { mod_id, files } => {
+                for dup in files.iter().skip(1) {
+                    if disabled.insert(dup.clone()) && mods_dir.join(dup).exists() {
+                        crate::manager::toggle_mod(mods_dir, dup)?;
+                        actions.push(format!("Отключён дубликат '{mod_id}': {dup}"));
+                    }
+                }
+            }
+            PreflightIssue::WrongLoader {
+                file_name,
+                mod_loader,
+                instance_loader,
+                ..
+            } => {
+                if disabled.insert(file_name.clone()) && mods_dir.join(file_name).exists() {
+                    crate::manager::toggle_mod(mods_dir, file_name)?;
+                    actions.push(format!(
+                        "Отключён мод {file_name} (загрузчик {}, нужен {})",
+                        mod_loader.as_str(),
+                        instance_loader.as_str()
+                    ));
+                }
+            }
+            PreflightIssue::WrongMcVersion {
+                file_name,
+                required_mc,
+                instance_mc,
+                ..
+            } => {
+                if disabled.insert(file_name.clone()) && mods_dir.join(file_name).exists() {
+                    crate::manager::toggle_mod(mods_dir, file_name)?;
+                    actions.push(format!(
+                        "Отключён мод {file_name} (требует MC {required_mc}, инстанс {instance_mc})"
+                    ));
+                }
+            }
+            PreflightIssue::MissingDependency { .. } => {}
+        }
+    }
+
+    Ok(actions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,5 +1134,133 @@ mod tests {
         assert_eq!(jei_entry.source, LockSource::CurseForge);
         assert_eq!(jei_entry.project_id, "238222");
         assert_eq!(jei_entry.version_id, "9001");
+    }
+
+    #[tokio::test]
+    async fn preflight_detects_broken_sets_and_auto_fixes() {
+        let dir = tempdir().unwrap();
+
+        let write_fabric_jar = |path: &Path, id: &str, mc_dep: &str, dep_id: Option<&str>| {
+            let f = File::create(path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            zw.start_file("fabric.mod.json", SimpleFileOptions::default())
+                .unwrap();
+            let mut depends = serde_json::Map::new();
+            depends.insert("minecraft".into(), json!(mc_dep));
+            if let Some(d) = dep_id {
+                depends.insert(d.into(), json!("*"));
+            }
+            let manifest = json!({
+                "schemaVersion": 1,
+                "id": id,
+                "version": "1.0.0",
+                "name": id,
+                "depends": depends
+            });
+            zw.write_all(manifest.to_string().as_bytes()).unwrap();
+            zw.finish().unwrap();
+        };
+
+        // 1. Valid Fabric mod on Quilt (compatible!) with missing dependency
+        write_fabric_jar(
+            &dir.path().join("sodium.jar"),
+            "sodium",
+            ">=1.21",
+            Some("fabric-api"),
+        );
+        // 2. Duplicate mod ID
+        write_fabric_jar(&dir.path().join("sodium-dup.jar"), "sodium", ">=1.21", None);
+        // 3. Wrong MC version
+        write_fabric_jar(&dir.path().join("oldmod.jar"), "oldmod", "1.19.4", None);
+        // 4. Wrong loader (Forge mod in Quilt instance)
+        {
+            let f = File::create(dir.path().join("forgemod.jar")).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            zw.start_file("META-INF/mods.toml", SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"forgemod\"\nversion=\"1.0\"\n")
+                .unwrap();
+            zw.finish().unwrap();
+        }
+
+        let pool = ComputePool::new(2);
+        let epoch = mq_sched::CancelEpoch::new();
+        let guard = epoch.snapshot();
+
+        let report =
+            preflight_check_mods(dir.path(), ModLoaderKind::Quilt, "1.21.1", &pool, &guard)
+                .await
+                .unwrap();
+
+        assert!(report
+            .issues
+            .iter()
+            .any(|i| matches!(i, PreflightIssue::MissingDependency { required_dep, .. } if required_dep == "fabric-api")));
+        assert!(report.issues.iter().any(
+            |i| matches!(i, PreflightIssue::DuplicateModId { mod_id, .. } if mod_id == "sodium")
+        ));
+        assert!(report.issues.iter().any(
+            |i| matches!(i, PreflightIssue::WrongMcVersion { mod_id, .. } if mod_id == "oldmod")
+        ));
+        assert!(report.issues.iter().any(
+            |i| matches!(i, PreflightIssue::WrongLoader { mod_id, .. } if mod_id == "forgemod")
+        ));
+
+        let fixes = auto_fix_preflight(dir.path(), &report).unwrap();
+        assert_eq!(fixes.len(), 3);
+        assert!(
+            dir.path().join("sodium.jar").exists() ^ dir.path().join("sodium-dup.jar").exists()
+        );
+        assert!(
+            dir.path().join("sodium.jar.disabled").exists()
+                ^ dir.path().join("sodium-dup.jar.disabled").exists()
+        );
+        assert!(dir.path().join("oldmod.jar.disabled").exists());
+        assert!(dir.path().join("forgemod.jar.disabled").exists());
+    }
+
+    #[tokio::test]
+    async fn fabric_api_satisfies_fabric_submodule_dependencies() {
+        let dir = tempdir().unwrap();
+
+        let write_jar = |path: &Path, id: &str, depends: Option<&str>| {
+            let f = File::create(path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            zw.start_file("fabric.mod.json", SimpleFileOptions::default())
+                .unwrap();
+            let manifest = match depends {
+                Some(dep) => json!({
+                    "id": id,
+                    "version": "1.0.0",
+                    "depends": { dep: "*" }
+                }),
+                None => json!({
+                    "id": id,
+                    "version": "1.0.0"
+                }),
+            };
+            zw.write_all(manifest.to_string().as_bytes()).unwrap();
+            zw.finish().unwrap();
+        };
+
+        write_jar(&dir.path().join("fabric-api.jar"), "fabric-api", None);
+        write_jar(
+            &dir.path().join("iris.jar"),
+            "iris",
+            Some("fabric-api-base"),
+        );
+
+        let pool = ComputePool::new(2);
+        let epoch = mq_sched::CancelEpoch::new();
+        let guard = epoch.snapshot();
+
+        let report = scan_mods_directory(dir.path(), &pool, &guard)
+            .await
+            .unwrap();
+        assert!(
+            report.conflicts.is_empty(),
+            "fabric-api should satisfy fabric-* submodules, got: {:?}",
+            report.conflicts
+        );
     }
 }

@@ -55,10 +55,21 @@ impl Default for AccountsView {
     }
 }
 
+#[inline]
+const fn tr_acc(is_en: bool, ru: &'static str, en: &'static str) -> &'static str {
+    if is_en {
+        en
+    } else {
+        ru
+    }
+}
+
 impl AccountsView {
     pub fn ui(&mut self, ui: &mut Ui, state: &mut UiState) {
+        let is_en = state.config.launcher_locale == "en";
+
         ui.heading(
-            RichText::new("Управление аккаунтами")
+            RichText::new(tr_acc(is_en, "Управление аккаунтами", "Account Management"))
                 .color(TEXT_PRIMARY)
                 .strong(),
         );
@@ -68,11 +79,20 @@ impl AccountsView {
         // 1. Офлайн (только ник)
         // 2. Ely.by (через браузер)
         // 3. Microsoft (через браузер)
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let tabs = [
-                (AccountTab::Offline, "Офлайн (только ник)"),
-                (AccountTab::ElyBy, "Ely.by (через браузер)"),
-                (AccountTab::Microsoft, "Microsoft (через браузер)"),
+                (
+                    AccountTab::Offline,
+                    tr_acc(is_en, "Офлайн (только ник)", "Offline (username only)"),
+                ),
+                (
+                    AccountTab::ElyBy,
+                    tr_acc(is_en, "Ely.by (через браузер)", "Ely.by (browser)"),
+                ),
+                (
+                    AccountTab::Microsoft,
+                    tr_acc(is_en, "Microsoft (через браузер)", "Microsoft (browser)"),
+                ),
             ];
             for (tab, label) in tabs {
                 let is_sel = self.current_tab == tab;
@@ -113,7 +133,7 @@ impl AccountsView {
 
         ui.add_space(12.0);
         ui.heading(
-            RichText::new("Сохранённые профили")
+            RichText::new(tr_acc(is_en, "Сохранённые профили", "Saved Profiles"))
                 .color(TEXT_PRIMARY)
                 .strong(),
         );
@@ -126,8 +146,12 @@ impl AccountsView {
                 let accounts = state.accounts.list_accounts().to_vec();
                 if accounts.is_empty() {
                     ui.label(
-                        RichText::new("Нет сохранённых аккаунтов. Добавьте первый выше!")
-                            .color(TEXT_MUTED),
+                        RichText::new(tr_acc(
+                            is_en,
+                            "Нет сохранённых аккаунтов. Добавьте первый выше!",
+                            "No saved accounts yet. Add one above!",
+                        ))
+                        .color(TEXT_MUTED),
                     );
                 } else {
                     for acc in &accounts {
@@ -188,7 +212,11 @@ impl AccountsView {
                                             };
                                             version_badge(ui, acc.kind.badge_label(), badge_col);
                                             if is_active {
-                                                version_badge(ui, "АКТИВЕН", ACCENT_EMERALD);
+                                                version_badge(
+                                                    ui,
+                                                    tr_acc(is_en, "АКТИВЕН", "ACTIVE"),
+                                                    ACCENT_EMERALD,
+                                                );
                                             }
                                         });
                                         let uuid_w = (ui.available_width() - 8.0).max(40.0);
@@ -226,7 +254,7 @@ impl AccountsView {
                                             if primary_emerald_button(
                                                 ui,
                                                 Some(VectorIcon::Check),
-                                                "Выбрать",
+                                                tr_acc(is_en, "Выбрать", "Select"),
                                             )
                                             .clicked()
                                             {
@@ -247,15 +275,46 @@ impl AccountsView {
     }
 
     fn render_offline_tab(&mut self, ui: &mut Ui, state: &mut UiState) {
+        let is_en = state.config.launcher_locale == "en";
         ui.label(
-            RichText::new("Вход без пароля для одиночной игры и оффлайн-серверов")
-                .color(TEXT_MUTED),
+            RichText::new(tr_acc(
+                is_en,
+                "Вход без пароля для одиночной игры и оффлайн-серверов",
+                "Password-free login for singleplayer and offline servers",
+            ))
+            .color(TEXT_MUTED),
         );
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {
-            ui.label("Никнейм игрока:");
-            ui.text_edit_singleline(&mut self.offline_username);
+            ui.label(tr_acc(is_en, "Никнейм игрока:", "Player username:"));
+            let tokens = crate::theme::Tokens::active(ui.ctx());
+            let frame_resp = egui::Frame::new()
+                .fill(tokens.bg_input)
+                .stroke(Stroke::new(1.0_f32, tokens.border))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.set_min_size(Vec2::new(204.0, 18.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.offline_username)
+                            .frame(false)
+                            .desired_width(204.0)
+                            .vertical_align(egui::Align::Center),
+                    );
+                });
+            crate::components::registry::register_widget(
+                ui,
+                &frame_resp.response,
+                crate::components::registry::ElementMeta::new(
+                    crate::components::registry::ElementKind::Input,
+                )
+                .id("offline_nick_input")
+                .label(tr_acc(is_en, "Никнейм игрока", "Player username"))
+                .text(self.offline_username.as_str())
+                .fg(tokens.text)
+                .bg(tokens.bg_input),
+            );
         });
 
         // Instant preview of computed Offline UUID v3
@@ -265,7 +324,12 @@ impl AccountsView {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(format!(
-                    "Вычисленный Offline UUID v3: {}",
+                    "{}: {}",
+                    tr_acc(
+                        is_en,
+                        "Вычисленный Offline UUID v3",
+                        "Computed Offline UUID v3"
+                    ),
                     computed_uuid.hyphenated()
                 ))
                 .color(ACCENT_COBALT)
@@ -275,28 +339,49 @@ impl AccountsView {
         }
 
         ui.add_space(8.0);
-        if primary_emerald_button(ui, Some(VectorIcon::Plus), "Добавить оффлайн-профиль").clicked()
+        if primary_emerald_button(
+            ui,
+            Some(VectorIcon::Plus),
+            tr_acc(is_en, "Добавить оффлайн-профиль", "Add offline profile"),
+        )
+        .clicked()
         {
             match create_offline_account(clean_nick) {
                 Ok(profile) => {
                     state.accounts.upsert_account(profile, true);
                     let _ = state.accounts.save(&state.paths);
                     state.status_message = Some((
-                        format!("Оффлайн-профиль '{clean_nick}' добавлен и выбран"),
+                        if is_en {
+                            format!("Offline profile '{clean_nick}' added and selected")
+                        } else {
+                            format!("Оффлайн-профиль '{clean_nick}' добавлен и выбран")
+                        },
                         false,
                     ));
                 }
                 Err(e) => {
-                    state.status_message = Some((format!("Ошибка создания профиля: {e}"), true));
+                    state.status_message = Some((
+                        if is_en {
+                            format!("Failed to create profile: {e}")
+                        } else {
+                            format!("Ошибка создания профиля: {e}")
+                        },
+                        true,
+                    ));
                 }
             }
         }
     }
 
     fn render_elyby_tab(&mut self, ui: &mut Ui, state: &mut UiState) {
+        let is_en = state.config.launcher_locale == "en";
         ui.label(
-            RichText::new("Безопасный вход через официальный портал Ely.by в браузере (OAuth2)")
-                .color(TEXT_MUTED),
+            RichText::new(tr_acc(
+                is_en,
+                "Безопасный вход через официальный портал Ely.by в браузере (OAuth2)",
+                "Secure login via the official Ely.by portal in your browser (OAuth2)",
+            ))
+            .color(TEXT_MUTED),
         );
         ui.add_space(6.0);
 
@@ -304,35 +389,62 @@ impl AccountsView {
 
         if self.ely_waiting_browser {
             ui.label(
-                RichText::new("Ожидание подтверждения входа в браузере...")
-                    .color(ACCENT_COBALT)
-                    .strong(),
+                RichText::new(tr_acc(
+                    is_en,
+                    "Ожидание подтверждения входа в браузере...",
+                    "Waiting for browser login confirmation...",
+                ))
+                .color(ACCENT_COBALT)
+                .strong(),
             );
             ui.add_space(6.0);
 
             ui.horizontal(|ui| {
-                if secondary_glass_button(ui, Some(VectorIcon::Globe), "Открыть ссылку ещё раз")
-                    .clicked()
+                if secondary_glass_button(
+                    ui,
+                    Some(VectorIcon::Globe),
+                    tr_acc(is_en, "Открыть ссылку ещё раз", "Open link again"),
+                )
+                .clicked()
                 {
                     if let Some(ref url) = self.ely_auth_url {
                         let _ = crate::opener::open_that(url);
                     }
                 }
-                if secondary_glass_button(ui, Some(VectorIcon::Copy), "Скопировать ссылку")
-                    .clicked()
+                if secondary_glass_button(
+                    ui,
+                    Some(VectorIcon::Copy),
+                    tr_acc(is_en, "Скопировать ссылку", "Copy link"),
+                )
+                .clicked()
                 {
                     if let Some(ref url) = self.ely_auth_url {
                         ui.ctx().copy_text(url.clone());
                         state.status_message = Some((
-                            "Ссылка для авторизации скопирована в буфер обмена".to_string(),
+                            tr_acc(
+                                is_en,
+                                "Ссылка для авторизации скопирована в буфер обмена",
+                                "Authorization link copied to clipboard",
+                            )
+                            .to_string(),
                             false,
                         ));
                     }
                 }
-                if secondary_glass_button(ui, Some(VectorIcon::Cross), "Отмена").clicked() {
+                if secondary_glass_button(
+                    ui,
+                    Some(VectorIcon::Cross),
+                    tr_acc(is_en, "Отмена", "Cancel"),
+                )
+                .clicked()
+                {
                     self.ely_waiting_browser = false;
                     self.ely_cancel_flag.store(true, Ordering::SeqCst);
-                    state.status_message = Some(("Вход через Ely.by отменён".to_string(), false));
+                    state.status_message = Some((
+                        tr_acc(is_en, "Вход через Ely.by отменён", "Ely.by login cancelled")
+                            .to_string(),
+                        false,
+                    ));
                 }
             });
             return;
@@ -341,7 +453,8 @@ impl AccountsView {
         if let Some(client_id) = oauth_cfg.client_id.as_deref() {
             ui.label(
                 RichText::new(format!(
-                    "Настроен клиент ID: {}",
+                    "{}: {}",
+                    tr_acc(is_en, "Настроен клиент ID", "Configured Client ID"),
                     &client_id[..client_id.len().min(8)]
                 ))
                 .color(TEXT_MUTED)
@@ -352,7 +465,11 @@ impl AccountsView {
             if primary_emerald_button(
                 ui,
                 Some(VectorIcon::Globe),
-                "Войти через Ely.by (в браузере)",
+                tr_acc(
+                    is_en,
+                    "Войти через Ely.by (в браузере)",
+                    "Sign in with Ely.by (browser)",
+                ),
             )
             .clicked()
             {
@@ -450,32 +567,67 @@ impl AccountsView {
                 });
             }
         } else {
-            ui.label(RichText::new("Для входа через браузер необходимо указать Client ID приложения Ely.by OAuth2.").color(STATUS_WARN));
             ui.label(
-                RichText::new("1. Зарегистрируйте приложение на account.ely.by/dev/applications")
-                    .color(TEXT_MUTED)
-                    .small(),
+                RichText::new(tr_acc(
+                    is_en,
+                    "Для входа через браузер необходимо указать Client ID приложения Ely.by OAuth2.",
+                    "To sign in via browser, configure an Ely.by OAuth2 Client ID.",
+                ))
+                .color(STATUS_WARN),
             );
             ui.label(
-                RichText::new("2. Укажите Redirect URI: http://127.0.0.1:25585/callback")
-                    .color(TEXT_MUTED)
-                    .small(),
+                RichText::new(tr_acc(
+                    is_en,
+                    "1. Зарегистрируйте приложение на account.ely.by/dev/applications",
+                    "1. Register an app at account.ely.by/dev/applications",
+                ))
+                .color(TEXT_MUTED)
+                .small(),
             );
-            ui.label(RichText::new("3. Задайте переменную окружения MQ_ELYBY_CLIENT_ID=<id> или пропишите в config.toml").color(TEXT_MUTED).small());
+            ui.label(
+                RichText::new(tr_acc(
+                    is_en,
+                    "2. Укажите Redirect URI: http://127.0.0.1:25585/callback",
+                    "2. Set Redirect URI: http://127.0.0.1:25585/callback",
+                ))
+                .color(TEXT_MUTED)
+                .small(),
+            );
+            ui.label(
+                RichText::new(tr_acc(
+                    is_en,
+                    "3. Задайте переменную окружения MQ_ELYBY_CLIENT_ID=<id> или пропишите в config.toml",
+                    "3. Set MQ_ELYBY_CLIENT_ID=<id> or configure it in config.toml",
+                ))
+                .color(TEXT_MUTED)
+                .small(),
+            );
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if primary_emerald_button(
                     ui,
                     Some(VectorIcon::Globe),
-                    "Зарегистрировать приложение на Ely.by",
+                    tr_acc(
+                        is_en,
+                        "Зарегистрировать приложение на Ely.by",
+                        "Register app on Ely.by",
+                    ),
                 )
                 .clicked()
                 {
                     let _ = crate::opener::open_that("https://account.ely.by/dev/applications");
                 }
-                if secondary_glass_button(ui, Some(VectorIcon::Globe), "Создать аккаунт на Ely.by")
-                    .clicked()
+                if secondary_glass_button(
+                    ui,
+                    Some(VectorIcon::Globe),
+                    tr_acc(
+                        is_en,
+                        "Создать аккаунт на Ely.by",
+                        "Create Ely.by account",
+                    ),
+                )
+                .clicked()
                 {
                     let _ = crate::opener::open_that("https://ely.by/registration");
                 }
@@ -484,23 +636,47 @@ impl AccountsView {
     }
 
     fn render_msa_tab(&mut self, ui: &mut Ui, state: &mut UiState) {
+        let is_en = state.config.launcher_locale == "en";
         ui.label(
-            RichText::new("Официальная лицензия Microsoft (Device Code Flow)").color(TEXT_MUTED),
+            RichText::new(tr_acc(
+                is_en,
+                "Официальная лицензия Microsoft (Device Code Flow)",
+                "Official Microsoft Account (Device Code Flow)",
+            ))
+            .color(TEXT_MUTED),
         );
         ui.add_space(6.0);
 
         if state.config.effective_ms_client_id().is_none() {
-            ui.label(RichText::new("Для входа по лицензии Microsoft укажите Client ID в MQ_MS_CLIENT_ID или настройках (Офлайн-режим и Ely.by работают сразу из коробки).").color(STATUS_WARN).small());
+            ui.label(
+                RichText::new(tr_acc(
+                    is_en,
+                    "Для входа по лицензии Microsoft укажите Client ID в MQ_MS_CLIENT_ID или настройках (Офлайн-режим и Ely.by работают сразу из коробки).",
+                    "To sign in with Microsoft, set Client ID in MQ_MS_CLIENT_ID or Settings (Offline and Ely.by work out of the box).",
+                ))
+                .color(STATUS_WARN)
+                .small(),
+            );
             ui.add_space(6.0);
         }
 
         if let Some(prompt) = &self.msa_device_code_prompt {
             ui.label(RichText::new(prompt).color(ACCENT_COBALT).strong());
-        } else if primary_emerald_button(ui, Some(VectorIcon::User), "Войти через Microsoft")
-            .clicked()
+        } else if primary_emerald_button(
+            ui,
+            Some(VectorIcon::User),
+            tr_acc(is_en, "Войти через Microsoft", "Sign in with Microsoft"),
+        )
+        .clicked()
         {
-            self.msa_device_code_prompt =
-                Some("Откройте https://microsoft.com/link и введите код...".to_string());
+            self.msa_device_code_prompt = Some(
+                tr_acc(
+                    is_en,
+                    "Откройте https://microsoft.com/link и введите код...",
+                    "Open https://microsoft.com/link and enter the code...",
+                )
+                .to_string(),
+            );
         }
     }
 }

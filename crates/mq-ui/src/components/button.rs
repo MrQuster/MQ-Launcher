@@ -7,6 +7,42 @@ use crate::components::registry::{icon_tech_name, register_widget, ElementKind, 
 use crate::theme::{Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_vector_icon, VectorIcon};
 
+fn srgb_channel_to_linear(c: u8) -> f32 {
+    let s = c as f32 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn relative_luminance(c: egui::Color32) -> f32 {
+    0.2126 * srgb_channel_to_linear(c.r())
+        + 0.7152 * srgb_channel_to_linear(c.g())
+        + 0.0722 * srgb_channel_to_linear(c.b())
+}
+
+fn wcag_contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+    let l1 = relative_luminance(a);
+    let l2 = relative_luminance(b);
+    let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Ensures button foreground text/icon meets WCAG AA (`>= 4.5:1`) against `bg`.
+pub(crate) fn contrast_fg_for_bg(preferred_fg: egui::Color32, bg: egui::Color32) -> egui::Color32 {
+    if wcag_contrast(preferred_fg, bg) >= 4.5 {
+        return preferred_fg;
+    }
+    let dark_ink = egui::Color32::from_rgb(0x0B, 0x10, 0x14);
+    let light_ink = egui::Color32::WHITE;
+    if wcag_contrast(dark_ink, bg) >= wcag_contrast(light_ink, bg) {
+        dark_ink
+    } else {
+        light_ink
+    }
+}
+
 /// Renders a primary action button (e.g. "Играть", "Создать", "Сохранить")
 /// using the single accent color (`#4C9A82` in Matte Dark) with high contrast text.
 pub fn button_primary(
@@ -15,12 +51,16 @@ pub fn button_primary(
     icon: Option<VectorIcon>,
     text: &str,
 ) -> Response {
+    let base_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.26);
+    let hover_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.38);
+    let active_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.44);
+    let fg_color = contrast_fg_for_bg(tokens.text, base_bg);
     let text_w = ui
         .painter()
         .layout_no_wrap(
             text.to_owned(),
             egui::FontId::proportional(13.5),
-            tokens.accent_text,
+            fg_color,
         )
         .size()
         .x;
@@ -32,15 +72,22 @@ pub fn button_primary(
     }
 
     let bg_color = if response.is_pointer_button_down_on() {
-        tokens.accent
+        active_bg
     } else if response.hovered() {
-        tokens.accent_hover
+        hover_bg
     } else {
-        tokens.accent
+        base_bg
     };
+    let fg_color = contrast_fg_for_bg(tokens.text, bg_color);
 
     let painter = ui.painter();
     painter.rect_filled(rect, RADIUS_BUTTON, bg_color);
+    painter.rect_stroke(
+        rect,
+        RADIUS_BUTTON,
+        Stroke::new(1.5_f32, tokens.accent),
+        egui::StrokeKind::Inside,
+    );
 
     if response.has_focus() {
         painter.rect_stroke(
@@ -57,7 +104,7 @@ pub fn button_primary(
             egui::pos2(content_left, rect.center().y - 8.0),
             Vec2::splat(16.0),
         );
-        paint_vector_icon(painter, icon_rect, ic, tokens.accent_text);
+        paint_vector_icon(painter, icon_rect, ic, fg_color);
         content_left += 22.0;
     }
 
@@ -67,18 +114,20 @@ pub fn button_primary(
         egui::Align2::LEFT_TOP,
         text,
         egui::FontId::proportional(13.5),
-        tokens.accent_text,
+        fg_color,
     );
 
-    register_widget(
-        ui,
-        &response,
-        ElementMeta::new(ElementKind::Button)
-            .label(text)
-            .text(text)
-            .fg(tokens.accent_text)
-            .bg(bg_color),
-    );
+    if ui.is_enabled() {
+        register_widget(
+            ui,
+            &response,
+            ElementMeta::new(ElementKind::Button)
+                .label(text)
+                .text(text)
+                .fg(fg_color)
+                .bg(bg_color),
+        );
+    }
 
     response
 }
@@ -151,15 +200,17 @@ pub fn button_secondary(
         tokens.text,
     );
 
-    register_widget(
-        ui,
-        &response,
-        ElementMeta::new(ElementKind::Button)
-            .label(text)
-            .text(text)
-            .fg(tokens.text)
-            .bg(bg_color),
-    );
+    if ui.is_enabled() {
+        register_widget(
+            ui,
+            &response,
+            ElementMeta::new(ElementKind::Button)
+                .label(text)
+                .text(text)
+                .fg(tokens.text)
+                .bg(bg_color),
+        );
+    }
 
     response
 }

@@ -1,0 +1,74 @@
+name: ui_keyboard_dead_buttons
+description: Keyboard navigation (Ctrl+N, Tab, Esc), sidebar toggle, offline account creation, and locale switch.
+deterministic: true
+steps:
+  - set_scale:
+      scale: 1.0
+  - frame_stats: reset
+  - key:
+      key: n
+      modifiers: ["ctrl"]
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - key:
+      key: Escape
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - key:
+      key: Tab
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - set_flag:
+      name: toggle_sidebar
+      value: true
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - set_flag:
+      name: toggle_sidebar
+      value: true
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - goto:
+      tab: Accounts
+  - click:
+      label: "Офлайн (только ник)"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - type:
+      id: "offline_nick_input"
+      text: "QaPlayer1"
+      clear: true
+      allow_noop: true
+  - click:
+      label: "Добавить оффлайн-профиль"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - set_flag:
+      name: locale
+      value: "en"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - set_flag:
+      name: locale
+      value: "ru"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - frame_stats: get
+  - quit: {}

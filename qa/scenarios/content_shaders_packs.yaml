@@ -1,0 +1,48 @@
+name: content_shaders_packs
+description: Shaders and resource packs catalog search on Modrinth and instances view navigation.
+deterministic: true
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - frame_stats: reset
+  - goto:
+      tab: "catalog"
+  - wait_for:
+      label: "Поиск по названию"
+      timeout_ms: 8000
+  - click:
+      label: "Шейдеры"
+  - click:
+      label: "Modrinth"
+  - type:
+      label: "Поиск по названию"
+      text: "Complementary"
+      clear: true
+  - key:
+      key: "Enter"
+  - wait_for:
+      label: "Подробнее"
+      timeout_ms: 20000
+  - screenshot: {}
+  - click:
+      label: "Ресурспаки"
+  - type:
+      label: "Поиск по названию"
+      text: "Faithful"
+      clear: true
+  - key:
+      key: "Enter"
+  - wait_for:
+      label: "Подробнее"
+      timeout_ms: 20000
+  - screenshot: {}
+  - goto:
+      tab: "instances"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - screenshot: {}
+  - frame_stats: get
+  - state: {}
+  - quit: {}
