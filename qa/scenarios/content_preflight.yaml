@@ -1,0 +1,57 @@
+name: content_preflight
+description: Instance detail tabs for Mods (preflight & unused deps cleanup), Shaders (OpenGL & Iris/Oculus diagnostics), and ResourcePacks.
+deterministic: true
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - frame_stats: reset
+  - goto:
+      tab: "instances"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - set_flag:
+      name: demo_instances
+      value: true
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - click:
+      label: "Детали"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - click:
+      label: "Моды"
+  - wait_for:
+      label: "Проверить зависимости"
+      timeout_ms: 5000
+  - click:
+      label: "Проверить зависимости"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - screenshot: {}
+  - click:
+      label: "Удалить неиспользуемые"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - screenshot: {}
+  - click:
+      label: "Шейдеры"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - screenshot: {}
+  - click:
+      label: "Ресурспаки"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - screenshot: {}
+  - dump_ui: {}
+  - frame_stats: get
+  - state: {}
+  - quit: {}
