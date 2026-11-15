@@ -482,6 +482,8 @@ impl CatalogView {
             );
             if resp.clicked() && cat.source != filter {
                 cat.source = filter;
+                cat.hits.clear();
+                cat.searched = false;
                 changed = true;
             }
         }
@@ -505,7 +507,9 @@ impl CatalogView {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut cat.query)
                     .hint_text("Поиск по названию")
-                    .desired_width((ui.available_width() - 8.0).max(160.0)),
+                    .desired_width((ui.available_width() - 8.0).max(160.0))
+                    .margin(egui::Margin::symmetric(8, 6))
+                    .min_size(Vec2::new(0.0, 28.0)),
             );
             register_widget(
                 ui,
@@ -902,9 +906,9 @@ impl CatalogView {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                version_badge(ui, source_name(hit.source), source_color(hit.source));
+                version_badge(ui, source_name(hit.source), tokens.text_muted);
                 for l in hit.loaders.iter().take(4) {
-                    version_badge(ui, l, ACCENT_COBALT);
+                    version_badge(ui, l, tokens.text_muted);
                 }
                 if installed {
                     version_badge(ui, "Установлен", tokens.accent);

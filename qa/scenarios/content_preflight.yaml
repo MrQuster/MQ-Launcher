@@ -1,5 +1,5 @@
 name: content_preflight
-description: Instance detail tabs for Mods (preflight & unused deps cleanup), Shaders (OpenGL & Iris/Oculus diagnostics), and ResourcePacks.
+description: Create a real instance via UI and verify Mods preflight/unused-deps, Shaders (OpenGL), and ResourcePacks tabs.
 deterministic: true
 viewport:
   width: 1280
@@ -11,17 +11,21 @@ steps:
   - wait_idle:
       timeout_ms: 5000
       frames: 2
-  - set_flag:
-      name: demo_instances
-      value: true
-  - wait_idle:
+  - click:
+      label: "Создать инстанс"
+  - wait_for:
+      label: "Отмена"
       timeout_ms: 5000
-      frames: 2
+  - click:
+      label: "Создать инстанс"
+  - wait_for:
+      label: "Детали"
+      timeout_ms: 8000
   - click:
       label: "Детали"
-  - wait_idle:
+  - wait_for:
+      label: "Моды"
       timeout_ms: 5000
-      frames: 2
   - click:
       label: "Моды"
   - wait_for:
@@ -29,27 +33,24 @@ steps:
       timeout_ms: 5000
   - click:
       label: "Проверить зависимости"
-  - wait_idle:
+  - wait_for:
+      label: "Удалить неиспользуемые"
       timeout_ms: 5000
-      frames: 2
   - screenshot: {}
   - click:
       label: "Удалить неиспользуемые"
-  - wait_idle:
-      timeout_ms: 5000
-      frames: 2
   - screenshot: {}
   - click:
       label: "Шейдеры"
-  - wait_idle:
+  - wait_for:
+      label: "Ресурспаки"
       timeout_ms: 5000
-      frames: 2
   - screenshot: {}
   - click:
       label: "Ресурспаки"
-  - wait_idle:
+  - wait_for:
+      label: "Шейдеры"
       timeout_ms: 5000
-      frames: 2
   - screenshot: {}
   - dump_ui: {}
   - frame_stats: get
