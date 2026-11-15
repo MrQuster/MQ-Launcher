@@ -502,21 +502,34 @@ impl CatalogView {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
             paint_vector_icon(ui.painter(), rect, VectorIcon::Search, ACCENT_COBALT);
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut cat.query)
-                    .hint_text("Поиск по названию")
-                    .desired_width((ui.available_width() - 8.0).max(160.0)),
-            );
+            let input_w = (ui.available_width() - 24.0).max(144.0);
+            let mut inner_changed = false;
+            let frame_resp = egui::Frame::new()
+                .fill(tokens.bg_input)
+                .stroke(Stroke::new(1.0_f32, tokens.border))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.set_min_size(Vec2::new(input_w, 18.0));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut cat.query)
+                            .frame(false)
+                            .hint_text("Поиск по названию")
+                            .desired_width(input_w)
+                            .vertical_align(egui::Align::Center),
+                    );
+                    inner_changed = resp.changed();
+                });
             register_widget(
                 ui,
-                &resp,
+                &frame_resp.response,
                 ElementMeta::new(ElementKind::Input)
                     .label("Поиск по названию")
                     .text(cat.query.as_str())
                     .fg(tokens.text)
                     .bg(tokens.bg_input),
             );
-            changed |= resp.changed();
+            changed |= inner_changed;
         });
         changed
     }
