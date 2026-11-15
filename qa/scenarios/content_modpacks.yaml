@@ -17,7 +17,7 @@ steps:
       label: "Modrinth"
   - type:
       label: "Поиск по названию"
-      text: "Fabulously Optimized"
+      text: "All the Mods"
       clear: true
   - key:
       key: "Enter"
@@ -31,7 +31,7 @@ steps:
       timeout_ms: 5000
       frames: 2
   - drop_file:
-      path: "/tmp/mq-qa/content/fixtures/sample-pack.mrpack"
+      path: "qa/fixtures/sample-pack.mrpack"
   - wait_for:
       label: "Установить"
       timeout_ms: 5000
