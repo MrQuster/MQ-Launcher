@@ -1,0 +1,42 @@
+name: content_modpacks
+description: Modpack search on Modrinth and local .mrpack import via drop_file.
+deterministic: true
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - frame_stats: reset
+  - goto:
+      tab: "catalog"
+  - wait_for:
+      label: "Поиск по названию"
+      timeout_ms: 8000
+  - click:
+      label: "Сборки"
+  - click:
+      label: "Modrinth"
+  - type:
+      label: "Поиск по названию"
+      text: "Fabulously Optimized"
+      clear: true
+  - key:
+      key: "Enter"
+  - wait_for:
+      label: "Подробнее"
+      timeout_ms: 25000
+  - screenshot: {}
+  - goto:
+      tab: "instances"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - drop_file:
+      path: "/tmp/mq-qa/content/fixtures/sample-pack.mrpack"
+  - wait_for:
+      label: "Установить"
+      timeout_ms: 5000
+  - screenshot: {}
+  - dump_ui: {}
+  - frame_stats: get
+  - state: {}
+  - quit: {}
