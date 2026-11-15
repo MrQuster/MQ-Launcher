@@ -678,15 +678,13 @@ impl MqApp {
                 }
                 UiWorkerCommand::StopGame { instance_id } => {
                     self.state.stopped_by_user.insert(instance_id.clone());
-                    if let Some(Some(pid)) =
-                        self.state.running_instances.get(&instance_id).copied()
+                    if let Some(Some(pid)) = self.state.running_instances.get(&instance_id).copied()
                     {
                         tokio::spawn(async move {
                             let _ = mq_launch::kill_process_tree(pid);
                         });
                     }
-                    self.state.status_message =
-                        Some(("Остановка игры...".to_string(), false));
+                    self.state.status_message = Some(("Остановка игры...".to_string(), false));
                 }
                 UiWorkerCommand::CancelDownload => {
                     self.state.cancel_epoch.cancel_and_advance();

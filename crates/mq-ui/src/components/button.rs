@@ -57,11 +57,7 @@ pub fn button_primary(
     let fg_color = contrast_fg_for_bg(tokens.text, base_bg);
     let text_w = ui
         .painter()
-        .layout_no_wrap(
-            text.to_owned(),
-            egui::FontId::proportional(13.5),
-            fg_color,
-        )
+        .layout_no_wrap(text.to_owned(), egui::FontId::proportional(13.5), fg_color)
         .size()
         .x;
     let width = text_w + if icon.is_some() { 46.0 } else { 24.0 };

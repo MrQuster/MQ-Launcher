@@ -11,8 +11,8 @@ use mq_auth::{generate_offline_geometric_avatar, SkinHeadAvatar};
 
 use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{
-    blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD,
-    BORDER_SUBTLE, BUTTON_PADDING, CARD_SURFACE, RADIUS_BUTTON, RADIUS_TAG, TEXT_PRIMARY,
+    blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BORDER_SUBTLE, BUTTON_PADDING,
+    CARD_SURFACE, RADIUS_BUTTON, RADIUS_TAG, TEXT_PRIMARY,
 };
 
 /// Crisp vector icons drawn procedurally via [`egui::Painter`] (strict zero-emoji policy).

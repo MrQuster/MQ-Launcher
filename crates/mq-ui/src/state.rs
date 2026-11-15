@@ -674,7 +674,8 @@ impl UiState {
                     self.last_game_exit_code = Some(exit_code);
                     let was_stopped = self.stopped_by_user.remove(&instance_id);
                     if was_stopped {
-                        self.status_message = Some(("Игра остановлена пользователем".to_string(), false));
+                        self.status_message =
+                            Some(("Игра остановлена пользователем".to_string(), false));
                         self.crash_analysis = None;
                     } else {
                         self.status_message = Some((

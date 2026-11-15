@@ -55,7 +55,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwayland-dev libxkbcommon-dev libx11-dev libx11-xcb-dev
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libx11-dev libx11-xcb-dev xvfb libgl1-mesa-dri libegl1 python3-yaml python3-numpy python3-pil
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
@@ -88,6 +88,18 @@ jobs:
         run: |
           ./target/release/mq --version
           ./target/release/mq launch --dry-run || true
+
+      - name: Verify no test-hooks in release binary
+        run: |
+          ! strings ./target/release/mq | grep -qE 'MQ_TEST_(ACTION|MOCK_URL|CANCEL_AFTER_MS|EXIT_ON_FINISH)'
+
+      - name: Build debug binary with test-hooks
+        run: cargo build --locked --bin mq --features test-hooks
+
+      - name: Run QA smoke scenario (Xvfb + glow)
+        timeout-minutes: 10
+        run: |
+          ./scripts/qa/xvfb_run.sh --no-fallback -- python3 scripts/qa/run.py --no-build --bin target/debug/mq --backend glow --out-dir "${{ runner.temp }}/qa-smoke" qa/scenarios/smoke.yaml
 
   test-windows:
     name: Test & Build Windows (x86_64)

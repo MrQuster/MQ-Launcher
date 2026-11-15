@@ -621,11 +621,7 @@ impl AccountsView {
                 if secondary_glass_button(
                     ui,
                     Some(VectorIcon::Globe),
-                    tr_acc(
-                        is_en,
-                        "Создать аккаунт на Ely.by",
-                        "Create Ely.by account",
-                    ),
+                    tr_acc(is_en, "Создать аккаунт на Ely.by", "Create Ely.by account"),
                 )
                 .clicked()
                 {

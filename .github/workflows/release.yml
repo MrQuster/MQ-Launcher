@@ -47,7 +47,11 @@ jobs:
       - name: Build release binary
         env:
           MQ_CURSEFORGE_API_KEY: ${{ secrets.MQ_CURSEFORGE_API_KEY }}
-        run: cargo build --release -p mq-cli
+        run: cargo build --release --locked -p mq-cli
+
+      - name: Verify no test-hooks in release binary
+        run: |
+          ! strings target/release/mq | grep -qE 'MQ_TEST_(ACTION|MOCK_URL|CANCEL_AFTER_MS|EXIT_ON_FINISH)'
 
       - name: Prepare Linux artifacts
         run: |
@@ -100,7 +104,14 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
           MQ_CURSEFORGE_API_KEY: ${{ secrets.MQ_CURSEFORGE_API_KEY }}
-        run: cargo build --release -p mq-cli
+        run: cargo build --release --locked -p mq-cli
+
+      - name: Verify no test-hooks in release binary
+        shell: pwsh
+        run: |
+          if (Select-String -Path "target\release\mq.exe" -Pattern "MQ_TEST_(ACTION|MOCK_URL|CANCEL_AFTER_MS|EXIT_ON_FINISH)" -Quiet) {
+            throw "Release binary unexpectedly contains test-hooks markers!"
+          }
 
       - name: Verify static CRT
         shell: pwsh

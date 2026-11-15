@@ -29,96 +29,95 @@ pub fn underline_tabs<T: Copy + PartialEq>(
 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(12.0, 4.0);
-                for &(tab, label, opt_icon) in tabs {
-                    let is_selected = *current == tab;
-                    let text_color = if is_selected {
-                        tokens.text
-                    } else {
-                        tokens.text_muted
-                    };
+        for &(tab, label, opt_icon) in tabs {
+            let is_selected = *current == tab;
+            let text_color = if is_selected {
+                tokens.text
+            } else {
+                tokens.text_muted
+            };
 
-                    let text_w = ui
-                        .painter()
-                        .layout_no_wrap(
-                            label.to_owned(),
-                            egui::FontId::proportional(13.5),
-                            text_color,
-                        )
-                        .size()
-                        .x;
-                    let mut width = text_w + 20.0;
-                    if opt_icon.is_some() {
-                        width += 20.0;
-                    }
-                    width = width.max(48.0);
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(
+                    label.to_owned(),
+                    egui::FontId::proportional(13.5),
+                    text_color,
+                )
+                .size()
+                .x;
+            let mut width = text_w + 20.0;
+            if opt_icon.is_some() {
+                width += 20.0;
+            }
+            width = width.max(48.0);
 
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
+            let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
 
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-                    }
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
 
-                    if response.clicked() {
-                        *current = tab;
-                        main_resp.mark_changed();
-                    }
+            if response.clicked() {
+                *current = tab;
+                main_resp.mark_changed();
+            }
 
-                    let painter = ui.painter();
+            let painter = ui.painter();
 
-                    if response.hovered() && !is_selected {
-                        painter.rect_filled(
-                            rect.shrink2(Vec2::new(2.0, 4.0)),
-                            RADIUS_BUTTON,
-                            tokens.bg_surface_hover.gamma_multiply(0.4),
-                        );
-                    }
+            if response.hovered() && !is_selected {
+                painter.rect_filled(
+                    rect.shrink2(Vec2::new(2.0, 4.0)),
+                    RADIUS_BUTTON,
+                    tokens.bg_surface_hover.gamma_multiply(0.4),
+                );
+            }
 
-                    let mut text_x = rect.center().x;
-                    if let Some(icon) = opt_icon {
-                        let icon_rect = egui::Rect::from_center_size(
-                            egui::pos2(rect.left() + 14.0, rect.center().y - 1.0),
-                            Vec2::splat(14.0),
-                        );
-                        paint_vector_icon(painter, icon_rect, icon, text_color);
-                        text_x = rect.left() + 26.0;
-                    }
+            let mut text_x = rect.center().x;
+            if let Some(icon) = opt_icon {
+                let icon_rect = egui::Rect::from_center_size(
+                    egui::pos2(rect.left() + 14.0, rect.center().y - 1.0),
+                    Vec2::splat(14.0),
+                );
+                paint_vector_icon(painter, icon_rect, icon, text_color);
+                text_x = rect.left() + 26.0;
+            }
 
-                    let text_align = if opt_icon.is_some() {
-                        egui::Align2::LEFT_CENTER
-                    } else {
-                        egui::Align2::CENTER_CENTER
-                    };
+            let text_align = if opt_icon.is_some() {
+                egui::Align2::LEFT_CENTER
+            } else {
+                egui::Align2::CENTER_CENTER
+            };
 
-                    painter.text(
-                        egui::pos2(text_x, rect.center().y - 2.0),
-                        text_align,
-                        label,
-                        egui::FontId::proportional(13.5),
-                        text_color,
-                    );
+            painter.text(
+                egui::pos2(text_x, rect.center().y - 2.0),
+                text_align,
+                label,
+                egui::FontId::proportional(13.5),
+                text_color,
+            );
 
-                    if is_selected {
-                        painter.line_segment(
-                            [
-                                egui::pos2(rect.left(), rect.bottom() - 1.0),
-                                egui::pos2(rect.right(), rect.bottom() - 1.0),
-                            ],
-                            Stroke::new(2.5_f32, tokens.accent),
-                        );
-                    }
+            if is_selected {
+                painter.line_segment(
+                    [
+                        egui::pos2(rect.left(), rect.bottom() - 1.0),
+                        egui::pos2(rect.right(), rect.bottom() - 1.0),
+                    ],
+                    Stroke::new(2.5_f32, tokens.accent),
+                );
+            }
 
-                    let mut meta = ElementMeta::new(ElementKind::Tab)
-                        .label(label)
-                        .text(label)
-                        .active(is_selected)
-                        .fg(text_color)
-                        .bg(tokens.bg_app);
-                    if let Some(icon) = opt_icon {
-                        meta = meta.tech_name(icon_tech_name(icon));
-                    }
-                    register_widget(ui, &response, meta);
-                }
+            let mut meta = ElementMeta::new(ElementKind::Tab)
+                .label(label)
+                .text(label)
+                .active(is_selected)
+                .fg(text_color)
+                .bg(tokens.bg_app);
+            if let Some(icon) = opt_icon {
+                meta = meta.tech_name(icon_tech_name(icon));
+            }
+            register_widget(ui, &response, meta);
+        }
     });
 
     main_resp
