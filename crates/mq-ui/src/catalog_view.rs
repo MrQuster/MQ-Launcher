@@ -89,16 +89,16 @@ pub fn source_error_text(source: CatalogSource, kind: CatalogErrorKind) -> Strin
 }
 
 fn is_deterministic_test_mode(_ctx: &egui::Context) -> bool {
-    if std::env::var("MQ_TEST_DETERMINISTIC")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    {
-        return true;
-    }
+    let env_enabled = std::env::var("MQ_TEST_DETERMINISTIC")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     #[cfg(feature = "test-hooks")]
-    if crate::test_hooks::is_solid_background(_ctx) {
-        return true;
+    {
+        env_enabled || crate::test_hooks::is_solid_background(_ctx)
     }
-    false
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        env_enabled
+    }
 }
 
 pub const fn source_name(source: CatalogSource) -> &'static str {
