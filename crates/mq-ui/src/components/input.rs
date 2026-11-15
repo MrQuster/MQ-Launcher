@@ -75,14 +75,16 @@ impl<'a> SearchField<'a> {
         let right_pad = if has_clear_btn { 26.0 } else { 8.0 };
 
         let text_rect = egui::Rect::from_min_max(
-            egui::pos2(outer_rect.left() + 28.0, outer_rect.top() + 4.0),
-            egui::pos2(outer_rect.right() - right_pad, outer_rect.bottom() - 4.0),
+            egui::pos2(outer_rect.left() + 28.0, outer_rect.top() + 2.0),
+            egui::pos2(outer_rect.right() - right_pad, outer_rect.bottom() - 2.0),
         );
 
         let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
         let mut text_edit = TextEdit::singleline(self.query)
             .hint_text(self.placeholder)
             .text_color(tokens.text)
+            .min_size(text_rect.size())
+            .vertical_align(egui::Align::Center)
             .frame(false);
 
         let edit_id = ui.make_persistent_id(("search_field_edit", self.placeholder));
@@ -102,7 +104,7 @@ impl<'a> SearchField<'a> {
         if has_clear_btn {
             let clear_rect = egui::Rect::from_center_size(
                 egui::pos2(outer_rect.right() - 14.0, outer_rect.center().y),
-                Vec2::splat(16.0),
+                Vec2::splat(24.0),
             );
             let clear_id = ui.make_persistent_id(("search_clear_btn", self.placeholder));
             let clear_resp = ui.interact(clear_rect, clear_id, egui::Sense::click());
@@ -118,15 +120,18 @@ impl<'a> SearchField<'a> {
             } else {
                 tokens.text_muted
             };
-            paint_vector_icon(ui.painter(), clear_rect, VectorIcon::Cross, clear_color);
+            let icon_rect = egui::Rect::from_center_size(clear_rect.center(), Vec2::splat(14.0));
+            paint_vector_icon(ui.painter(), icon_rect, VectorIcon::Cross, clear_color);
             register_widget(
                 ui,
                 &clear_resp,
                 ElementMeta::new(ElementKind::IconButton)
                     .tech_name(icon_tech_name(VectorIcon::Cross))
+                    .tooltip("Очистить поиск")
                     .fg(clear_color)
                     .bg(tokens.bg_input),
             );
+            let _ = clear_resp.on_hover_text("Очистить поиск");
         }
 
         if resp.has_focus() {

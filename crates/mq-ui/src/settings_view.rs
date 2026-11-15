@@ -911,7 +911,10 @@ impl SettingsView {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.mc_locale_search)
                         .hint_text("Поиск по всем 80+ языкам Minecraft (напр. українська, русский, polski)...")
-                        .desired_width(340.0),
+                        .desired_width(340.0)
+                        .min_size(Vec2::new(340.0, 26.0))
+                        .margin(egui::Margin::symmetric(8, 5))
+                        .vertical_align(egui::Align::Center),
                 );
                 register_widget(
                     ui,

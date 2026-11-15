@@ -11,7 +11,7 @@ use mq_auth::{generate_offline_geometric_avatar, SkinHeadAvatar};
 
 use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{
-    blend_color, contrast_text_for, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BG_DEEP_GRAPHITE,
+    blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BG_DEEP_GRAPHITE,
     BORDER_SUBTLE, BUTTON_PADDING, CARD_SURFACE, RADIUS_BUTTON, RADIUS_TAG, TEXT_PRIMARY,
 };
 
@@ -528,6 +528,7 @@ fn render_styled_button(
 /// Primary accent action button (`tokens.accent` fill, high-contrast ink text/icon, `6px` rounding).
 pub fn primary_emerald_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str) -> Response {
     let tokens = Tokens::active(ui.ctx());
+    let fg_color = crate::components::button::contrast_fg_for_bg(tokens.accent_text, tokens.accent);
     render_styled_button(
         ui,
         icon,
@@ -536,7 +537,7 @@ pub fn primary_emerald_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str
         tokens.accent_hover,
         tokens.accent,
         tokens.text,
-        tokens.accent_text,
+        fg_color,
     )
 }
 
@@ -558,6 +559,7 @@ pub fn secondary_glass_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str
 /// Danger / destructive action button (`tokens.danger` border/accent, `6px` rounding).
 pub fn danger_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str) -> Response {
     let tokens = Tokens::active(ui.ctx());
+    let fg = crate::components::button::contrast_fg_for_bg(tokens.danger, tokens.bg_surface);
     render_styled_button(
         ui,
         icon,
@@ -566,7 +568,7 @@ pub fn danger_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str) -> Resp
         blend_color(tokens.bg_surface, tokens.danger, 0.18),
         tokens.danger.gamma_multiply(0.65),
         tokens.danger,
-        tokens.danger,
+        fg,
     )
 }
 
@@ -577,7 +579,7 @@ pub fn accent_button(
     label: &str,
     accent_color: Color32,
 ) -> Response {
-    let fg = contrast_text_for(accent_color);
+    let fg = crate::components::button::contrast_fg_for_bg(Color32::WHITE, accent_color);
     let font_id = FontId::proportional(13.5);
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font_id, fg);
     let icon_w = if icon.is_some() { 16.0 + 8.0 } else { 0.0 };
@@ -628,8 +630,9 @@ pub fn accent_button(
 /// Animated smooth toggle switch with sliding knob.
 pub fn smooth_toggle(ui: &mut Ui, on: &mut bool) -> Response {
     let tokens = Tokens::active(ui.ctx());
-    let desired_size = Vec2::new(40.0, 22.0);
+    let desired_size = Vec2::new(40.0, 24.0);
     let (rect, mut response) = ui.allocate_exact_size(desired_size, Sense::click());
+    let pill_rect = Rect::from_center_size(rect.center(), Vec2::new(40.0, 22.0));
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
@@ -637,20 +640,20 @@ pub fn smooth_toggle(ui: &mut Ui, on: &mut bool) -> Response {
 
     let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.18);
 
-    if ui.is_rect_visible(rect) {
+    if ui.is_rect_visible(pill_rect) {
         let painter = ui.painter();
         let bg = blend_color(tokens.bg_input, tokens.accent, t);
 
-        painter.rect_filled(rect, CornerRadius::same(11), bg);
+        painter.rect_filled(pill_rect, CornerRadius::same(11), bg);
         painter.rect_stroke(
-            rect,
+            pill_rect,
             CornerRadius::same(11),
             Stroke::new(1.0_f32, tokens.border_strong),
             StrokeKind::Inside,
         );
 
-        let knob_x = rect.left() + 11.0 + t * (rect.width() - 22.0);
-        let knob_center = Pos2::new(knob_x, rect.center().y);
+        let knob_x = pill_rect.left() + 11.0 + t * (pill_rect.width() - 22.0);
+        let knob_center = Pos2::new(knob_x, pill_rect.center().y);
         let knob_col = if *on {
             tokens.accent_text
         } else if tokens.is_light() {

@@ -2,7 +2,7 @@
 //! Conforms to specification B5: active tab = text + accent 2px underline, hover = subtle bg,
 //! non-wrapping horizontal scroll area for narrow windows.
 
-use egui::{CursorIcon, Response, ScrollArea, Sense, Stroke, Ui, Vec2};
+use egui::{CursorIcon, Response, Sense, Stroke, Ui, Vec2};
 
 use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_BUTTON};
@@ -27,12 +27,8 @@ pub fn underline_tabs<T: Copy + PartialEq>(
 ) -> Response {
     let mut main_resp = ui.scope(|_| {}).response;
 
-    ScrollArea::horizontal()
-        .auto_shrink([false, true])
-        .max_height(38.0)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(12.0, 0.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(12.0, 4.0);
                 for &(tab, label, opt_icon) in tabs {
                     let is_selected = *current == tab;
                     let text_color = if is_selected {
@@ -123,8 +119,7 @@ pub fn underline_tabs<T: Copy + PartialEq>(
                     }
                     register_widget(ui, &response, meta);
                 }
-            });
-        });
+    });
 
     main_resp
 }

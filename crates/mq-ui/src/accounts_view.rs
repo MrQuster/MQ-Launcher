@@ -255,7 +255,26 @@ impl AccountsView {
 
         ui.horizontal(|ui| {
             ui.label("Никнейм игрока:");
-            ui.text_edit_singleline(&mut self.offline_username);
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.offline_username)
+                    .desired_width(220.0)
+                    .min_size(Vec2::new(220.0, 26.0))
+                    .margin(egui::Margin::symmetric(8, 5))
+                    .vertical_align(egui::Align::Center),
+            );
+            let tokens = crate::theme::Tokens::active(ui.ctx());
+            crate::components::registry::register_widget(
+                ui,
+                &resp,
+                crate::components::registry::ElementMeta::new(
+                    crate::components::registry::ElementKind::Input,
+                )
+                .id("offline_nick_input")
+                .label("Никнейм игрока")
+                .text(self.offline_username.as_str())
+                .fg(tokens.text)
+                .bg(tokens.bg_input),
+            );
         });
 
         // Instant preview of computed Offline UUID v3
