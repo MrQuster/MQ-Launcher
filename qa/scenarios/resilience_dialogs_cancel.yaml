@@ -1,0 +1,1513 @@
+name: resilience_dialogs_cancel
+description: 100 cycles open/close Create Instance dialog + 50 cycles open/cancel
+  Import dialog.
+deterministic: true
+viewport:
+  width: 1280
+  height: 800
+steps:
+- frame_stats: reset
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    id: button_6fb4cf87
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- wait_idle:
+    timeout_ms: 2000
+    frames: 1
+- frame_stats: get
+- dump_ui: {}
+- state: {}
+- quit: {}

@@ -1,0 +1,57 @@
+name: resilience_theme_scale_resize
+description: Rapidly cycle themes, DPI scales, and viewport resizes to verify UI stability and frame budget.
+deterministic: false
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - frame_stats: reset
+  - set_theme:
+      preset: MatteDark
+  - set_scale:
+      scale: 1.0
+  - resize:
+      width: 960
+      height: 600
+  - set_theme:
+      preset: PrismClassicDark
+  - set_scale:
+      scale: 1.5
+  - resize:
+      width: 1920
+      height: 1080
+  - set_theme:
+      preset: ModrinthEmerald
+  - set_scale:
+      scale: 2.0
+  - resize:
+      width: 800
+      height: 520
+  - set_theme:
+      preset: CatppuccinMocha
+  - set_scale:
+      scale: 1.25
+  - resize:
+      width: 1280
+      height: 800
+  - set_theme:
+      preset: Nord
+  - set_scale:
+      scale: 1.0
+  - set_theme:
+      preset: LightClean
+  - resize:
+      width: 960
+      height: 600
+  - set_theme:
+      preset: MatteDark
+  - resize:
+      width: 1280
+      height: 800
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - dump_ui: {}
+  - frame_stats: get
+  - state: {}
+  - quit: {}
