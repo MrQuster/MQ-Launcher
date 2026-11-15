@@ -117,6 +117,13 @@ pub async fn scan_mods_directory(
                 if standard_builtins.contains(dep.as_str()) {
                     continue;
                 }
+                if (dep.starts_with("fabric-")
+                    && (enabled_ids.contains_key("fabric-api")
+                        || enabled_ids.contains_key("quilted_fabric_api")))
+                    || (dep == "fabric-api" && enabled_ids.contains_key("quilted_fabric_api"))
+                {
+                    continue;
+                }
                 if !enabled_ids.contains_key(&dep) {
                     conflicts.push(ModConflict::MissingDependency {
                         mod_id,
@@ -1210,5 +1217,50 @@ mod tests {
         );
         assert!(dir.path().join("oldmod.jar.disabled").exists());
         assert!(dir.path().join("forgemod.jar.disabled").exists());
+    }
+
+    #[tokio::test]
+    async fn fabric_api_satisfies_fabric_submodule_dependencies() {
+        let dir = tempdir().unwrap();
+
+        let write_jar = |path: &Path, id: &str, depends: Option<&str>| {
+            let f = File::create(path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            zw.start_file("fabric.mod.json", SimpleFileOptions::default())
+                .unwrap();
+            let manifest = match depends {
+                Some(dep) => json!({
+                    "id": id,
+                    "version": "1.0.0",
+                    "depends": { dep: "*" }
+                }),
+                None => json!({
+                    "id": id,
+                    "version": "1.0.0"
+                }),
+            };
+            zw.write_all(manifest.to_string().as_bytes()).unwrap();
+            zw.finish().unwrap();
+        };
+
+        write_jar(&dir.path().join("fabric-api.jar"), "fabric-api", None);
+        write_jar(
+            &dir.path().join("iris.jar"),
+            "iris",
+            Some("fabric-api-base"),
+        );
+
+        let pool = ComputePool::new(2);
+        let epoch = mq_sched::CancelEpoch::new();
+        let guard = epoch.snapshot();
+
+        let report = scan_mods_directory(dir.path(), &pool, &guard)
+            .await
+            .unwrap();
+        assert!(
+            report.conflicts.is_empty(),
+            "fabric-api should satisfy fabric-* submodules, got: {:?}",
+            report.conflicts
+        );
     }
 }

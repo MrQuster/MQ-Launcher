@@ -378,17 +378,19 @@ impl CatalogView {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             for tab in CatalogTab::ALL {
                 let selected = cat.tab == tab;
-                let text = RichText::new(tab.label()).color(if selected {
+                let fg = if selected {
                     tokens.text
                 } else {
                     tokens.text_muted
-                });
+                };
+                let fill = if selected {
+                    crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.14)
+                } else {
+                    tokens.bg_surface
+                };
+                let text = RichText::new(tab.label()).color(fg);
                 let btn = egui::Button::new(if selected { text.strong() } else { text })
-                    .fill(if selected {
-                        tokens.bg_surface_hover
-                    } else {
-                        tokens.bg_surface
-                    })
+                    .fill(fill)
                     .stroke(Stroke::new(
                         1.0_f32,
                         if selected {
@@ -405,6 +407,9 @@ impl CatalogView {
                     &resp,
                     ElementMeta::new(ElementKind::Tab)
                         .label(tab.label())
+                        .fg(fg)
+                        .bg(fill)
+                        .active(selected)
                         .interactive(true),
                 );
                 if resp.clicked() && !selected {
