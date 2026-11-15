@@ -923,6 +923,44 @@ mod tests {
         std::fs::write(test_dir.join("fail.txt"), "hello").expect("write after restore");
         assert!(test_dir.join("fail.txt").exists());
 
+        // 9. Test Corrupted SHA-256 payload
+        let normal_sha256 = sha256_hex(&sha256_bytes(&normal_ver_resp.body));
+        server.inject_corrupt_sha256(Some("/mc/meta/1.21.1/version.json"), 1);
+        let resp_corrupt_256 =
+            raw_http_request(addr, "GET", "/mc/meta/1.21.1/version.json", &[], None).await;
+        assert_eq!(resp_corrupt_256.status, 200);
+        let corrupted_sha256 = sha256_hex(&sha256_bytes(&resp_corrupt_256.body));
+        assert_ne!(
+            corrupted_sha256, normal_sha256,
+            "Corrupted payload SHA-256 must not match normal SHA-256"
+        );
+
+        // 10. Test true mid-body stream EOF (Connection dropped before Content-Length)
+        let eof_url = MockServer::spawn_mid_body_eof_url(1024, 12).await;
+        let eof_addr: SocketAddr = eof_url.strip_prefix("http://").unwrap().parse().unwrap();
+        let resp_eof = raw_http_request(eof_addr, "GET", "/mid-body-eof", &[], None).await;
+        assert_eq!(resp_eof.status, 200);
+        let eof_cl: usize = resp_eof
+            .headers
+            .get("content-length")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(eof_cl, 1024);
+        assert_eq!(resp_eof.body.len(), 12);
+
+        // 11. Test unused_refused_url() produces ConnectionRefused
+        let refused_url = MockServer::unused_refused_url();
+        let refused_addr: SocketAddr = refused_url
+            .strip_prefix("http://")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let refused_err = TcpStream::connect(refused_addr)
+            .await
+            .expect_err("unused_refused_url must refuse TCP connections");
+        assert_eq!(refused_err.kind(), std::io::ErrorKind::ConnectionRefused);
+
         server.shutdown().await;
     }
 }

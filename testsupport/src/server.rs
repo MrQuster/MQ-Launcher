@@ -104,6 +104,47 @@ impl MockServer {
         Self::start(MockConfig::default()).await
     }
 
+    /// Returns a local `http://127.0.0.1:<port>` URL whose listener has been dropped,
+    /// deterministically producing `ConnectionRefused` ("network down / refused") for fault tests.
+    pub fn unused_refused_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral 127.0.0.1:0 listener for refused URL");
+        let addr = listener.local_addr().expect("query local socket address");
+        drop(listener);
+        format!("http://{addr}")
+    }
+
+    /// Spawns a one-shot raw TCP listener that claims `Content-Length: claimed_len`
+    /// and abruptly closes the socket after sending `bytes_to_send` body bytes.
+    pub async fn spawn_mid_body_eof_url(claimed_len: usize, bytes_to_send: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral 127.0.0.1:0 listener for mid-body EOF");
+        let addr = listener.local_addr().expect("query local socket address");
+        let send_len = bytes_to_send.min(claimed_len);
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {claimed_len}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                if send_len > 0 {
+                    let body = vec![b'x'; send_len];
+                    let _ = stream.write_all(&body).await;
+                }
+                let _ = stream.flush().await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
     /// Returns the base URL (`"http://127.0.0.1:<port>"`) without a trailing slash.
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -173,7 +214,7 @@ impl MockServer {
             .inject_503(path_filter, retry_after_secs, count);
     }
 
-    /// Helper to inject body truncation mid-file.
+    /// Helper to inject body truncation mid-file (updates Content-Length).
     pub fn inject_truncation(&self, path_filter: Option<&str>, bytes_to_send: usize, count: usize) {
         self.state
             .faults
@@ -183,6 +224,11 @@ impl MockServer {
     /// Helper to inject SHA-1 byte corruption.
     pub fn inject_corrupt_sha1(&self, path_filter: Option<&str>, count: usize) {
         self.state.faults.inject_corrupt_sha1(path_filter, count);
+    }
+
+    /// Helper to inject SHA-256 byte corruption.
+    pub fn inject_corrupt_sha256(&self, path_filter: Option<&str>, count: usize) {
+        self.state.faults.inject_corrupt_sha256(path_filter, count);
     }
 
     /// Helper to inject invalid Content-Length header mismatch.

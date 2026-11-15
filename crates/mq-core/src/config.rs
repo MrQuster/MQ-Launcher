@@ -17,6 +17,18 @@ use crate::secret::SecretString;
 /// Primary environment variable for the CurseForge Core API v1 key (used when no user key is set in config/keyring).
 pub const ENV_CURSEFORGE_API_KEY: &str = "MQ_CURSEFORGE_API_KEY";
 
+/// Environment variable overriding the unified mock server base URL for QA/testing.
+pub const ENV_MOCK_URL: &str = "MQ_MOCK_URL";
+
+/// Environment variable overriding the Mojang metadata/assets base URL for QA/testing.
+pub const ENV_MOJANG_BASE_URL: &str = "MQ_MOJANG_BASE_URL";
+
+/// Environment variable overriding the Modrinth API base URL for QA/testing.
+pub const ENV_MODRINTH_BASE_URL: &str = "MQ_MODRINTH_BASE_URL";
+
+/// Environment variable overriding the CurseForge API base URL for QA/testing.
+pub const ENV_CURSEFORGE_BASE_URL: &str = "MQ_CURSEFORGE_BASE_URL";
+
 /// Legacy environment variable for the CurseForge Core API v1 key (backward-compatible fallback).
 pub const ENV_CF_API_KEY: &str = "MQ_CF_API_KEY";
 
@@ -544,6 +556,15 @@ impl AppConfig {
         if !has_cfg_key {
             if let Some(secret_key) = Self::load_cf_api_key_secret_file(paths) {
                 cfg.curseforge_api_key = Some(secret_key);
+            }
+        }
+
+        if cfg.mock_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            if let Ok(env_mock) = env::var(ENV_MOCK_URL) {
+                let trimmed = env_mock.trim();
+                if !trimmed.is_empty() {
+                    cfg.mock_url = Some(trimmed.to_owned());
+                }
             }
         }
 

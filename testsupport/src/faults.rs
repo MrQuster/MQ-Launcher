@@ -24,10 +24,12 @@ pub enum FaultAction {
         retry_after_secs: Option<u64>,
         message: String,
     },
-    /// Truncate the response body after `bytes_to_send` bytes, simulating a drop mid-file.
+    /// Truncate the response body after `bytes_to_send` bytes (with matching Content-Length).
     TruncateBody { bytes_to_send: usize },
-    /// Serve corrupted payload bytes (violates SHA-1/SHA-512 check).
+    /// Serve corrupted payload bytes (violates SHA-1/SHA-256/SHA-512 check).
     CorruptSha1,
+    /// Serve corrupted payload bytes (violates SHA-256 check).
+    CorruptSha256,
     /// Return Content-Length header that does not match actual payload length.
     InvalidContentLength { claimed_len: usize },
 }
@@ -128,7 +130,7 @@ impl FaultInjector {
         });
     }
 
-    /// Helper to inject connection truncation mid-file.
+    /// Helper to inject connection truncation mid-file (updates Content-Length).
     pub fn inject_truncation(&self, path_filter: Option<&str>, bytes_to_send: usize, count: usize) {
         self.add_rule(FaultRule {
             path_filter: path_filter.map(str::to_string),
@@ -143,6 +145,15 @@ impl FaultInjector {
             path_filter: path_filter.map(str::to_string),
             remaining_count: Some(count),
             action: FaultAction::CorruptSha1,
+        });
+    }
+
+    /// Helper to inject SHA-256 byte corruption.
+    pub fn inject_corrupt_sha256(&self, path_filter: Option<&str>, count: usize) {
+        self.add_rule(FaultRule {
+            path_filter: path_filter.map(str::to_string),
+            remaining_count: Some(count),
+            action: FaultAction::CorruptSha256,
         });
     }
 
@@ -230,7 +241,7 @@ pub async fn apply_body_fault(resp: Response, action: FaultAction) -> Response {
             }
             Response::from_parts(parts, axum::body::Body::from(body_bytes.slice(0..send_len)))
         }
-        FaultAction::CorruptSha1 => {
+        FaultAction::CorruptSha1 | FaultAction::CorruptSha256 => {
             let mut corrupted = body_bytes.to_vec();
             if !corrupted.is_empty() {
                 corrupted[0] ^= 0xFF;
