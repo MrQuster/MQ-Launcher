@@ -730,16 +730,7 @@ impl CatalogView {
     }
 
     fn hit_card(&mut self, ui: &mut Ui, state: &mut UiState, hit: &CatalogHit, tokens: &Tokens) {
-        let installed = state.installed_mods.iter().any(|m| {
-            let slug = hit.slug.to_lowercase();
-            let title = hit.title.to_lowercase();
-            let file = m.file_name.to_lowercase();
-            let name = m.name.to_lowercase();
-            file.contains(&slug)
-                || file.contains(&title)
-                || name.contains(&title)
-                || name.contains(&slug)
-        });
+        let installed = is_hit_installed_in_instance(state, hit);
         let queued = state.catalog.is_queued(hit.source, &hit.project_id);
         let texture = hit
             .icon_url
@@ -922,6 +913,43 @@ pub fn skeleton_card(ui: &mut Ui) {
         });
 }
 
+fn dir_has_matching_pack(dir: &std::path::Path, slug: &str, title: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        (!slug.is_empty() && name.contains(slug)) || (!title.is_empty() && name.contains(title))
+    })
+}
+
+fn is_hit_installed_in_instance(state: &UiState, hit: &CatalogHit) -> bool {
+    let slug = hit.slug.trim().to_lowercase();
+    let title = hit.title.trim().to_lowercase();
+    if slug.is_empty() && title.is_empty() {
+        return false;
+    }
+
+    match hit.project_kind {
+        ProjectKind::Mod => state.installed_mods.iter().any(|m| {
+            let file = m.file_name.to_lowercase();
+            let name = m.name.to_lowercase();
+            let id = m.mod_id.to_lowercase();
+            (!slug.is_empty() && (file.contains(&slug) || name.contains(&slug) || id == slug))
+                || (!title.is_empty() && (file.contains(&title) || name.contains(&title)))
+        }),
+        ProjectKind::ResourcePack => state.selected_instance_id.as_ref().is_some_and(|id| {
+            let dir = state.paths.instance_dir(id.as_str()).join("resourcepacks");
+            dir_has_matching_pack(&dir, &slug, &title)
+        }),
+        ProjectKind::Shader => state.selected_instance_id.as_ref().is_some_and(|id| {
+            let dir = state.paths.instance_dir(id.as_str()).join("shaderpacks");
+            dir_has_matching_pack(&dir, &slug, &title)
+        }),
+        ProjectKind::Modpack => false,
+    }
+}
+
 fn empty_state(ui: &mut Ui, tokens: &Tokens, title: &str, hint: &str) {
     ui.add_space(32.0);
     ui.vertical_centered(|ui| {
@@ -978,5 +1006,76 @@ mod tests {
     #[test]
     fn keys_page_is_official_console() {
         assert_eq!(CURSEFORGE_KEYS_URL, "https://console.curseforge.com/");
+    }
+
+    #[test]
+    fn is_hit_installed_checks_mods_resourcepacks_and_shaders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = mq_core::MqPaths::with_root(tmp.path());
+        let inst_id = mq_core::InstanceId::new("qa-inst").unwrap();
+        let inst_dir = paths.instance_dir(inst_id.as_str());
+        std::fs::create_dir_all(inst_dir.join("resourcepacks")).unwrap();
+        std::fs::create_dir_all(inst_dir.join("shaderpacks")).unwrap();
+        std::fs::write(inst_dir.join("resourcepacks/Faithful-32x.zip"), b"zip").unwrap();
+        std::fs::write(
+            inst_dir.join("shaderpacks/BSL_v8.2.09.zip.disabled"),
+            b"zip",
+        )
+        .unwrap();
+
+        let pool = std::sync::Arc::new(mq_sched::ComputePool::new(1));
+        let mut state = UiState::new(paths, mq_core::AppConfig::default(), pool).unwrap();
+        state.selected_instance_id = Some(inst_id);
+        state.installed_mods.push(mq_mods::InstalledModEntry {
+            file_name: "sodium-fabric-0.5.11.jar".into(),
+            path: std::path::PathBuf::from("mods/sodium-fabric-0.5.11.jar"),
+            enabled: true,
+            mod_id: "sodium".into(),
+            name: "Sodium".into(),
+            version: "0.5.11".into(),
+            authors: vec![],
+            description: None,
+            loader: Some(ModLoaderKind::Fabric),
+            dependencies: vec![],
+            sha1: mq_core::Sha1Digest::from_bytes([0u8; 20]),
+            sha512: mq_core::Sha512Digest::from_bytes([0u8; 64]),
+            size: 100,
+        });
+
+        let make_hit = |kind: ProjectKind, slug: &str, title: &str| CatalogHit {
+            source: CatalogSource::Modrinth,
+            project_id: slug.into(),
+            slug: slug.into(),
+            project_kind: kind,
+            title: title.into(),
+            description: String::new(),
+            author: String::new(),
+            downloads: 0,
+            icon_url: None,
+            loaders: vec![],
+            game_versions: vec![],
+            latest_version: None,
+        };
+
+        assert!(is_hit_installed_in_instance(
+            &state,
+            &make_hit(ProjectKind::Mod, "sodium", "Sodium")
+        ));
+        assert!(is_hit_installed_in_instance(
+            &state,
+            &make_hit(ProjectKind::ResourcePack, "faithful-32x", "Faithful 32x")
+        ));
+        assert!(!is_hit_installed_in_instance(
+            &state,
+            &make_hit(ProjectKind::Shader, "sodium", "Sodium")
+        ));
+        assert!(is_hit_installed_in_instance(
+            &state,
+            &make_hit(ProjectKind::Shader, "bsl-shaders", "BSL")
+        ));
+        assert!(!is_hit_installed_in_instance(
+            &state,
+            &make_hit(ProjectKind::Modpack, "sodium", "Sodium")
+        ));
     }
 }

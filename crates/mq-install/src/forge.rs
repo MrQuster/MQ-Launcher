@@ -129,7 +129,8 @@ pub async fn prepare_forge_installation(
         .map_err(|e| MqError::Archive(format!("invalid Forge installer JAR: {e}")))?;
 
     let version_json = read_zip_entry_string(&mut archive, "version.json")?;
-    let profile = parse_loader_profile(&version_json, ModLoaderKind::Forge, Some(short_ver.clone()))?;
+    let profile =
+        parse_loader_profile(&version_json, ModLoaderKind::Forge, Some(short_ver.clone()))?;
     *resolved_ver = merge_inherits_from(resolved_ver, &profile)?;
     resolved_ver.loader = ModLoaderKind::Forge;
     resolved_ver.loader_version = Some(short_ver.clone());
@@ -258,7 +259,10 @@ fn resolve_processor_arg(
     // Built-in Forge processor variables
     let builtins: [(&str, String); 6] = [
         ("{SIDE}", "client".to_owned()),
-        ("{MINECRAFT_JAR}", minecraft_jar.to_string_lossy().into_owned()),
+        (
+            "{MINECRAFT_JAR}",
+            minecraft_jar.to_string_lossy().into_owned(),
+        ),
         ("{MINECRAFT_VERSION}", mc_version.to_owned()),
         ("{ROOT}", instance_dir.to_string_lossy().into_owned()),
         ("{INSTALLER}", installer_jar.to_string_lossy().into_owned()),
@@ -277,28 +281,28 @@ fn resolve_processor_arg(
             continue;
         }
         let raw_val = entry.client.trim();
-        let resolved_val = if raw_val.starts_with('[') && raw_val.ends_with(']') && raw_val.len() > 2
-        {
-            let coord = &raw_val[1..raw_val.len() - 1];
-            resolve_maven_bracketed_path(coord, libs_dir)?
-                .to_string_lossy()
-                .into_owned()
-        } else if raw_val.starts_with('/') {
-            forge
-                .extracted_data_files
-                .get(raw_val)
-                .ok_or_else(|| {
-                    MqError::Archive(format!(
-                        "missing extracted Forge data file '{raw_val}' for key '{key}'"
-                    ))
-                })?
-                .to_string_lossy()
-                .into_owned()
-        } else if raw_val.starts_with('\'') && raw_val.ends_with('\'') && raw_val.len() >= 2 {
-            raw_val[1..raw_val.len() - 1].to_owned()
-        } else {
-            raw_val.to_owned()
-        };
+        let resolved_val =
+            if raw_val.starts_with('[') && raw_val.ends_with(']') && raw_val.len() > 2 {
+                let coord = &raw_val[1..raw_val.len() - 1];
+                resolve_maven_bracketed_path(coord, libs_dir)?
+                    .to_string_lossy()
+                    .into_owned()
+            } else if raw_val.starts_with('/') {
+                forge
+                    .extracted_data_files
+                    .get(raw_val)
+                    .ok_or_else(|| {
+                        MqError::Archive(format!(
+                            "missing extracted Forge data file '{raw_val}' for key '{key}'"
+                        ))
+                    })?
+                    .to_string_lossy()
+                    .into_owned()
+            } else if raw_val.starts_with('\'') && raw_val.ends_with('\'') && raw_val.len() >= 2 {
+                raw_val[1..raw_val.len() - 1].to_owned()
+            } else {
+                raw_val.to_owned()
+            };
         s = s.replace(&token, &resolved_val);
     }
 
@@ -391,8 +395,22 @@ pub async fn run_forge_processors(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let tail_err: String = stderr.chars().rev().take(800).collect::<String>().chars().rev().collect();
-            let tail_out: String = stdout.chars().rev().take(400).collect::<String>().chars().rev().collect();
+            let tail_err: String = stderr
+                .chars()
+                .rev()
+                .take(800)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            let tail_out: String = stdout
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
             return Err(MqError::Archive(format!(
                 "Forge processor {} failed with status {:?}: stderr={tail_err} stdout={tail_out}",
                 proc.jar,
@@ -468,19 +486,55 @@ mod tests {
         let inst_dir = Path::new("/data/instances/forge");
 
         assert_eq!(
-            resolve_processor_arg("{MINECRAFT_JAR}", "1.20.1", inst_dir, mc_jar, &forge.installer_jar_path, libs, &forge).unwrap(),
+            resolve_processor_arg(
+                "{MINECRAFT_JAR}",
+                "1.20.1",
+                inst_dir,
+                mc_jar,
+                &forge.installer_jar_path,
+                libs,
+                &forge
+            )
+            .unwrap(),
             "/data/versions/1.20.1/1.20.1.jar"
         );
         assert_eq!(
-            resolve_processor_arg("{BINPATCH}", "1.20.1", inst_dir, mc_jar, &forge.installer_jar_path, libs, &forge).unwrap(),
+            resolve_processor_arg(
+                "{BINPATCH}",
+                "1.20.1",
+                inst_dir,
+                mc_jar,
+                &forge.installer_jar_path,
+                libs,
+                &forge
+            )
+            .unwrap(),
             "/tmp/forge-data/data/client.lzma"
         );
         assert_eq!(
-            resolve_processor_arg("{MC_SRG}", "1.20.1", inst_dir, mc_jar, &forge.installer_jar_path, libs, &forge).unwrap(),
+            resolve_processor_arg(
+                "{MC_SRG}",
+                "1.20.1",
+                inst_dir,
+                mc_jar,
+                &forge.installer_jar_path,
+                libs,
+                &forge
+            )
+            .unwrap(),
             "/data/libraries/net/minecraft/client/1.20.1/client-1.20.1-srg.jar"
         );
         assert_eq!(
-            resolve_processor_arg("{SIDE_LIT}", "1.20.1", inst_dir, mc_jar, &forge.installer_jar_path, libs, &forge).unwrap(),
+            resolve_processor_arg(
+                "{SIDE_LIT}",
+                "1.20.1",
+                inst_dir,
+                mc_jar,
+                &forge.installer_jar_path,
+                libs,
+                &forge
+            )
+            .unwrap(),
             "client"
         );
     }
@@ -491,8 +545,11 @@ mod tests {
         let jar_path = tmp.path().join("proc.jar");
         let file = fs::File::create(&jar_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        zip.start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default())
-            .unwrap();
+        zip.start_file(
+            "META-INF/MANIFEST.MF",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
         zip.write_all(b"Manifest-Version: 1.0\r\nMain-Class: net.minecraftforge.installertools.ConsoleTool\r\n")
             .unwrap();
         zip.finish().unwrap();

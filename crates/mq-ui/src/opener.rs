@@ -47,6 +47,84 @@ pub fn open_that<T: AsRef<OsStr>>(target: T) -> io::Result<()> {
     }
 }
 
+/// Opens a native OS file picker dialog for selecting a `.mrpack` or `.zip` modpack archive.
+/// Must be called from a background/blocking thread so the UI thread never stalls.
+pub fn pick_modpack_archive_file() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = concat!(
+            "Add-Type -AssemblyName System.Windows.Forms; ",
+            "$d = New-Object System.Windows.Forms.OpenFileDialog; ",
+            "$d.Title = 'Выберите сборку (.mrpack или .zip)'; ",
+            "$d.Filter = 'Сборки (*.mrpack;*.zip)|*.mrpack;*.zip|Все файлы (*.*)|*.*'; ",
+            "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ",
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ",
+            "Write-Output $d.FileName }"
+        );
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"POSIX path of (choose file with prompt "Выберите сборку (.mrpack или .zip)" of type {"mrpack", "zip"})"#;
+        let out = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Ok(out) = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--title=Выберите сборку (.mrpack или .zip)",
+                "--file-filter=Сборки (*.mrpack *.zip) | *.mrpack *.zip",
+                "--file-filter=Все файлы | *",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+            return None;
+        }
+
+        if let Ok(out) = Command::new("kdialog")
+            .args([
+                "--getopenfilename",
+                ".",
+                "*.mrpack *.zip|Сборки (.mrpack, .zip)",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::open_that;

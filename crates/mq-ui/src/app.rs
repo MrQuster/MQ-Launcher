@@ -1131,6 +1131,17 @@ impl MqApp {
                         });
                     }
                 }
+                UiWorkerCommand::PickImportArchive => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let picked =
+                            tokio::task::spawn_blocking(crate::opener::pick_modpack_archive_file)
+                                .await
+                                .ok()
+                                .flatten();
+                        let _ = resp_tx.send(UiWorkerResponse::ImportArchivePicked(picked));
+                    });
+                }
                 _ => {}
             }
         }
@@ -1142,9 +1153,11 @@ impl MqApp {
             config: self.state.config.clone(),
             paths: self.state.paths.clone(),
             net: self.state.net.clone(),
+            cas: self.state.cas.clone(),
             epoch: self.state.cancel_epoch.clone(),
             pool: self.state.compute_pool.clone(),
             bus: self.state.event_bus.clone(),
+            mock_base_url: configured_mock_base_url(),
         }
     }
 

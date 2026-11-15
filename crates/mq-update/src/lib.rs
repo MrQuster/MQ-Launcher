@@ -643,6 +643,167 @@ impl UpdateManager {
         cmd.spawn().context("Failed to spawn updated process")?;
         std::process::exit(0);
     }
+
+    /// Uninstalls user-level MQ Launcher binaries, desktop entries, and icons.
+    /// When `purge_data` is true, also removes user data, config, and cache directories.
+    pub fn uninstall(
+        data_dir: &Path,
+        config_dir: &Path,
+        cache_dir: &Path,
+        purge_data: bool,
+        dry_run: bool,
+    ) -> Result<UninstallOutcome> {
+        let home_dir = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .context("Failed to determine user home directory")?;
+        let current_exe = std::env::current_exe().ok();
+        execute_uninstall_with_roots(
+            &home_dir,
+            current_exe.as_deref(),
+            data_dir,
+            config_dir,
+            cache_dir,
+            purge_data,
+            dry_run,
+        )
+    }
+}
+
+/// Summary of files and directories removed during uninstall.
+#[derive(Debug, Clone, Default)]
+pub struct UninstallOutcome {
+    pub removed_files: Vec<PathBuf>,
+    pub removed_dirs: Vec<PathBuf>,
+    pub spawned_external_uninstaller: bool,
+}
+
+fn is_dev_or_system_exe(exe: &Path) -> bool {
+    let s = exe.to_string_lossy();
+    s.contains("/target/debug")
+        || s.contains("/target/release")
+        || s.contains("\\target\\debug")
+        || s.contains("\\target\\release")
+        || s.starts_with("/usr/")
+        || s.starts_with("/var/")
+}
+
+/// Collects user-installed MQ Launcher binaries, shortcuts, and icon paths.
+pub fn collect_user_install_artifacts(home_dir: &Path, current_exe: Option<&Path>) -> Vec<PathBuf> {
+    let mut targets = vec![
+        home_dir.join(".local/bin/mq"),
+        home_dir.join(".local/bin/mq.old"),
+        home_dir.join(".local/share/applications/mq.desktop"),
+        home_dir.join(".local/share/icons/hicolor/scalable/apps/mq.svg"),
+        home_dir.join("Desktop/mq.desktop"),
+        home_dir.join("Рабочий стол/mq.desktop"),
+        home_dir.join("Desktop/MQ.lnk"),
+        home_dir.join("Desktop/MQ Launcher.lnk"),
+    ];
+
+    if let Some(exe) = current_exe {
+        if !is_dev_or_system_exe(exe) {
+            let exe_buf = exe.to_path_buf();
+            if !targets.contains(&exe_buf) {
+                targets.push(exe_buf);
+            }
+            let old_buf = exe.with_extension("old");
+            if !targets.contains(&old_buf) {
+                targets.push(old_buf);
+            }
+        }
+    }
+
+    targets
+}
+
+/// Executes launcher uninstallation against explicit root paths (safe to unit-test).
+pub fn execute_uninstall_with_roots(
+    home_dir: &Path,
+    current_exe: Option<&Path>,
+    data_dir: &Path,
+    config_dir: &Path,
+    cache_dir: &Path,
+    purge_data: bool,
+    dry_run: bool,
+) -> Result<UninstallOutcome> {
+    let mut outcome = UninstallOutcome::default();
+
+    for path in collect_user_install_artifacts(home_dir, current_exe) {
+        if path.exists() {
+            if !dry_run {
+                // On Windows, a running .exe cannot be unlinked in-place; deferred cleanup handles it.
+                let _ = fs::remove_file(&path);
+            }
+            outcome.removed_files.push(path);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    if !dry_run {
+        let mut unins_candidates: Vec<PathBuf> = Vec::new();
+        if let Some(exe) = current_exe {
+            if let Some(parent) = exe.parent() {
+                unins_candidates.push(parent.join("unins000.exe"));
+            }
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            unins_candidates.push(
+                PathBuf::from(local_app_data)
+                    .join("Programs")
+                    .join("MQ")
+                    .join("unins000.exe"),
+            );
+        }
+        for unins_path in unins_candidates {
+            if unins_path.is_file() {
+                if Command::new(&unins_path)
+                    .args(inno_silent_args())
+                    .spawn()
+                    .is_ok()
+                {
+                    outcome.spawned_external_uninstaller = true;
+                }
+                break;
+            }
+        }
+
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            let start_menu = PathBuf::from(app_data).join("Microsoft/Windows/Start Menu/Programs");
+            for sc_name in ["MQ.lnk", "MQ Launcher.lnk"] {
+                let sc = start_menu.join(sc_name);
+                if sc.exists() {
+                    let _ = fs::remove_file(&sc);
+                    outcome.removed_files.push(sc);
+                }
+            }
+        }
+
+        if let Some(exe) = current_exe {
+            if !is_dev_or_system_exe(exe) {
+                let exe_quoted = exe.to_string_lossy().replace('"', "\"\"");
+                let _ = Command::new("cmd.exe")
+                    .args([
+                        "/C",
+                        &format!("ping 127.0.0.1 -n 2 > nul & del /F /Q \"{exe_quoted}\""),
+                    ])
+                    .spawn();
+            }
+        }
+    }
+
+    if purge_data {
+        for dir in [data_dir, config_dir, cache_dir] {
+            if dir.exists() && !outcome.removed_dirs.iter().any(|d| d == dir) {
+                if !dry_run {
+                    let _ = fs::remove_dir_all(dir);
+                }
+                outcome.removed_dirs.push(dir.to_path_buf());
+            }
+        }
+    }
+
+    Ok(outcome)
 }
 
 /// Simple semver comparison helper (`a` newer than `b`?).
@@ -797,5 +958,86 @@ mod tests {
             pk_str,
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_execute_uninstall_with_roots_preserves_or_purges_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let bin_dir = home.join(".local/bin");
+        let app_dir = home.join(".local/share/applications");
+        let icon_dir = home.join(".local/share/icons/hicolor/scalable/apps");
+        let data_dir = home.join(".local/share/mq");
+        let config_dir = home.join(".config/mq");
+        let cache_dir = home.join(".cache/mq");
+
+        for dir in [
+            &bin_dir,
+            &app_dir,
+            &icon_dir,
+            &data_dir,
+            &config_dir,
+            &cache_dir,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let bin_path = bin_dir.join("mq");
+        let desktop_path = app_dir.join("mq.desktop");
+        let icon_path = icon_dir.join("mq.svg");
+        let instance_marker = data_dir.join("instances/inst.json");
+        fs::create_dir_all(instance_marker.parent().unwrap()).unwrap();
+        fs::write(&bin_path, b"bin").unwrap();
+        fs::write(&desktop_path, b"[Desktop Entry]").unwrap();
+        fs::write(&icon_path, b"<svg/>").unwrap();
+        fs::write(&instance_marker, b"{}").unwrap();
+
+        // Dry run keeps everything intact
+        let dry = execute_uninstall_with_roots(
+            &home,
+            Some(&bin_path),
+            &data_dir,
+            &config_dir,
+            &cache_dir,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(dry.removed_files.len(), 3);
+        assert!(bin_path.exists());
+        assert!(instance_marker.exists());
+
+        // Uninstall without purge removes launcher files but preserves user data
+        let out = execute_uninstall_with_roots(
+            &home,
+            Some(&bin_path),
+            &data_dir,
+            &config_dir,
+            &cache_dir,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.removed_files.len(), 3);
+        assert!(out.removed_dirs.is_empty());
+        assert!(!bin_path.exists());
+        assert!(!desktop_path.exists());
+        assert!(!icon_path.exists());
+        assert!(instance_marker.exists());
+
+        // Purge removes data/config/cache directories too
+        let purged = execute_uninstall_with_roots(
+            &home,
+            None,
+            &data_dir,
+            &config_dir,
+            &cache_dir,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(purged.removed_dirs.len(), 3);
+        assert!(!data_dir.exists());
+        assert!(!config_dir.exists());
+        assert!(!cache_dir.exists());
     }
 }

@@ -14,10 +14,17 @@ pub fn button_primary(
     icon: Option<VectorIcon>,
     text: &str,
 ) -> Response {
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(text.len() as f32 * 8.5 + 36.0, 34.0),
-        egui::Sense::click(),
-    );
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::proportional(13.5),
+            tokens.accent_text,
+        )
+        .size()
+        .x;
+    let width = text_w + if icon.is_some() { 46.0 } else { 24.0 };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 34.0), egui::Sense::click());
 
     if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -72,10 +79,17 @@ pub fn button_secondary(
     icon: Option<VectorIcon>,
     text: &str,
 ) -> Response {
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(text.len() as f32 * 8.0 + 32.0, 32.0),
-        egui::Sense::click(),
-    );
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::proportional(13.0),
+            tokens.text,
+        )
+        .size()
+        .x;
+    let width = text_w + if icon.is_some() { 42.0 } else { 22.0 };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 32.0), egui::Sense::click());
 
     if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);

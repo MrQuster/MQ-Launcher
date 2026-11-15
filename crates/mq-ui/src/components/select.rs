@@ -55,7 +55,16 @@ impl<'a, T: Clone + PartialEq> Select<'a, T> {
             format!("{}: {}", self.label_prefix, current_label)
         };
 
-        let width = (display_text.len() as f32 * 7.5 + 40.0).max(120.0);
+        let text_w = ui
+            .painter()
+            .layout_no_wrap(
+                display_text.clone(),
+                egui::FontId::proportional(12.5),
+                tokens.text,
+            )
+            .size()
+            .x;
+        let width = (text_w + 36.0).max(120.0);
         let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
         if resp.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);

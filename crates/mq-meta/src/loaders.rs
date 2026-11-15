@@ -1156,7 +1156,10 @@ pub fn parse_forge_install_profile(json_str: &str) -> MqResult<ForgeInstallProfi
 
 /// Normalizes a Forge version string into `(short_forge_version, full_maven_version)`,
 /// e.g. `("47.3.0", "1.20.1-47.3.0")` for `mc_version = "1.20.1"`.
-pub fn normalize_forge_version(mc_version: &str, forge_version: &str) -> MqResult<(String, String)> {
+pub fn normalize_forge_version(
+    mc_version: &str,
+    forge_version: &str,
+) -> MqResult<(String, String)> {
     let mc = mc_version.trim();
     let raw = forge_version.trim();
     if mc.is_empty() || raw.is_empty() {
@@ -1228,8 +1231,9 @@ pub async fn fetch_forge_loader_versions(
         ),
         None => FORGE_MAVEN_METADATA_URL.to_owned(),
     };
-    let url = Url::parse(&url_str)
-        .map_err(|err| MqError::Metadata(format!("invalid Forge metadata URL '{url_str}': {err}")))?;
+    let url = Url::parse(&url_str).map_err(|err| {
+        MqError::Metadata(format!("invalid Forge metadata URL '{url_str}': {err}"))
+    })?;
     let body = get_text_checked(client, url).await?;
     Ok(parse_forge_maven_metadata_versions(&body, mc_version))
 }
@@ -1267,9 +1271,10 @@ pub async fn fetch_forge_recommended_version(
     }
 
     let versions = fetch_forge_loader_versions(client, base_url, mc).await?;
-    versions.into_iter().next().ok_or_else(|| {
-        MqError::Metadata(format!("no Forge loader version found for {mc}"))
-    })
+    versions
+        .into_iter()
+        .next()
+        .ok_or_else(|| MqError::Metadata(format!("no Forge loader version found for {mc}")))
 }
 
 #[cfg(test)]
@@ -1725,8 +1730,7 @@ mod tests {
             "/data/client.lzma"
         );
 
-        let (short, full) =
-            normalize_forge_version("1.20.1", "1.20.1-47.3.0").expect("normalize");
+        let (short, full) = normalize_forge_version("1.20.1", "1.20.1-47.3.0").expect("normalize");
         assert_eq!(short, "47.3.0");
         assert_eq!(full, "1.20.1-47.3.0");
 

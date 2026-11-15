@@ -20,6 +20,8 @@ function Invoke-MqInstaller {
 
         [switch]$Uninstall,
 
+        [switch]$Purge,
+
         [string]$InstallDir = "",
 
         [string]$BaseUrl = "",
@@ -47,6 +49,9 @@ function Invoke-MqInstaller {
     $envUninstall = [Environment]::GetEnvironmentVariable("MQ_UNINSTALL")
     if (-not $Uninstall -and ($envUninstall -eq "1" -or $envUninstall -eq "true")) { $Uninstall = $true }
 
+    $envPurge = [Environment]::GetEnvironmentVariable("MQ_PURGE")
+    if (-not $Purge -and ($envPurge -eq "1" -or $envPurge -eq "true")) { $Purge = $true }
+
     $envNoDesktop = [Environment]::GetEnvironmentVariable("MQ_NO_DESKTOP_SHORTCUT")
     if (-not $NoDesktopShortcut -and ($envNoDesktop -eq "1" -or $envNoDesktop -eq "true")) { $NoDesktopShortcut = $true }
 
@@ -60,13 +65,14 @@ function Invoke-MqInstaller {
         Write-Host @"
 MQ Launcher -- Windows Installer
 Usage:
-  install.ps1 [-Version <tag>] [-Portable] [-Silent] [-Uninstall] [-InstallDir <path>] [-BaseUrl <url>] [-NoDesktopShortcut] [-Force]
+  install.ps1 [-Version <tag>] [-Portable] [-Silent] [-Uninstall] [-Purge] [-InstallDir <path>] [-BaseUrl <url>] [-NoDesktopShortcut] [-Force]
 
 Parameters:
-  -Version <tag>       Specify version to install (e.g. '2.6.5' or 'latest'). Default: latest
+  -Version <tag>       Specify version to install (e.g. '2.6.6' or 'latest'). Default: latest
   -Portable            Install standalone portable package into %LOCALAPPDATA%\MQ-Portable
   -Silent              Run unattended installation (/VERYSILENT /SUPPRESSMSGBOXES /NORESTART)
   -Uninstall           Silently uninstall MQ Launcher (preserves %LOCALAPPDATA%\MQ user data)
+  -Purge               With -Uninstall, also remove all user data, instances, mods and settings
   -InstallDir <path>   Custom installation target directory
   -BaseUrl <url>       Override release download base URL (for local/CI testing)
   -NoDesktopShortcut   Do not create a shortcut on Desktop
@@ -243,20 +249,28 @@ Parameters:
             }
         }
 
-        # Remove portable installation if present
+        # Remove leftover Inno Setup / portable installation directories if present
+        $installCandidates = @($DefaultInstallDir)
         $portableDir = if ($InstallDir) { $InstallDir } else { $DefaultPortableDir }
-        if (Test-Path $portableDir) {
-            if (-not $Silent) {
-                Write-Host "Removing portable installation at $portableDir..." -ForegroundColor Yellow
+        if ($portableDir -and ($installCandidates -notcontains $portableDir)) {
+            $installCandidates += $portableDir
+        }
+        foreach ($dirPath in $installCandidates) {
+            if (Test-Path $dirPath) {
+                if (-not $Silent) {
+                    Write-Host "Removing installation directory $dirPath..." -ForegroundColor Yellow
+                }
+                Remove-Item -Path $dirPath -Recurse -Force -ErrorAction SilentlyContinue
+                $uninstalled = $true
             }
-            Remove-Item -Path $portableDir -Recurse -Force -ErrorAction SilentlyContinue
-            $uninstalled = $true
         }
 
         # Clean up leftover shortcuts if any
         $shortcuts = @(
             (Join-Path ([Environment]::GetFolderPath("Programs")) "MQ.lnk"),
-            (Join-Path ([Environment]::GetFolderPath("Desktop")) "MQ.lnk")
+            (Join-Path ([Environment]::GetFolderPath("Programs")) "MQ Launcher.lnk"),
+            (Join-Path ([Environment]::GetFolderPath("Desktop")) "MQ.lnk"),
+            (Join-Path ([Environment]::GetFolderPath("Desktop")) "MQ Launcher.lnk")
         )
         foreach ($sc in $shortcuts) {
             if (Test-Path $sc) {
@@ -264,9 +278,39 @@ Parameters:
             }
         }
 
+        # Clean MQ install directories from User PATH
+        $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($currentUserPath) {
+            $cleanedParts = @($currentUserPath -split ';' | Where-Object {
+                $item = $_.Trim()
+                $item -and ($installCandidates -notcontains $item)
+            })
+            $newUserPath = ($cleanedParts -join ';')
+            if ($newUserPath -ne $currentUserPath) {
+                [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+            }
+        }
+
+        # Purge user data if -Purge / MQ_PURGE=1
+        if ($Purge) {
+            $roamingDataDir = Join-Path $env:APPDATA "MQ"
+            foreach ($d in @($UserDataDir, $roamingDataDir)) {
+                if ($d -and (Test-Path $d)) {
+                    if (-not $Silent) {
+                        Write-Host "Purging user data directory $d..." -ForegroundColor Yellow
+                    }
+                    Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
         if (-not $Silent) {
             Write-Host "`n[2/2] Uninstall complete!" -ForegroundColor Green
-            Write-Host "User game instances and account data preserved at: $UserDataDir" -ForegroundColor Gray
+            if ($Purge) {
+                Write-Host "User game instances, worlds and settings have been removed (-Purge)." -ForegroundColor Gray
+            } else {
+                Write-Host "User game instances and account data preserved at: $UserDataDir" -ForegroundColor Gray
+            }
         }
         return
     }
@@ -407,8 +451,9 @@ Parameters:
                 Write-Host "`n================================================================================" -ForegroundColor Green
                 Write-Host " MQ LAUNCHER (PORTABLE) SUCCESSFULLY INSTALLED!" -ForegroundColor Green
                 Write-Host "================================================================================" -ForegroundColor Green
-                Write-Host " Directory: $targetDir" -ForegroundColor Cyan
-                Write-Host " Run:       $(Join-Path $targetDir 'mq.exe')" -ForegroundColor Cyan
+                Write-Host " Directory:  $targetDir" -ForegroundColor Cyan
+                Write-Host " Run:        $(Join-Path $targetDir 'mq.exe')" -ForegroundColor Cyan
+                Write-Host " Uninstall:  mq uninstall  (or: `$env:MQ_UNINSTALL=1; irm https://github.com/$Repo/releases/latest/download/install.ps1 | iex)" -ForegroundColor Gray
                 Write-Host "================================================================================`n" -ForegroundColor Green
             }
         } else {
@@ -444,6 +489,7 @@ Parameters:
                 Write-Host " Executable: $installedExe" -ForegroundColor Cyan
                 Write-Host " Start Menu: MQ" -ForegroundColor Cyan
                 Write-Host " User Data:  $UserDataDir (Preserved on uninstalls and updates)" -ForegroundColor Gray
+                Write-Host " Uninstall:  mq uninstall  (or: `$env:MQ_UNINSTALL=1; irm https://github.com/$Repo/releases/latest/download/install.ps1 | iex)" -ForegroundColor Gray
                 Write-Host "================================================================================`n" -ForegroundColor Green
             }
         }
@@ -457,7 +503,7 @@ Parameters:
 
 if ($args -and @($args).Count -gt 0) {
     $boundParams = @{}
-    $switchParams = @("Portable", "Silent", "Uninstall", "NoDesktopShortcut", "Force", "Help")
+    $switchParams = @("Portable", "Silent", "Uninstall", "Purge", "NoDesktopShortcut", "Force", "Help")
     $valueParams = @("Version", "InstallDir", "BaseUrl")
     for ($i = 0; $i -lt $args.Count; $i++) {
         $argToken = [string]$args[$i]

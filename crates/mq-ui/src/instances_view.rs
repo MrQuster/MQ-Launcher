@@ -256,6 +256,7 @@ pub struct InstancesView {
     pub show_import_dialog: bool,
     pub import_file_path: String,
     pub import_name: String,
+    pub import_error: Option<String>,
     pub show_duplicate_dialog: bool,
     pub duplicate_name: String,
     pub show_add_server_dialog: bool,
@@ -294,6 +295,7 @@ impl Default for InstancesView {
             show_import_dialog: false,
             import_file_path: String::new(),
             import_name: String::new(),
+            import_error: None,
             show_duplicate_dialog: false,
             duplicate_name: String::new(),
             show_add_server_dialog: false,
@@ -341,8 +343,10 @@ impl InstancesView {
                         state.show_create_instance_dialog = true;
                     }
                     ui.add_space(6.0);
-                    if button_secondary(ui, &tokens, Some(VectorIcon::Download), "Импорт").clicked()
+                    if button_secondary(ui, &tokens, Some(VectorIcon::Download), "Импорт сборки")
+                        .clicked()
                     {
+                        self.import_error = None;
                         self.show_import_dialog = true;
                     }
                 });
@@ -454,51 +458,201 @@ impl InstancesView {
             }
         }
 
+        if let Some(picked) = state.picked_import_path.take() {
+            self.import_file_path = picked.display().to_string();
+            self.import_error = None;
+            if !self.show_import_dialog {
+                self.show_import_dialog = true;
+            }
+        }
+
+        // Drag-and-drop `.mrpack` onto the Instances screen
+        if !self.show_import_dialog && state.install.is_none() {
+            let dropped_mrpack = ui.ctx().input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .find(|p| {
+                        p.extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("mrpack"))
+                    })
+            });
+            if let Some(pack_path) = dropped_mrpack {
+                state.import_local_pack(pack_path);
+            }
+        }
+
         // Import modal
         if self.show_import_dialog {
-            egui::Window::new("Импорт инстанса (.mrpack или .zip)")
+            let hovered_file = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+            let dropped_file = ui.ctx().input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .next()
+            });
+            if let Some(p) = dropped_file {
+                self.import_file_path = p.display().to_string();
+                self.import_error = None;
+            }
+
+            egui::Window::new("Импорт сборки (.mrpack или .zip)")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .frame(
+                    egui::Frame::window(&egui::Style::default())
+                        .fill(tokens.bg_surface)
+                        .stroke(Stroke::new(1.2_f32, tokens.border_strong))
+                        .corner_radius(RADIUS_CARD)
+                        .inner_margin(egui::Margin::same(16)),
+                )
                 .show(ui.ctx(), |ui| {
-                    let modal_w = 400.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
+                    let modal_w = 460.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
                     ui.set_width(modal_w);
-                    ui.label("Путь к архиву (.mrpack или .zip):");
-                    ui.text_edit_singleline(&mut self.import_file_path);
-                    ui.add_space(4.0);
-                    ui.label("Имя инстанса (опционально):");
-                    ui.text_edit_singleline(&mut self.import_name);
+
+                    let drop_border = if hovered_file {
+                        tokens.accent
+                    } else {
+                        tokens.border
+                    };
+                    egui::Frame::new()
+                        .fill(tokens.bg_surface_hover)
+                        .stroke(Stroke::new(1.2_f32, drop_border))
+                        .corner_radius(RADIUS_CARD)
+                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new(if hovered_file {
+                                        "Отпустите файл .mrpack или .zip для импорта"
+                                    } else {
+                                        "Перетащите файл .mrpack / .zip сюда или выберите через диалог"
+                                    })
+                                    .color(if hovered_file {
+                                        tokens.accent
+                                    } else {
+                                        tokens.text_muted
+                                    })
+                                    .small(),
+                                );
+                            });
+                        });
+
                     ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Путь к архиву (.mrpack или .zip):")
+                            .color(tokens.text_muted)
+                            .small(),
+                    );
+                    ui.horizontal(|ui| {
+                        let input_w = (modal_w - 148.0).max(180.0);
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.import_file_path)
+                                    .hint_text("/path/to/modpack.mrpack")
+                                    .desired_width(input_w),
+                            )
+                            .changed()
+                        {
+                            self.import_error = None;
+                        }
+                        if secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Folder),
+                            "Выбрать файл...",
+                        )
+                        .clicked()
+                        {
+                            let _ = state.cmd_sender.send(UiWorkerCommand::PickImportArchive);
+                        }
+                    });
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Имя инстанса (опционально):")
+                            .color(tokens.text_muted)
+                            .small(),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.import_name)
+                            .hint_text("По умолчанию — из манифеста или имени файла")
+                            .desired_width(modal_w),
+                    );
+
+                    if let Some(ref err) = self.import_error {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(err).color(tokens.danger).small());
+                    }
+
+                    ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if primary_emerald_button(ui, Some(VectorIcon::Check), "Импортировать")
                             .clicked()
                         {
-                            let path = std::path::Path::new(self.import_file_path.trim());
-                            let opt_name = if self.import_name.trim().is_empty() {
-                                None
+                            let trimmed_path = self
+                                .import_file_path
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'');
+                            let path = std::path::Path::new(trimmed_path);
+                            if trimmed_path.is_empty() {
+                                self.import_error =
+                                    Some("Укажите путь к файлу .mrpack или .zip.".to_string());
+                            } else if !path.is_file() {
+                                self.import_error = Some(format!(
+                                    "Файл не найден: {}",
+                                    path.display()
+                                ));
                             } else {
-                                Some(self.import_name.trim())
-                            };
-                            match import_instance_from_zip(
-                                path,
-                                &state.paths.instances_dir(),
-                                opt_name,
-                            ) {
-                                Ok(m) => {
-                                    state.instances.push(m.clone());
-                                    state.selected_instance_id = Some(m.id);
-                                    state.status_message =
-                                        Some(("Инстанс успешно импортирован".to_string(), false));
+                                let opt_name = if self.import_name.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(self.import_name.trim().to_owned())
+                                };
+                                let is_mrpack = path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .is_some_and(|e| e.eq_ignore_ascii_case("mrpack"));
+                                if is_mrpack {
                                     self.show_import_dialog = false;
-                                }
-                                Err(e) => {
-                                    state.status_message =
-                                        Some((format!("Ошибка импорта: {e}"), true));
+                                    self.import_error = None;
+                                    state.import_local_pack_with_name(
+                                        path.to_path_buf(),
+                                        opt_name,
+                                    );
+                                } else {
+                                    match import_instance_from_zip(
+                                        path,
+                                        &state.paths.instances_dir(),
+                                        opt_name.as_deref(),
+                                    ) {
+                                        Ok(m) => {
+                                            state.instances.push(m.clone());
+                                            state.selected_instance_id = Some(m.id);
+                                            state.status_message = Some((
+                                                "Инстанс успешно импортирован".to_string(),
+                                                false,
+                                            ));
+                                            self.show_import_dialog = false;
+                                            self.import_error = None;
+                                        }
+                                        Err(e) => {
+                                            let msg = format!("Ошибка импорта: {e}");
+                                            self.import_error = Some(msg.clone());
+                                            state.status_message = Some((msg, true));
+                                        }
+                                    }
                                 }
                             }
                         }
                         if secondary_glass_button(ui, None, "Отмена").clicked() {
                             self.show_import_dialog = false;
+                            self.import_error = None;
                         }
                     });
                 });
@@ -596,6 +750,40 @@ impl InstancesView {
             } else {
                 self.show_delete_dialog = false;
             }
+        }
+
+        crate::catalog_dialogs::show_overlays(ui.ctx(), state);
+
+        if !state.jobs.jobs.is_empty() {
+            if let Some(prog) = &state.phase_progress {
+                if state.installing_instance.is_none() && state.jobs.active_count() > 0 {
+                    let frac =
+                        crate::state::safe_progress_ratio(prog.completed_items, prog.total_items);
+                    let speed = if prog.mib_per_sec.is_finite() && prog.mib_per_sec > 0.0 {
+                        prog.mib_per_sec * 1024.0 * 1024.0
+                    } else {
+                        0.0
+                    };
+                    crate::widgets::render_detailed_install_progress_card(
+                        ui,
+                        &tokens,
+                        state.current_install_stage,
+                        frac,
+                        speed,
+                        prog.bytes_done,
+                        prog.bytes_total,
+                        prog.completed_items,
+                        prog.total_items,
+                        state.install_eta_secs,
+                        state.install_retries_count,
+                        || {
+                            let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
+                        },
+                    );
+                    ui.add_space(6.0);
+                }
+            }
+            crate::catalog_dialogs::jobs_panel(ui, state);
         }
 
         if state.instances.is_empty() {
@@ -1334,9 +1522,14 @@ impl InstancesView {
             .id_salt("instances_grid_scroll")
             .show(ui, |ui| {
                 let avail_w = ui.available_width();
-                let card_w = 300.0_f32;
                 let spacing = 16.0_f32;
-                let cols = ((avail_w + spacing) / (card_w + spacing)).floor().max(1.0) as usize;
+                let min_outer_w = 350.0_f32;
+                let cols = ((avail_w + spacing) / (min_outer_w + spacing))
+                    .floor()
+                    .max(1.0) as usize;
+                // Account for card_frame inner_margin (14*2) and 1px stroke on each side.
+                let outer_w = (avail_w - spacing * (cols as f32 - 1.0)) / cols as f32;
+                let card_w = (outer_w - 30.0).max(280.0);
 
                 for chunk in instances.chunks(cols) {
                     ui.horizontal(|ui| {
@@ -1462,22 +1655,65 @@ impl InstancesView {
 
                 // Bottom row: Actions
                 ui.horizontal(|ui| {
-                    let play_label = if is_running {
-                        "Стоп"
-                    } else {
-                        "Играть"
-                    };
-                    if primary_emerald_button(ui, Some(VectorIcon::Play), play_label).clicked() {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                    if is_running || is_downloading {
+                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
+                        {
+                            let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
+                        }
+                    } else if is_installed {
+                        let play_label = if state.is_launching && is_selected {
+                            "Запуск..."
+                        } else {
+                            "Играть"
+                        };
+                        if primary_emerald_button(ui, Some(VectorIcon::Play), play_label).clicked()
+                            && !state.is_launching
+                        {
+                            state.selected_instance_id = Some(inst.id.clone());
+                            state.is_launching = true;
+                            let _ = state.cmd_sender.send(UiWorkerCommand::LaunchInstance {
+                                instance_id: inst.id.clone(),
+                                dry_run: false,
+                            });
+                        }
+                    } else if primary_emerald_button(ui, Some(VectorIcon::Download), "Скачать")
+                        .clicked()
+                        && !state.is_launching
+                    {
                         state.selected_instance_id = Some(inst.id.clone());
+                        state.is_launching = true;
+                        let _ = state.cmd_sender.send(UiWorkerCommand::LaunchInstance {
+                            instance_id: inst.id.clone(),
+                            dry_run: false,
+                        });
+                    }
+
+                    if secondary_glass_button(ui, Some(VectorIcon::Layers), "Моды").clicked() {
+                        state.selected_instance_id = Some(inst.id.clone());
+                        self.view_mode = InstanceViewMode::List;
+                        self.current_tab = InstanceDetailTab::Mods;
+                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                            instance_id: inst.id.clone(),
+                        });
                     }
 
                     if secondary_glass_button(ui, Some(VectorIcon::Settings), "Детали").clicked()
                     {
                         state.selected_instance_id = Some(inst.id.clone());
                         self.view_mode = InstanceViewMode::List;
+                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                            instance_id: inst.id.clone(),
+                        });
                     }
 
-                    if secondary_glass_button(ui, Some(VectorIcon::Folder), "Папка").clicked()
+                    if crate::components::icon_button(
+                        ui,
+                        tokens,
+                        VectorIcon::Folder,
+                        "Открыть папку инстанса",
+                    )
+                    .clicked()
                     {
                         let inst_dir = state.paths.instance_dir(inst.id.as_str());
                         let _ = crate::opener::open_that(inst_dir);
@@ -1486,8 +1722,18 @@ impl InstancesView {
             });
         });
 
-        if resp.response.interact(Sense::click()).clicked() {
+        let card_resp = resp.response.interact(Sense::click());
+        if card_resp.double_clicked() {
             state.selected_instance_id = Some(inst.id.clone());
+            self.view_mode = InstanceViewMode::List;
+            let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                instance_id: inst.id.clone(),
+            });
+        } else if card_resp.clicked() {
+            state.selected_instance_id = Some(inst.id.clone());
+            let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                instance_id: inst.id.clone(),
+            });
         }
     }
 
@@ -2138,9 +2384,10 @@ impl InstancesView {
                         {
                             state.show_create_instance_dialog = true;
                         }
-                        if button_secondary(ui, tokens, Some(VectorIcon::Download), "Импорт")
+                        if button_secondary(ui, tokens, Some(VectorIcon::Download), "Импорт сборки")
                             .clicked()
                         {
+                            self.import_error = None;
                             self.show_import_dialog = true;
                         }
                     });
@@ -2250,10 +2497,7 @@ impl InstancesView {
                     ContentSubMode::Installed,
                     format!("Установленные ({installed_count})"),
                 ),
-                (
-                    ContentSubMode::Catalog,
-                    "Каталог (Modrinth / CurseForge)".to_string(),
-                ),
+                (ContentSubMode::Catalog, "Каталог".to_string()),
             ] {
                 let selected = self.content_sub_mode == mode;
                 let text = RichText::new(label).color(if selected {
@@ -2666,14 +2910,12 @@ impl InstancesView {
                                     |ui| {
                                         ui.horizontal_wrapped(|ui| {
                                             ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                                            let name_w = (ui.available_width() - 180.0).max(60.0);
                                             let name_col = if m.enabled {
                                                 tokens.text
                                             } else {
                                                 tokens.text_muted
                                             };
-                                            ui.add_sized(
-                                                [name_w.min(180.0), 18.0],
+                                            ui.add(
                                                 egui::Label::new(
                                                     RichText::new(&m.name).color(name_col).strong(),
                                                 )
@@ -2713,9 +2955,7 @@ impl InstancesView {
                                                 );
                                             }
                                         });
-                                        let file_w = (ui.available_width() - 8.0).max(40.0);
-                                        ui.add_sized(
-                                            [file_w, 16.0],
+                                        ui.add(
                                             egui::Label::new(
                                                 RichText::new(format!("Файл: {}", m.file_name))
                                                     .color(tokens.text_muted)
@@ -3050,14 +3290,12 @@ impl InstancesView {
                             if crate::widgets::smooth_toggle(ui, &mut is_on).changed() {
                                 toggle_pack_file(packs_dir, &name);
                             }
-                            let name_w = (ui.available_width() - 140.0).max(60.0);
                             let name_col = if enabled {
                                 tokens.text
                             } else {
                                 tokens.text_muted
                             };
-                            ui.add_sized(
-                                [name_w, 18.0],
+                            ui.add(
                                 egui::Label::new(RichText::new(&name).color(name_col).strong())
                                     .truncate(),
                             );

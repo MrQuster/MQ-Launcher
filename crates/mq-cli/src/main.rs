@@ -154,6 +154,24 @@ enum Commands {
 
     /// Check for and apply self-updates from GitHub Releases.
     SelfUpdate(SelfUpdateArgs),
+
+    /// Uninstall MQ Launcher from the system (optionally purging instances and settings with --purge).
+    Uninstall(UninstallArgs),
+}
+
+#[derive(Args, Debug)]
+struct UninstallArgs {
+    /// Also delete all user data (instances, mods, worlds, accounts, and settings).
+    #[arg(long)]
+    purge: bool,
+
+    /// Preview files and directories that would be removed without deleting anything.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Skip confirmation prompt.
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -682,6 +700,7 @@ async fn main() -> Result<()> {
         Some(Commands::Bench(args)) => cmd_bench(args).await,
         Some(Commands::About) => cmd_about().await,
         Some(Commands::SelfUpdate(args)) => cmd_self_update(args).await,
+        Some(Commands::Uninstall(args)) => cmd_uninstall(args, paths).await,
     }
 }
 
@@ -738,6 +757,84 @@ async fn cmd_self_update(args: SelfUpdateArgs) -> Result<()> {
             println!("У вас установлена последняя версия v{}", cur_ver);
         }
     }
+    Ok(())
+}
+
+async fn cmd_uninstall(args: UninstallArgs, paths: MqPaths) -> Result<()> {
+    if args.purge
+        && !args.yes
+        && !args.dry_run
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
+        use std::io::Write;
+        print!(
+            "ВНИМАНИЕ: --purge удалит все инстансы, моды, миры и настройки в {} и {}. Продолжить? [y/N]: ",
+            paths.data_dir.display(),
+            paths.config_dir.display()
+        );
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes" | "д" | "да"
+        ) {
+            println!("Удаление отменено.");
+            return Ok(());
+        }
+    }
+
+    let outcome = mq_update::UpdateManager::uninstall(
+        &paths.data_dir,
+        &paths.config_dir,
+        &paths.cache_dir,
+        args.purge,
+        args.dry_run,
+    )?;
+
+    if args.dry_run {
+        println!("[DRY-RUN] Будут удалены следующие компоненты MQ Launcher:");
+    } else {
+        println!("Удаление MQ Launcher завершено.");
+    }
+
+    if outcome.removed_files.is_empty()
+        && outcome.removed_dirs.is_empty()
+        && !outcome.spawned_external_uninstaller
+    {
+        println!("Установленные файлы лаунчера в системе не обнаружены.");
+    } else {
+        for f in &outcome.removed_files {
+            println!("  - файл: {}", f.display());
+        }
+        for d in &outcome.removed_dirs {
+            println!("  - каталог: {}", d.display());
+        }
+        if outcome.spawned_external_uninstaller {
+            println!("  - запущен системный деинсталлятор Windows (unins000.exe)");
+        }
+    }
+
+    if args.purge {
+        if args.dry_run {
+            println!(
+                "[DRY-RUN] Данные пользователя в {} будут удалены.",
+                paths.data_dir.display()
+            );
+        } else {
+            println!(
+                "Пользовательские данные и настройки удалены ({}).",
+                paths.data_dir.display()
+            );
+        }
+    } else {
+        println!(
+            "Ваши инстансы, моды, миры и аккаунты сохранены в: {}",
+            paths.data_dir.display()
+        );
+        println!("Для полного удаления данных используйте: mq uninstall --purge");
+    }
+
     Ok(())
 }
 
@@ -2599,7 +2696,10 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
     }
 
     println!("================================================================================");
-    println!("                   MQ LAUNCHER v2.2.0 — СИСТЕМНЫЙ ДИАГНОСТ (DOCTOR)");
+    println!(
+        "                   MQ LAUNCHER v{} — СИСТЕМНЫЙ ДИАГНОСТ (DOCTOR)",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("================================================================================");
 
     // 1. OS & Architecture
@@ -2679,6 +2779,10 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
         .build()
         .unwrap_or_default();
 
+    let cf_api_key = AppConfig::load_or_default(&paths)
+        .ok()
+        .and_then(|c| c.effective_cf_api_key());
+
     let endpoints = [
         (
             "Mojang Manifest",
@@ -2688,12 +2792,21 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
             "Modrinth API",
             "https://api.modrinth.com/v2/search?query=fabric-api",
         ),
-        ("CurseForge API", "https://api.curseforge.com/v1/categories"),
+        (
+            "CurseForge API",
+            "https://api.curseforge.com/v1/categories?gameId=432",
+        ),
     ];
 
     for (name, url) in endpoints {
         let start = Instant::now();
-        match client.get(url).send().await {
+        let mut req = client.get(url);
+        if name == "CurseForge API" {
+            if let Some(ref key) = cf_api_key {
+                req = req.header("x-api-key", key);
+            }
+        }
+        match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
                 let ms = start.elapsed().as_millis();
@@ -2721,13 +2834,14 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
             free as f64 / (1024.0 * 1024.0 * 1024.0)
         );
     }
+    let version = env!("CARGO_PKG_VERSION");
     println!("================================================================================");
-    println!("[MQ DOCTOR] Все ключевые подсистемы MQ v2.2.0 проанализированы.");
+    println!("[MQ DOCTOR] Все ключевые подсистемы MQ v{version} проанализированы.");
     println!("================================================================================");
 
     if args.export {
         let export_text = format!(
-            "### MQ Launcher v2.2.0 — Системная диагностика\n- ОС: {os_name}\n- Архитектура: {arch}\n- Процессор: {cpu_model} ({num_cpus} ядер)\n- Среды Java: {} шт.\n- Каталог данных: {}\n",
+            "### MQ Launcher v{version} — Системная диагностика\n- ОС: {os_name}\n- Архитектура: {arch}\n- Процессор: {cpu_model} ({num_cpus} ядер)\n- Среды Java: {} шт.\n- Каталог данных: {}\n",
             runtimes.len(),
             data_dir.display()
         );
@@ -3474,6 +3588,17 @@ mod mrpack_cli_tests {
         let sub = Cli::try_parse_from(["mq", "about"]).expect("about subcommand");
         assert!(matches!(sub.command, Some(Commands::About)));
         assert!(sub.open_pack.is_none());
+
+        let uninst = Cli::try_parse_from(["mq", "uninstall", "--purge", "--dry-run", "-y"])
+            .expect("uninstall subcommand");
+        match uninst.command {
+            Some(Commands::Uninstall(u)) => {
+                assert!(u.purge);
+                assert!(u.dry_run);
+                assert!(u.yes);
+            }
+            _ => panic!("expected Uninstall command"),
+        }
     }
 
     #[test]

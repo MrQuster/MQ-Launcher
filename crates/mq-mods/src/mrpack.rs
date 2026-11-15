@@ -319,6 +319,13 @@ pub fn parse_mrpack_index_from_archive(mrpack_path: &Path) -> MqResult<MrpackInd
 
     let index: MrpackIndex = serde_json::from_slice(&raw_bytes)?;
 
+    if index.format_version != 1 {
+        return Err(MqError::Metadata(format!(
+            "unsupported .mrpack formatVersion {} (expected 1)",
+            index.format_version
+        )));
+    }
+
     if !index.game.trim().is_empty() && !index.game.trim().eq_ignore_ascii_case("minecraft") {
         return Err(MqError::Metadata(format!(
             "unsupported .mrpack game '{}' (expected 'minecraft')",
@@ -1384,6 +1391,34 @@ mod tests {
         assert_eq!(
             fs::read_to_string(inst_dir.join("config/untouched.toml")).unwrap(),
             "version = 2\n"
+        );
+    }
+
+    #[test]
+    fn parse_mrpack_rejects_unsupported_format_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack_path = tmp.path().join("bad-format.mrpack");
+        {
+            let file = File::create(&pack_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("modrinth.index.json", opts).unwrap();
+            let manifest = serde_json::json!({
+                "formatVersion": 2,
+                "game": "minecraft",
+                "versionId": "1.0.0",
+                "name": "Future Pack",
+                "dependencies": { "minecraft": "1.20.1" },
+                "files": []
+            });
+            std::io::Write::write_all(&mut zw, manifest.to_string().as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let err = parse_mrpack_index_from_archive(&pack_path).unwrap_err();
+        assert!(
+            matches!(err, MqError::Metadata(ref msg) if msg.contains("formatVersion")),
+            "expected formatVersion metadata error, got: {err:?}"
         );
     }
 }

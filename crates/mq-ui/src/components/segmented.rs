@@ -49,7 +49,16 @@ pub fn segmented_switch<T: PartialEq + Clone>(
             w += 18.0;
         }
         if !opt.label.is_empty() {
-            w += opt.label.len() as f32 * 7.5 + 8.0;
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(
+                    opt.label.to_owned(),
+                    egui::FontId::proportional(12.5),
+                    tokens.text,
+                )
+                .size()
+                .x;
+            w += text_w + 16.0;
         }
         w = w.max(34.0);
         widths.push(w);

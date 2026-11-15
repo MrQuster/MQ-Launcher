@@ -94,6 +94,15 @@ impl UiState {
 
     /// Starts importing a local `.mrpack` / CurseForge `.zip`: shows the confirmation dialog.
     pub fn import_local_pack(&mut self, path: std::path::PathBuf) {
+        self.import_local_pack_with_name(path, None);
+    }
+
+    /// Starts importing a local `.mrpack` / CurseForge `.zip` with an optional pre-filled instance name.
+    pub fn import_local_pack_with_name(
+        &mut self,
+        path: std::path::PathBuf,
+        custom_name: Option<String>,
+    ) {
         let lower = path.to_string_lossy().to_ascii_lowercase();
         if !(lower.ends_with(".mrpack") || lower.ends_with(".zip")) {
             self.status_message = Some((
@@ -102,16 +111,20 @@ impl UiState {
             ));
             return;
         }
-        let title = path
+        let stem = path
             .file_stem()
             .and_then(|n| n.to_str())
             .unwrap_or("Сборка")
             .to_string();
+        let instance_name = custom_name
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| stem.clone());
         let hit = CatalogHit {
             source: mq_mods::CatalogSource::Modrinth,
             project_id: String::new(),
-            slug: title.clone(),
-            title: title.clone(),
+            slug: stem.clone(),
+            title: stem,
             description: String::new(),
             author: "Локальный файл".to_string(),
             downloads: 0,
@@ -124,7 +137,9 @@ impl UiState {
         self.install = Some(InstallDialog::new(
             hit,
             None,
-            InstallTarget::NewInstance { name: title },
+            InstallTarget::NewInstance {
+                name: instance_name,
+            },
         ));
         self.install_seq += 1;
         let request_id = self.install_seq;
@@ -181,6 +196,10 @@ impl UiState {
 
     /// Changes the target instance of the open dialog and recomputes the plan.
     pub fn set_install_target(&mut self, id: InstanceId) {
+        self.selected_instance_id = Some(id.clone());
+        let _ = self.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+            instance_id: id.clone(),
+        });
         if let Some(d) = self.install.as_mut() {
             d.target = InstallTarget::Existing(id);
             d.selected_optionals.clear();

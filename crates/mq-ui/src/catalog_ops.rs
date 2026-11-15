@@ -25,9 +25,11 @@ pub struct OpsCtx {
     pub config: AppConfig,
     pub paths: MqPaths,
     pub net: Arc<NetEngine>,
+    pub cas: mq_install::CasStore,
     pub epoch: Arc<CancelEpoch>,
     pub pool: Arc<ComputePool>,
     pub bus: EventBus,
+    pub mock_base_url: Option<String>,
 }
 
 const PACK_MAX_BYTES: u64 = 512 * 1024 * 1024;
@@ -614,6 +616,9 @@ pub async fn run_modpack_job(
     if cancel.load(Ordering::SeqCst) {
         return Err("Отменено".to_string());
     }
+    if preview.mc_version.trim().is_empty() {
+        return Err("В манифесте сборки не указана версия Minecraft".to_string());
+    }
     let mgr = mq_instances::InstanceManager::new(ctx.paths.clone());
     let manifest = mgr
         .create_instance(
@@ -634,7 +639,7 @@ pub async fn run_modpack_job(
         .to_string();
 
     let result: Result<Vec<BlockedDownload>, String> = async {
-        if is_mrpack(&name) {
+        let blocked = if is_mrpack(&name) {
             mq_mods::install_mrpack(
                 &archive,
                 &dir,
@@ -646,7 +651,7 @@ pub async fn run_modpack_job(
             )
             .await
             .map(|_| Vec::new())
-            .map_err(|e| err_text(&ctx.config, &e))
+            .map_err(|e| err_text(&ctx.config, &e))?
         } else {
             let cf = CurseForgeClient::from_config(&ctx.config).ok();
             mq_mods::install_curseforge_modpack(
@@ -660,8 +665,39 @@ pub async fn run_modpack_job(
             )
             .await
             .map(|o| o.blocked_downloads)
-            .map_err(|e| err_text(&ctx.config, &e))
+            .map_err(|e| err_text(&ctx.config, &e))?
+        };
+
+        if cancel.load(Ordering::SeqCst) {
+            return Err("Отменено".to_string());
         }
+
+        // Install Minecraft, mod loader (Fabric/Quilt/Forge/NeoForge), and compatible Java runtime.
+        let req = mq_install::InstallRequest {
+            mc_version: preview.mc_version.clone(),
+            loader: preview.loader,
+            loader_version: preview.loader_version.clone(),
+            instance_dir: dir.clone(),
+            mock_base_url: ctx.mock_base_url.clone(),
+        };
+        let summary = mq_install::install_game(
+            &req,
+            &ctx.paths,
+            &ctx.net,
+            &ctx.cas,
+            &ctx.pool,
+            &guard,
+            Some(&ctx.bus),
+        )
+        .await
+        .map_err(|e| err_text(&ctx.config, &e))?;
+
+        ctx.bus.publish(mq_core::Event::PhaseCompleted {
+            phase: "install_game".to_string(),
+            elapsed_ms: summary.elapsed_ms,
+        });
+
+        Ok(blocked)
     }
     .await;
 

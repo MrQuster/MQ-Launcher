@@ -569,7 +569,7 @@ async fn install_game_transactional(
                 let prep = crate::forge::prepare_forge_installation(
                     &client,
                     paths,
-                    &installing_dir,
+                    installing_dir,
                     &req.mc_version,
                     req.loader_version.as_deref(),
                     req.mock_base_url.as_deref(),
@@ -583,9 +583,7 @@ async fn install_game_transactional(
             ModLoaderKind::NeoForge => {
                 return Err((
                     current_stage,
-                    MqError::Metadata(
-                        "NeoForge installation is not yet supported".to_string(),
-                    ),
+                    MqError::Metadata("NeoForge installation is not yet supported".to_string()),
                 ));
             }
             ModLoaderKind::Vanilla => {}

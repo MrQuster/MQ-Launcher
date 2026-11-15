@@ -84,6 +84,7 @@ pub enum UiWorkerResponse {
         instance_id: InstanceId,
         exit_code: i32,
     },
+    ImportArchivePicked(Option<std::path::PathBuf>),
 }
 
 /// Successful result of an install job.
@@ -156,6 +157,7 @@ pub enum UiWorkerCommand {
     PollManual {
         dropped: Vec<std::path::PathBuf>,
     },
+    PickImportArchive,
     InstallMod {
         instance_id: InstanceId,
         project_id_or_slug: String,
@@ -295,6 +297,7 @@ pub struct UiState {
     pub pending_mrpack_path: Option<std::path::PathBuf>,
     pub mrpack_ipc_receiver:
         Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<std::path::PathBuf>>>>,
+    pub picked_import_path: Option<std::path::PathBuf>,
 }
 
 impl UiState {
@@ -396,6 +399,7 @@ impl UiState {
             show_delete_confirm_dialog: false,
             pending_mrpack_path: None,
             mrpack_ipc_receiver: None,
+            picked_import_path: None,
         })
     }
 
@@ -405,18 +409,32 @@ impl UiState {
             Ok(out) => {
                 self.jobs.finish(job_id, Ok(()));
                 let _ = self.cmd_sender.send(UiWorkerCommand::RefreshInstances);
-                if let Some(id) = self.selected_instance_id.clone() {
+                let target_id = out
+                    .instance_id
+                    .clone()
+                    .or_else(|| self.selected_instance_id.clone());
+                if let Some(id) = target_id {
                     let _ = self
                         .cmd_sender
                         .send(UiWorkerCommand::ScanInstanceMods { instance_id: id });
                 }
+                self.status_message = Some(("Установка контента завершена".to_string(), false));
                 if let Some(id) = out.instance_id {
+                    self.selected_instance_id = Some(id.clone());
                     if !out.blocked.is_empty() {
                         self.open_manual_dialog(&id, out.blocked);
                     }
                 }
             }
-            Err(e) => self.jobs.finish(job_id, Err(e)),
+            Err(e) => {
+                self.jobs.finish(job_id, Err(e.clone()));
+                self.status_message = Some((format!("Ошибка установки: {e}"), true));
+            }
+        }
+        if self.jobs.active_count() == 0 && self.installing_instance.is_none() {
+            self.active_phase = None;
+            self.phase_progress = None;
+            self.install_eta_secs = None;
         }
     }
 
@@ -498,6 +516,9 @@ impl UiState {
                 }
                 UiWorkerResponse::JobFinished { job_id, result } => {
                     self.finish_job(job_id, result);
+                }
+                UiWorkerResponse::ImportArchivePicked(path) => {
+                    self.picked_import_path = path;
                 }
                 UiWorkerResponse::ManualProgress {
                     pending,

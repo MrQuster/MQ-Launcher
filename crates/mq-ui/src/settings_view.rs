@@ -40,6 +40,8 @@ pub struct SettingsView {
     pub is_downloading_update: bool,
     pub update_progress: f32,
     pub available_update: Option<mq_update::ReleaseAssetInfo>,
+    pub confirm_uninstall: bool,
+    pub uninstall_purge_data: bool,
 }
 
 impl SettingsView {
@@ -1197,8 +1199,104 @@ impl SettingsView {
                         }
                     }
                 });
+
+                ui.add_space(12.0);
+                self.render_uninstall_card(ui, state, &tokens);
             },
         );
+    }
+
+    fn render_uninstall_card(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
+        let card = solid_card_frame_with_config(tokens, &state.config.theme)
+            .inner_margin(egui::Margin::same(14));
+
+        card.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("Удаление MQ Launcher")
+                    .color(tokens.text)
+                    .strong()
+                    .size(15.0),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Удаляет бинарник лаунчера, ярлык и иконку в системе (Linux и Windows). Инстансы Minecraft, моды, миры и аккаунты по умолчанию сохраняются.",
+                )
+                .color(tokens.text_muted)
+                .small(),
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                if secondary_glass_button(
+                    ui,
+                    Some(VectorIcon::Copy),
+                    "Скопировать команду удаления (Терминал / PowerShell)",
+                )
+                .clicked()
+                {
+                    let cmd = if cfg!(target_os = "windows") {
+                        "$env:MQ_UNINSTALL=1; irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1 | iex"
+                    } else {
+                        "curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh -s -- --uninstall"
+                    };
+                    ui.ctx().copy_text(cmd.to_string());
+                    state.status_message =
+                        Some(("Команда удаления скопирована в буфер обмена".to_string(), false));
+                }
+
+                if !self.confirm_uninstall
+                    && secondary_glass_button(
+                        ui,
+                        Some(VectorIcon::Trash),
+                        "Удалить лаунчер...",
+                    )
+                    .clicked()
+                {
+                    self.confirm_uninstall = true;
+                }
+            });
+
+            if self.confirm_uninstall {
+                ui.add_space(8.0);
+                ui.checkbox(
+                    &mut self.uninstall_purge_data,
+                    "Также удалить все инстансы, моды, сохранения миров и настройки",
+                );
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                    if secondary_glass_button(
+                        ui,
+                        Some(VectorIcon::Trash),
+                        "Подтвердить удаление",
+                    )
+                    .clicked()
+                    {
+                        match mq_update::UpdateManager::uninstall(
+                            &state.paths.data_dir,
+                            &state.paths.config_dir,
+                            &state.paths.cache_dir,
+                            self.uninstall_purge_data,
+                            false,
+                        ) {
+                            Ok(_) => std::process::exit(0),
+                            Err(e) => {
+                                state.status_message =
+                                    Some((format!("Ошибка удаления: {e}"), true));
+                                self.confirm_uninstall = false;
+                            }
+                        }
+                    }
+                    if secondary_glass_button(ui, None, "Отмена").clicked() {
+                        self.confirm_uninstall = false;
+                        self.uninstall_purge_data = false;
+                    }
+                });
+            }
+        });
     }
 
     fn render_about_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
@@ -1268,6 +1366,9 @@ impl SettingsView {
                         }
                     });
                 });
+
+                ui.add_space(12.0);
+                self.render_uninstall_card(ui, state, &tokens);
             },
         );
     }

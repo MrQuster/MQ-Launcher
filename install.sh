@@ -65,6 +65,7 @@ MQ Launcher — Solid Edition (1-Command Linux Installer)
 Опции:
   -v, --version <TAG>       Установить конкретную версию/тег (по умолчанию: latest)
   -u, --uninstall           Удалить лаунчер (бинарник, ярлык, иконку). Пользовательские данные сохраняются!
+  -p, --purge               Вместе с --uninstall полностью удалить инстансы, моды, миры, аккаунты и настройки
   -n, --dry-run             Симуляция выполнения без изменения файлов в системе
       --install-dir <DIR>   Директория для установки бинарника (или через переменную MQ_INSTALL_DIR)
       --skip-deps           Пропустить проверку зависимостей динамических библиотек (ldd)
@@ -264,10 +265,18 @@ perform_uninstall() {
     app_dir="$2"
     icon_dir="$3"
     dry_run="$4"
+    purge_mode="${5:-0}"
 
     target_bin="${bin_dir}/mq"
+    target_old="${bin_dir}/mq.old"
     target_desktop="${app_dir}/mq.desktop"
     target_icon="${icon_dir}/mq.svg"
+    desktop_shortcut="${HOME}/Desktop/mq.desktop"
+    desktop_shortcut_ru="${HOME}/Рабочий стол/mq.desktop"
+
+    user_data_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/mq"
+    user_config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/mq"
+    user_cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/mq"
 
     echo "================================================================================"
     printf "         %bMQ Launcher — Удаление компонентов%b\n" "${BOLD}" "${RESET}"
@@ -276,20 +285,39 @@ perform_uninstall() {
     if [ "${dry_run}" -eq 1 ]; then
         log_info "[DRY-RUN] Будут удалены следующие файлы:"
         printf "  - %s\n" "${target_bin}"
+        printf "  - %s\n" "${target_old}"
         printf "  - %s\n" "${target_desktop}"
         printf "  - %s\n" "${target_icon}"
-        log_success "[DRY-RUN] Пользовательские данные (~/.local/share/mq, ~/.config/mq) будут сохранены."
+        printf "  - %s\n" "${desktop_shortcut}"
+        printf "  - %s\n" "${desktop_shortcut_ru}"
+        if [ "${purge_mode}" -eq 1 ]; then
+            log_warn "[DRY-RUN] Режим --purge: также будут удалены каталоги данных:"
+            printf "  - %s\n" "${user_data_dir}"
+            printf "  - %s\n" "${user_config_dir}"
+            printf "  - %s\n" "${user_cache_dir}"
+        else
+            log_success "[DRY-RUN] Пользовательские данные (${user_data_dir}, ${user_config_dir}) будут сохранены."
+        fi
         return 0
     fi
 
     removed_count=0
-    for f in "${target_bin}" "${target_desktop}" "${target_icon}"; do
-        if [ -f "${f}" ]; then
+    for f in "${target_bin}" "${target_old}" "${target_desktop}" "${target_icon}" "${desktop_shortcut}" "${desktop_shortcut_ru}"; do
+        if [ -f "${f}" ] || [ -L "${f}" ]; then
             rm -f "${f}"
             log_info "Удален: ${f}"
             removed_count=$((removed_count + 1))
         fi
     done
+
+    if [ "${purge_mode}" -eq 1 ]; then
+        for d in "${user_data_dir}" "${user_config_dir}" "${user_cache_dir}"; do
+            if [ -d "${d}" ]; then
+                rm -rf "${d}"
+                log_info "Удален каталог данных: ${d}"
+            fi
+        done
+    fi
 
     # Update desktop database & icon cache
     if command -v update-desktop-database >/dev/null 2>&1; then
@@ -301,9 +329,13 @@ perform_uninstall() {
 
     echo ""
     log_success "MQ Launcher успешно деинсталлирован (${removed_count} файлов удалено)."
-    log_info "ВАЖНО: Ваши данные Minecraft, моды, инстансы и профили сохранены в:"
-    printf "  %s\n" "${XDG_DATA_HOME:-${HOME}/.local/share}/mq"
-    printf "  %s\n" "${XDG_CONFIG_HOME:-${HOME}/.config}/mq"
+    if [ "${purge_mode}" -eq 1 ]; then
+        log_info "Пользовательские данные, инстансы и настройки удалены (--purge)."
+    else
+        log_info "ВАЖНО: Ваши данные Minecraft, моды, инстансы и профили сохранены в:"
+        printf "  %s\n" "${user_data_dir}"
+        printf "  %s\n" "${user_config_dir}"
+    fi
     return 0
 }
 
@@ -312,6 +344,13 @@ main() {
 
     version="${MQ_VERSION:-latest}"
     uninstall_mode=0
+    if [ "${MQ_UNINSTALL:-0}" = "1" ] || [ "${MQ_UNINSTALL:-}" = "true" ]; then
+        uninstall_mode=1
+    fi
+    purge_mode=0
+    if [ "${MQ_PURGE:-0}" = "1" ] || [ "${MQ_PURGE:-}" = "true" ]; then
+        purge_mode=1
+    fi
     dry_run=0
     skip_deps=0
     minisign_pubkey="${MQ_MINISIGN_PUBKEY:-}"
@@ -337,6 +376,10 @@ main() {
                 ;;
             -u|--uninstall)
                 uninstall_mode=1
+                shift
+                ;;
+            -p|--purge)
+                purge_mode=1
                 shift
                 ;;
             -n|--dry-run)
@@ -389,7 +432,7 @@ main() {
     icon_dir="${data_dir}/icons/hicolor/scalable/apps"
 
     if [ "${uninstall_mode}" -eq 1 ]; then
-        perform_uninstall "${bin_dir}" "${app_dir}" "${icon_dir}" "${dry_run}"
+        perform_uninstall "${bin_dir}" "${app_dir}" "${icon_dir}" "${dry_run}" "${purge_mode}"
         exit 0
     fi
 
@@ -590,7 +633,7 @@ main() {
     printf " %bКоманда запуска:%b   %bmq%b (или %s)\n" "${CYAN}" "${RESET}" "${BOLD}" "${RESET}" "${target_bin_path}"
     printf " %bЯрлык меню:%b        %s\n" "${CYAN}" "${RESET}" "${target_desktop_path}"
     printf " %bИконка:%b            %s\n" "${CYAN}" "${RESET}" "${target_icon_path}"
-    printf " %bУдаление:%b          sh %s/install.sh --uninstall\n" "${CYAN}" "${RESET}" "${bin_dir}"
+    printf " %bУдаление:%b          mq uninstall (или curl -fsSL https://github.com/%s/%s/releases/latest/download/install.sh | sh -s -- --uninstall)\n" "${CYAN}" "${RESET}" "${repo_user}" "${repo_name}"
 
     if [ "${in_path}" -eq 0 ]; then
         echo "--------------------------------------------------------------------------------"

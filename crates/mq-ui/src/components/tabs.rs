@@ -40,7 +40,16 @@ pub fn underline_tabs<T: Copy + PartialEq>(
                         tokens.text_muted
                     };
 
-                    let mut width = label.len() as f32 * 8.0 + 16.0;
+                    let text_w = ui
+                        .painter()
+                        .layout_no_wrap(
+                            label.to_owned(),
+                            egui::FontId::proportional(13.5),
+                            text_color,
+                        )
+                        .size()
+                        .x;
+                    let mut width = text_w + 20.0;
                     if opt_icon.is_some() {
                         width += 20.0;
                     }

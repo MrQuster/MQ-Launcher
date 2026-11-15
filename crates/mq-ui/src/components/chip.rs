@@ -33,13 +33,30 @@ impl<'a> FilterChip<'a> {
     }
 
     pub fn show(self, ui: &mut Ui, tokens: &Tokens) -> Response {
-        let mut width = 16.0; // Left and right padding
+        let label_w = ui
+            .painter()
+            .layout_no_wrap(
+                self.label.to_string(),
+                egui::FontId::proportional(12.0),
+                tokens.text,
+            )
+            .size()
+            .x;
+        let mut width = 16.0 + label_w; // Left/right padding + label
         if self.dot_color.is_some() {
-            width += 14.0; // Dot + spacing
+            width += 12.0; // Dot + spacing
         }
-        width += self.label.len() as f32 * 7.5;
         if let Some(cnt) = self.count {
-            width += format!(" {cnt}").len() as f32 * 7.0 + 8.0;
+            let cnt_w = ui
+                .painter()
+                .layout_no_wrap(
+                    format!("{cnt}"),
+                    egui::FontId::monospace(11.0),
+                    tokens.text_muted,
+                )
+                .size()
+                .x;
+            width += cnt_w + 8.0;
         }
         width = width.max(48.0);
 
