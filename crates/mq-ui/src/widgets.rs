@@ -11,7 +11,7 @@ use mq_auth::{generate_offline_geometric_avatar, SkinHeadAvatar};
 
 use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{
-    blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BG_DEEP_GRAPHITE,
+    blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD,
     BORDER_SUBTLE, BUTTON_PADDING, CARD_SURFACE, RADIUS_BUTTON, RADIUS_TAG, TEXT_PRIMARY,
 };
 
@@ -525,18 +525,20 @@ fn render_styled_button(
     response
 }
 
-/// Primary accent action button (`tokens.accent` fill, high-contrast ink text/icon, `6px` rounding).
+/// Primary accent action button (tinted surface with `tokens.accent` border, `6px` rounding).
 pub fn primary_emerald_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str) -> Response {
     let tokens = Tokens::active(ui.ctx());
-    let fg_color = crate::components::button::contrast_fg_for_bg(tokens.accent_text, tokens.accent);
+    let bg = blend_color(tokens.bg_surface, tokens.accent, 0.16);
+    let bg_hover = blend_color(tokens.bg_surface, tokens.accent, 0.28);
+    let fg_color = crate::components::button::contrast_fg_for_bg(tokens.text, bg);
     render_styled_button(
         ui,
         icon,
         label,
+        bg,
+        bg_hover,
+        tokens.accent.gamma_multiply(0.85),
         tokens.accent,
-        tokens.accent_hover,
-        tokens.accent,
-        tokens.text,
         fg_color,
     )
 }
@@ -717,7 +719,7 @@ pub fn version_badge(ui: &mut Ui, text: &str, color: Color32) {
     let text_col = if tokens.is_light() {
         blend_color(color, tokens.text, 0.35)
     } else {
-        color
+        blend_color(color, tokens.text, 0.25)
     };
     let font_id = FontId::monospace(11.5);
     let galley = ui
@@ -730,14 +732,14 @@ pub fn version_badge(ui: &mut Ui, text: &str, color: Color32) {
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let bg = if tokens.is_light() {
-            blend_color(tokens.bg_surface, color, 0.14)
+            blend_color(tokens.bg_surface, color, 0.12)
         } else {
-            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 32)
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24)
         };
         let border = if tokens.is_light() {
-            blend_color(tokens.border, color, 0.45)
+            blend_color(tokens.border, color, 0.35)
         } else {
-            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 110)
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 72)
         };
         painter.rect_filled(rect, RADIUS_TAG, bg);
         painter.rect_stroke(
@@ -847,15 +849,19 @@ pub fn hero_action_button(
     label: &str,
     accent_color: Color32,
 ) -> Response {
+    let tokens = Tokens::active(ui.ctx());
+    let bg = blend_color(tokens.bg_surface, accent_color, 0.22);
+    let bg_hover = blend_color(tokens.bg_surface, accent_color, 0.34);
+    let fg_color = crate::components::button::contrast_fg_for_bg(tokens.text, bg);
     let font_id = FontId::proportional(15.0);
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), font_id, BG_DEEP_GRAPHITE);
+        .layout_no_wrap(label.to_owned(), font_id, fg_color);
     let icon_side = 18.0;
     let icon_gap = 10.0;
     let desired_width =
         (BUTTON_PADDING.x * 2.2 + icon_side + icon_gap + galley.size().x).max(140.0);
-    let desired_height = 40.0;
+    let desired_height = 38.0;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(desired_width, desired_height), Sense::click());
 
@@ -864,15 +870,11 @@ pub fn hero_action_button(
         let pulse = ((time * 3.2).sin() * 0.5 + 0.5) as f32;
         let hovered = response.hovered() && ui.is_enabled();
         let active = response.is_pointer_button_down_on() && ui.is_enabled();
-        let fill = if active || hovered {
-            accent_color.gamma_multiply(1.15)
-        } else {
-            accent_color
-        };
+        let fill = if active || hovered { bg_hover } else { bg };
 
         let painter = ui.painter();
-        let glow_expand = if hovered { 3.0 } else { 1.0 + pulse * 2.0 };
-        let glow_alpha = if hovered { 0.45 } else { 0.15 + pulse * 0.15 };
+        let glow_expand = if hovered { 2.0 } else { 1.0 + pulse * 1.5 };
+        let glow_alpha = if hovered { 0.35 } else { 0.12 + pulse * 0.12 };
         painter.rect_filled(
             rect.expand(glow_expand),
             RADIUS_BUTTON,
@@ -883,7 +885,7 @@ pub fn hero_action_button(
         painter.rect_stroke(
             rect,
             RADIUS_BUTTON,
-            Stroke::new(1.0_f32, Color32::WHITE.gamma_multiply(0.85)),
+            Stroke::new(1.5_f32, accent_color),
             StrokeKind::Inside,
         );
 
@@ -893,11 +895,11 @@ pub fn hero_action_button(
             Pos2::new(cursor_x + icon_side * 0.5, rect.center().y),
             Vec2::splat(icon_side),
         );
-        paint_vector_icon(painter, icon_rect, icon, BG_DEEP_GRAPHITE);
+        paint_vector_icon(painter, icon_rect, icon, accent_color);
         cursor_x += icon_side + icon_gap;
 
         let text_pos = Pos2::new(cursor_x, rect.center().y - galley.size().y * 0.5);
-        painter.galley(text_pos, galley, BG_DEEP_GRAPHITE);
+        painter.galley(text_pos, galley, fg_color);
     }
     response
 }
