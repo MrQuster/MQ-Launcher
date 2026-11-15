@@ -2,6 +2,7 @@
 
 use egui::{CursorIcon, Response, Sense, Stroke, Ui, Vec2};
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_vector_icon, VectorIcon};
 
@@ -145,6 +146,21 @@ impl<'a, T: Clone + PartialEq> Select<'a, T> {
         if changed {
             resp.mark_changed();
         }
+
+        register_widget(
+            ui,
+            &resp,
+            ElementMeta::new(ElementKind::Select)
+                .id(self.id_source)
+                .label(if self.label_prefix.is_empty() {
+                    current_label
+                } else {
+                    self.label_prefix
+                })
+                .text(display_text.as_str())
+                .fg(tokens.text)
+                .bg(bg),
+        );
 
         resp
     }

@@ -2,6 +2,7 @@
 
 use egui::{Stroke, Ui, Vec2};
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_TAG};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub fn render_badge(ui: &mut Ui, tokens: &Tokens, text: &str, kind: BadgeKind) {
         .layout_no_wrap(text.to_owned(), egui::FontId::proportional(11.0), fg);
     let size = galley.size() + padding * 2.0;
 
-    let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect(
         rect,
@@ -38,4 +39,14 @@ pub fn render_badge(ui: &mut Ui, tokens: &Tokens, text: &str, kind: BadgeKind) {
         egui::StrokeKind::Inside,
     );
     painter.galley(rect.min + padding, galley, fg);
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::Badge)
+            .label(text)
+            .text(text)
+            .interactive(false)
+            .fg(fg)
+            .bg(bg),
+    );
 }

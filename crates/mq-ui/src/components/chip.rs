@@ -2,6 +2,7 @@
 
 use egui::{Color32, CursorIcon, Rect, Response, Sense, Stroke, Ui, Vec2};
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_TAG};
 
 /// Toggleable filter chip with optional colored level dot and count badge.
@@ -131,6 +132,17 @@ impl<'a> FilterChip<'a> {
                 tokens.text_muted,
             );
         }
+
+        register_widget(
+            ui,
+            &resp,
+            ElementMeta::new(ElementKind::Chip)
+                .label(self.label)
+                .text(self.label)
+                .active(self.active)
+                .fg(text_color)
+                .bg(bg_fill),
+        );
 
         resp
     }

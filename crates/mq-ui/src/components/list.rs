@@ -2,6 +2,7 @@
 
 use egui::{CursorIcon, Response, Sense, Stroke, Ui, Vec2};
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::theme::Tokens;
 
 pub fn list_row<R>(
@@ -36,6 +37,14 @@ pub fn list_row<R>(
     let content_rect = rect.shrink2(Vec2::new(12.0, 4.0));
     let mut row_ui = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
     let res = add_contents(&mut row_ui);
+
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::ListRow)
+            .fg(tokens.text)
+            .bg(bg_color),
+    );
 
     (response, res)
 }

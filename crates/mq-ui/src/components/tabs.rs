@@ -4,6 +4,7 @@
 
 use egui::{CursorIcon, Response, ScrollArea, Sense, Stroke, Ui, Vec2};
 
+use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_vector_icon, VectorIcon};
 
@@ -110,6 +111,17 @@ pub fn underline_tabs<T: Copy + PartialEq>(
                             Stroke::new(2.5_f32, tokens.accent),
                         );
                     }
+
+                    let mut meta = ElementMeta::new(ElementKind::Tab)
+                        .label(label)
+                        .text(label)
+                        .active(is_selected)
+                        .fg(text_color)
+                        .bg(tokens.bg_app);
+                    if let Some(icon) = opt_icon {
+                        meta = meta.tech_name(icon_tech_name(icon));
+                    }
+                    register_widget(ui, &response, meta);
                 }
             });
         });

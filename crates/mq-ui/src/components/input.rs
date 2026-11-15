@@ -3,6 +3,7 @@
 
 use egui::{CursorIcon, Key, Modifiers, Response, Stroke, TextEdit, Ui, Vec2};
 
+use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_vector_icon, VectorIcon};
 
@@ -84,7 +85,7 @@ impl<'a> SearchField<'a> {
             .text_color(tokens.text)
             .frame(false);
 
-        let edit_id = ui.make_persistent_id("search_field_edit");
+        let edit_id = ui.make_persistent_id(("search_field_edit", self.placeholder));
         text_edit = text_edit.id(edit_id);
         let resp = child_ui.add(text_edit);
 
@@ -103,7 +104,7 @@ impl<'a> SearchField<'a> {
                 egui::pos2(outer_rect.right() - 14.0, outer_rect.center().y),
                 Vec2::splat(16.0),
             );
-            let clear_id = ui.make_persistent_id("search_clear_btn");
+            let clear_id = ui.make_persistent_id(("search_clear_btn", self.placeholder));
             let clear_resp = ui.interact(clear_rect, clear_id, egui::Sense::click());
             if clear_resp.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -118,6 +119,14 @@ impl<'a> SearchField<'a> {
                 tokens.text_muted
             };
             paint_vector_icon(ui.painter(), clear_rect, VectorIcon::Cross, clear_color);
+            register_widget(
+                ui,
+                &clear_resp,
+                ElementMeta::new(ElementKind::IconButton)
+                    .tech_name(icon_tech_name(VectorIcon::Cross))
+                    .fg(clear_color)
+                    .bg(tokens.bg_input),
+            );
         }
 
         if resp.has_focus() {
@@ -128,6 +137,16 @@ impl<'a> SearchField<'a> {
                 egui::StrokeKind::Outside,
             );
         }
+
+        register_widget(
+            ui,
+            &resp,
+            ElementMeta::new(ElementKind::Input)
+                .label(self.placeholder)
+                .text(self.query.as_str())
+                .fg(tokens.text)
+                .bg(tokens.bg_input),
+        );
 
         resp
     }

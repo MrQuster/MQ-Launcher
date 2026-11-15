@@ -2,6 +2,7 @@
 
 use egui::{CursorIcon, Response, Sense, Stroke, Ui, Vec2};
 
+use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_vector_icon, VectorIcon};
 
@@ -152,6 +153,23 @@ pub fn segmented_switch<T: PartialEq + Clone>(
                 fg,
             );
         }
+
+        let seg_bg = if is_selected {
+            tokens.bg_surface_hover
+        } else {
+            tokens.bg_input
+        };
+        let mut meta = ElementMeta::new(ElementKind::SegmentedOption)
+            .label(&opt.label)
+            .text(&opt.label)
+            .tooltip_opt(opt.tooltip.as_deref())
+            .active(is_selected)
+            .fg(fg)
+            .bg(seg_bg);
+        if let Some(icon) = opt.icon {
+            meta = meta.tech_name(icon_tech_name(icon));
+        }
+        register_widget(ui, &item_resp, meta);
 
         current_x += seg_w;
     }

@@ -9,6 +9,7 @@ use egui::{
 };
 use mq_auth::{generate_offline_geometric_avatar, SkinHeadAvatar};
 
+use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{
     blend_color, contrast_text_for, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BG_DEEP_GRAPHITE,
     BORDER_SUBTLE, BUTTON_PADDING, CARD_SURFACE, RADIUS_BUTTON, RADIUS_TAG, TEXT_PRIMARY,
@@ -507,6 +508,20 @@ fn render_styled_button(
         painter.galley(text_pos, galley, fg_color);
     }
 
+    let mut meta = ElementMeta::new(if label.is_empty() && icon.is_some() {
+        ElementKind::IconButton
+    } else {
+        ElementKind::Button
+    })
+    .label(label)
+    .text(label)
+    .fg(fg_color)
+    .bg(bg_idle);
+    if let Some(ic) = icon {
+        meta = meta.tech_name(icon_tech_name(ic));
+    }
+    register_widget(ui, &response, meta);
+
     response
 }
 
@@ -597,6 +612,16 @@ pub fn accent_button(
         painter.galley(text_pos, galley, fg);
     }
 
+    let mut meta = ElementMeta::new(ElementKind::Button)
+        .label(label)
+        .text(label)
+        .fg(fg)
+        .bg(accent_color);
+    if let Some(ic) = icon {
+        meta = meta.tech_name(icon_tech_name(ic));
+    }
+    register_widget(ui, &response, meta);
+
     response
 }
 
@@ -636,6 +661,23 @@ pub fn smooth_toggle(ui: &mut Ui, on: &mut bool) -> Response {
         painter.circle_filled(knob_center, 7.5, knob_col);
     }
 
+    let knob_col = if *on {
+        tokens.accent_text
+    } else if tokens.is_light() {
+        tokens.text_muted
+    } else {
+        Color32::from_rgb(0xE6, 0xE8, 0xEE)
+    };
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::Toggle)
+            .text(if *on { "on" } else { "off" })
+            .active(*on)
+            .fg(knob_col)
+            .bg(if *on { tokens.accent } else { tokens.bg_input }),
+    );
+
     response
 }
 
@@ -646,12 +688,24 @@ pub fn tag_pill(ui: &mut Ui, label: &str, color: Color32) {
 
 /// Search input field with embedded vector search icon.
 pub fn search_field(ui: &mut Ui, query: &mut String, hint: &str) -> Response {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-        paint_vector_icon(ui.painter(), rect, VectorIcon::Search, ACCENT_COBALT);
-        ui.add(egui::TextEdit::singleline(query).hint_text(hint))
-    })
-    .inner
+    let tokens = Tokens::active(ui.ctx());
+    let resp = ui
+        .horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+            paint_vector_icon(ui.painter(), rect, VectorIcon::Search, ACCENT_COBALT);
+            ui.add(egui::TextEdit::singleline(query).hint_text(hint))
+        })
+        .inner;
+    register_widget(
+        ui,
+        &resp,
+        ElementMeta::new(ElementKind::Input)
+            .label(hint)
+            .text(query.as_str())
+            .fg(tokens.text)
+            .bg(tokens.bg_input),
+    );
+    resp
 }
 
 /// Renders a compact `4px` rounded badge (`RADIUS_TAG`) for versions, loaders, or account kinds.

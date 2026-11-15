@@ -11,6 +11,7 @@ pub mod input;
 pub mod list;
 pub mod modal;
 pub mod progress;
+pub mod registry;
 pub mod segmented;
 pub mod select;
 pub mod tabs;

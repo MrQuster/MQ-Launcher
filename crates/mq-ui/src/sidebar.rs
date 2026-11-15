@@ -9,6 +9,7 @@ use egui::{
 };
 use mq_auth::{AccountKind, AccountProfile};
 
+use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::i18n::{tr, Language};
 use crate::theme::{solid_sidebar_frame, Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_vector_icon, VectorIcon};
@@ -602,12 +603,32 @@ fn render_nav_row(
     let activated_by_enter =
         has_focus && ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Space));
 
+    let label = tab.label_for(lang_code);
+    let compact_tooltip = format!("{} ({})", label, tab.shortcut_label());
+    let fg_color = if is_active || hovered {
+        tokens.text
+    } else {
+        tokens.text_muted
+    };
+    let bg_color = if is_active {
+        tokens.bg_surface
+    } else {
+        tokens.bg_sidebar
+    };
+    let mut meta = ElementMeta::new(ElementKind::NavItem)
+        .label(label)
+        .text(label)
+        .tech_name(icon_tech_name(tab.icon()))
+        .active(is_active)
+        .fg(fg_color)
+        .bg(bg_color);
+    if is_compact {
+        meta = meta.tooltip(compact_tooltip.as_str());
+    }
+    register_widget(ui, &response, meta);
+
     let resp = if is_compact {
-        response.on_hover_text(format!(
-            "{} ({})",
-            tab.label_for(lang_code),
-            tab.shortcut_label()
-        ))
+        response.on_hover_text(compact_tooltip)
     } else {
         response
     };
@@ -687,6 +708,15 @@ fn render_header(ui: &mut Ui, is_compact: bool, tokens: &Tokens) {
                 },
             );
         }
+        register_widget(
+            ui,
+            &toggle_resp,
+            ElementMeta::new(ElementKind::IconButton)
+                .tech_name(icon_tech_name(VectorIcon::ChevronsRight))
+                .tooltip("Развернуть меню")
+                .fg(tokens.text_muted)
+                .bg(tokens.bg_sidebar),
+        );
         if toggle_resp.on_hover_text("Развернуть меню").clicked() {
             toggle_sidebar_compact(ui.ctx());
         }
@@ -727,6 +757,15 @@ fn render_header(ui: &mut Ui, is_compact: bool, tokens: &Tokens) {
                 },
             );
         }
+        register_widget(
+            ui,
+            &toggle_resp,
+            ElementMeta::new(ElementKind::IconButton)
+                .tech_name(icon_tech_name(VectorIcon::ChevronsLeft))
+                .tooltip("Свернуть меню")
+                .fg(tokens.text_muted)
+                .bg(tokens.bg_sidebar),
+        );
         if toggle_resp.on_hover_text("Свернуть меню").clicked() {
             toggle_sidebar_compact(ui.ctx());
         }
@@ -884,8 +923,19 @@ fn render_bottom_account_profile(
         }
     }
 
+    let compact_acc_tip = format!("{username} ({source_str})");
+    let mut acc_meta = ElementMeta::new(ElementKind::Button)
+        .label(username)
+        .text(username)
+        .fg(tokens.text)
+        .bg(tokens.bg_sidebar);
+    if is_compact {
+        acc_meta = acc_meta.tooltip(compact_acc_tip.as_str());
+    }
+    register_widget(ui, &resp, acc_meta);
+
     let resp = if is_compact {
-        resp.on_hover_text(format!("{username} ({source_str})"))
+        resp.on_hover_text(compact_acc_tip)
     } else {
         resp
     };

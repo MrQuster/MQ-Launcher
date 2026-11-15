@@ -5,6 +5,7 @@ use egui::{Color32, CornerRadius, Pos2, RichText, ScrollArea, Stroke, StrokeKind
 use mq_core::{BackgroundStyle, GuiBackend, LaunchAction, ThemeConfig, ThemePreset, UiDensity};
 use mq_meta::{find_mc_locale, search_mc_locales};
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::i18n::{tr, Language};
 use crate::state::UiState;
 use crate::theme::{
@@ -62,59 +63,41 @@ impl SettingsView {
             ui.add_space(8.0);
 
             // Sub-navigation tabs
-            if ui
-                .selectable_label(
-                    current_section == SettingsSection::Customization,
+            let sub_tabs = [
+                (
+                    SettingsSection::Customization,
                     tr("settings_customization", &lang),
-                )
-                .clicked()
-            {
-                self.active_section = Some(SettingsSection::Customization);
-            }
-            if ui
-                .selectable_label(
-                    current_section == SettingsSection::Launch,
-                    tr("settings_launch", &lang),
-                )
-                .clicked()
-            {
-                self.active_section = Some(SettingsSection::Launch);
-            }
-            if ui
-                .selectable_label(
-                    current_section == SettingsSection::Localization,
+                ),
+                (SettingsSection::Launch, tr("settings_launch", &lang)),
+                (
+                    SettingsSection::Localization,
                     tr("settings_language", &lang),
-                )
-                .clicked()
-            {
-                self.active_section = Some(SettingsSection::Localization);
-            }
-            if ui
-                .selectable_label(
-                    current_section == SettingsSection::NetworkAndApi,
-                    "Сеть и API",
-                )
-                .clicked()
-            {
-                self.active_section = Some(SettingsSection::NetworkAndApi);
-            }
-            if ui
-                .selectable_label(current_section == SettingsSection::Catalog, "Каталог")
-                .clicked()
-            {
-                self.active_section = Some(SettingsSection::Catalog);
-            }
-            if ui
-                .selectable_label(current_section == SettingsSection::Updates, "Обновления")
-                .clicked()
-            {
-                self.active_section = Some(SettingsSection::Updates);
-            }
-            if ui
-                .selectable_label(current_section == SettingsSection::About, "О программе")
-                .clicked()
-            {
-                self.active_section = Some(SettingsSection::About);
+                ),
+                (SettingsSection::NetworkAndApi, "Сеть и API"),
+                (SettingsSection::Catalog, "Каталог"),
+                (SettingsSection::Updates, "Обновления"),
+                (SettingsSection::About, "О программе"),
+            ];
+            for (sec, title) in sub_tabs {
+                let is_sel = current_section == sec;
+                let resp = ui.selectable_label(is_sel, title);
+                register_widget(
+                    ui,
+                    &resp,
+                    ElementMeta::new(ElementKind::Tab)
+                        .label(title)
+                        .text(title)
+                        .active(is_sel)
+                        .fg(if is_sel {
+                            tokens.text
+                        } else {
+                            tokens.text_muted
+                        })
+                        .bg(tokens.bg_app),
+                );
+                if resp.clicked() {
+                    self.active_section = Some(sec);
+                }
             }
         });
 
@@ -925,7 +908,21 @@ impl SettingsView {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
                 crate::widgets::paint_vector_icon(ui.painter(), rect, VectorIcon::Search, Color32::from_rgb(0x3B, 0x82, 0xF6));
-                ui.add(egui::TextEdit::singleline(&mut self.mc_locale_search).hint_text("Поиск по всем 80+ языкам Minecraft (напр. українська, русский, polski)...").desired_width(340.0));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.mc_locale_search)
+                        .hint_text("Поиск по всем 80+ языкам Minecraft (напр. українська, русский, polski)...")
+                        .desired_width(340.0),
+                );
+                register_widget(
+                    ui,
+                    &resp,
+                    ElementMeta::new(ElementKind::Input)
+                        .id("mc_locale_search")
+                        .label("Поиск языка Minecraft")
+                        .text(self.mc_locale_search.as_str())
+                        .fg(tokens.text)
+                        .bg(tokens.bg_input),
+                );
             });
 
             ui.add_space(6.0);

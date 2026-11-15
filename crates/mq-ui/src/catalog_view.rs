@@ -11,6 +11,7 @@ use mq_mods::{CatalogHit, CatalogSource, CatalogSourceFilter, ProjectKind, Searc
 use crate::catalog_state::{
     CatalogErrorKind, CatalogState, CatalogTab, IconSlot, CATALOG_PAGE_SIZE,
 };
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::state::{UiState, UiWorkerCommand};
 use crate::theme::{
     blend_color, solid_card_frame_with_config, Tokens, ACCENT_COBALT, ACCENT_EMERALD,
@@ -462,7 +463,7 @@ impl CatalogView {
         changed
     }
 
-    fn search_row(&self, ui: &mut Ui, cat: &mut CatalogState, _tokens: &Tokens) -> bool {
+    fn search_row(&self, ui: &mut Ui, cat: &mut CatalogState, tokens: &Tokens) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
@@ -471,6 +472,15 @@ impl CatalogView {
                 egui::TextEdit::singleline(&mut cat.query)
                     .hint_text("Поиск по названию")
                     .desired_width((ui.available_width() - 8.0).max(160.0)),
+            );
+            register_widget(
+                ui,
+                &resp,
+                ElementMeta::new(ElementKind::Input)
+                    .label("Поиск по названию")
+                    .text(cat.query.as_str())
+                    .fg(tokens.text)
+                    .bg(tokens.bg_input),
             );
             changed |= resp.changed();
         });

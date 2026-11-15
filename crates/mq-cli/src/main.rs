@@ -83,8 +83,39 @@ struct Cli {
     #[arg(value_name = "MRPACK_FILE")]
     open_pack: Option<PathBuf>,
 
+    #[cfg(feature = "test-hooks")]
+    /// Run with QA test-hooks sandbox enforcement (requires isolated MQ_DATA_DIR).
+    #[arg(long)]
+    test_hooks: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[cfg(feature = "test-hooks")]
+fn enforce_test_hooks_sandbox(cli: &Cli) -> Result<()> {
+    let active = cli.test_hooks || std::env::var_os("MQ_TEST_SANDBOX").is_some();
+    if !active {
+        return Ok(());
+    }
+    let data_dir = std::env::var_os("MQ_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .context(
+            "MQ_DATA_DIR must be set to an isolated sandbox directory when test-hooks is active",
+        )?;
+    let abs_data = std::fs::canonicalize(&data_dir).unwrap_or_else(|_| data_dir.clone());
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let forbidden_data = home.join(".local/share/mq");
+        let forbidden_cfg = home.join(".config/mq");
+        if abs_data.starts_with(&forbidden_data) || abs_data.starts_with(&forbidden_cfg) {
+            anyhow::bail!(
+                "Refusing to run test-hooks against user profile path: {}",
+                abs_data.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -655,6 +686,8 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    #[cfg(feature = "test-hooks")]
+    enforce_test_hooks_sandbox(&cli)?;
     let paths = MqPaths::platform_default().context("Failed to initialize platform directories")?;
     paths
         .ensure_dirs()

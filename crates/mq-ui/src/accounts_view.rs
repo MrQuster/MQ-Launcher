@@ -12,6 +12,7 @@ use mq_auth::{
 use mq_core::{AccountId, SecretString};
 use uuid::Uuid;
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::state::UiState;
 use crate::theme::{
     ACCENT_COBALT, ACCENT_EMERALD, BORDER_SUBTLE, CARD_SURFACE, CARD_SURFACE_HOVER, RADIUS_CARD,
@@ -68,32 +69,27 @@ impl AccountsView {
         // 2. Ely.by (через браузер)
         // 3. Microsoft (через браузер)
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(
-                    self.current_tab == AccountTab::Offline,
-                    "Офлайн (только ник)",
-                )
-                .clicked()
-            {
-                self.current_tab = AccountTab::Offline;
-            }
-            if ui
-                .selectable_label(
-                    self.current_tab == AccountTab::ElyBy,
-                    "Ely.by (через браузер)",
-                )
-                .clicked()
-            {
-                self.current_tab = AccountTab::ElyBy;
-            }
-            if ui
-                .selectable_label(
-                    self.current_tab == AccountTab::Microsoft,
-                    "Microsoft (через браузер)",
-                )
-                .clicked()
-            {
-                self.current_tab = AccountTab::Microsoft;
+            let tabs = [
+                (AccountTab::Offline, "Офлайн (только ник)"),
+                (AccountTab::ElyBy, "Ely.by (через браузер)"),
+                (AccountTab::Microsoft, "Microsoft (через браузер)"),
+            ];
+            for (tab, label) in tabs {
+                let is_sel = self.current_tab == tab;
+                let resp = ui.selectable_label(is_sel, label);
+                register_widget(
+                    ui,
+                    &resp,
+                    ElementMeta::new(ElementKind::Tab)
+                        .label(label)
+                        .text(label)
+                        .active(is_sel)
+                        .fg(TEXT_PRIMARY)
+                        .bg(CARD_SURFACE),
+                );
+                if resp.clicked() {
+                    self.current_tab = tab;
+                }
             }
         });
 

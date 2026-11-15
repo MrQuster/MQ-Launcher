@@ -3,6 +3,7 @@
 
 use egui::{CursorIcon, Response, Stroke, Ui, Vec2};
 
+use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_vector_icon, VectorIcon};
 
@@ -67,6 +68,16 @@ pub fn button_primary(
         text,
         egui::FontId::proportional(13.5),
         tokens.accent_text,
+    );
+
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::Button)
+            .label(text)
+            .text(text)
+            .fg(tokens.accent_text)
+            .bg(bg_color),
     );
 
     response
@@ -140,6 +151,16 @@ pub fn button_secondary(
         tokens.text,
     );
 
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::Button)
+            .label(text)
+            .text(text)
+            .fg(tokens.text)
+            .bg(bg_color),
+    );
+
     response
 }
 
@@ -175,6 +196,16 @@ pub fn icon_button(ui: &mut Ui, tokens: &Tokens, icon: VectorIcon, tooltip: &str
         tokens.text_muted
     };
     paint_vector_icon(painter, icon_rect, icon, icon_col);
+
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::IconButton)
+            .tech_name(icon_tech_name(icon))
+            .tooltip(tooltip)
+            .fg(icon_col)
+            .bg(bg),
+    );
 
     if !tooltip.is_empty() {
         response.on_hover_text(tooltip)

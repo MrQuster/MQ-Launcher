@@ -2,12 +2,13 @@
 
 use egui::{CornerRadius, Rect, Ui, Vec2};
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::theme::Tokens;
 
 pub fn render_progress_bar(ui: &mut Ui, tokens: &Tokens, progress: f32, height: f32) {
     let p = crate::state::safe_progress_clamp(progress);
     let desired_width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         Vec2::new(desired_width, height.max(2.0)),
         egui::Sense::hover(),
     );
@@ -20,4 +21,13 @@ pub fn render_progress_bar(ui: &mut Ui, tokens: &Tokens, progress: f32, height: 
         let fill_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width() * p, rect.height()));
         painter.rect_filled(fill_rect, cr, tokens.accent);
     }
+
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::Progress)
+            .interactive(false)
+            .fg(tokens.accent)
+            .bg(tokens.bg_input),
+    );
 }

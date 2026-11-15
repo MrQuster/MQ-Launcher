@@ -26,6 +26,8 @@ pub mod settings_view;
 pub mod sidebar;
 pub mod snapshot;
 pub mod state;
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks;
 pub mod theme;
 pub mod widgets;
 

@@ -2,6 +2,7 @@
 
 use egui::{CursorIcon, Response, Sense, Stroke, Ui, Vec2};
 
+use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::theme::Tokens;
 
 pub fn toggle_switch(ui: &mut Ui, tokens: &Tokens, on: &mut bool) -> Response {
@@ -40,6 +41,16 @@ pub fn toggle_switch(ui: &mut Ui, tokens: &Tokens, on: &mut bool) -> Response {
         tokens.text_muted
     };
     painter.circle_filled(egui::pos2(circle_x, rect.center().y), 7.0, knob_color);
+
+    register_widget(
+        ui,
+        &response,
+        ElementMeta::new(ElementKind::Toggle)
+            .text(if *on { "on" } else { "off" })
+            .active(*on)
+            .fg(knob_color)
+            .bg(bg_color),
+    );
 
     response
 }

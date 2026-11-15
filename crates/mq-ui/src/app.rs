@@ -53,7 +53,7 @@ pub fn parse_test_action(raw: &str) -> Option<TestAction> {
 }
 
 #[cfg(feature = "test-hooks")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct TestHookRuntimeState {
     initialized: bool,
     action_active: bool,
@@ -62,21 +62,6 @@ struct TestHookRuntimeState {
     cancel_sent: bool,
     exit_on_finish: bool,
     finish_frames: u32,
-}
-
-#[cfg(feature = "test-hooks")]
-impl Default for TestHookRuntimeState {
-    fn default() -> Self {
-        Self {
-            initialized: false,
-            action_active: false,
-            started_at: None,
-            cancel_after_ms: None,
-            cancel_sent: false,
-            exit_on_finish: false,
-            finish_frames: 0,
-        }
-    }
 }
 
 #[inline]
@@ -159,6 +144,8 @@ impl MqApp {
     pub fn new(cc: &eframe::CreationContext<'_>, state: UiState) -> Self {
         apply_theme(&cc.egui_ctx, &state.config.theme);
         configure_system_fonts(&cc.egui_ctx);
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::init_for_context(&cc.egui_ctx, &state.paths);
         Self::from_state(state)
     }
 
@@ -1240,7 +1227,19 @@ impl MqApp {
         CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             let bg_rect = ui.max_rect().expand(16.0);
             let bg_painter = ui.painter().with_clip_rect(bg_rect);
-            paint_launcher_background(ctx, &bg_painter, bg_rect, &self.state.config.theme, &tokens);
+            #[cfg(feature = "test-hooks")]
+            let owned_theme = if crate::test_hooks::is_solid_background(ctx) {
+                let mut cfg = self.state.config.theme.clone();
+                cfg.background_style = mq_core::BackgroundStyle::Solid;
+                Some(cfg)
+            } else {
+                None
+            };
+            #[cfg(feature = "test-hooks")]
+            let effective_theme = owned_theme.as_ref().unwrap_or(&self.state.config.theme);
+            #[cfg(not(feature = "test-hooks"))]
+            let effective_theme = &self.state.config.theme;
+            paint_launcher_background(ctx, &bg_painter, bg_rect, effective_theme, &tokens);
             match self.current_tab {
                 NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
                 NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
@@ -1252,6 +1251,17 @@ impl MqApp {
     }
     #[cfg(feature = "test-hooks")]
     pub fn step_test_hooks(&mut self, ctx: &egui::Context) {
+        crate::test_hooks::on_pre_frame(
+            ctx,
+            &mut crate::test_hooks::TestAppAccess {
+                state: &mut self.state,
+                current_tab: &mut self.current_tab,
+                settings_section: &mut self.settings_view.active_section,
+                instances_view: &mut self.instances_view,
+                catalog_view: &mut self.catalog_view,
+            },
+        );
+
         let hook_id = egui::Id::new("mq_test_hook_state");
         let mut hook = ctx.data_mut(|d| {
             d.get_temp::<TestHookRuntimeState>(hook_id)
@@ -1371,6 +1381,17 @@ impl MqApp {
         }
 
         ctx.data_mut(|d| d.insert_temp(hook_id, hook));
+
+        crate::test_hooks::on_post_frame(
+            ctx,
+            &mut crate::test_hooks::TestAppAccess {
+                state: &mut self.state,
+                current_tab: &mut self.current_tab,
+                settings_section: &mut self.settings_view.active_section,
+                instances_view: &mut self.instances_view,
+                catalog_view: &mut self.catalog_view,
+            },
+        );
     }
 
     /// Renders recovery dialog if previous launcher run terminated unexpectedly with an active install journal.
@@ -1625,7 +1646,19 @@ impl MqApp {
         CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             let bg_rect = ui.max_rect().expand(16.0);
             let bg_painter = ui.painter().with_clip_rect(bg_rect);
-            paint_launcher_background(ctx, &bg_painter, bg_rect, &self.state.config.theme, &tokens);
+            #[cfg(feature = "test-hooks")]
+            let owned_theme = if crate::test_hooks::is_solid_background(ctx) {
+                let mut cfg = self.state.config.theme.clone();
+                cfg.background_style = mq_core::BackgroundStyle::Solid;
+                Some(cfg)
+            } else {
+                None
+            };
+            #[cfg(feature = "test-hooks")]
+            let effective_theme = owned_theme.as_ref().unwrap_or(&self.state.config.theme);
+            #[cfg(not(feature = "test-hooks"))]
+            let effective_theme = &self.state.config.theme;
+            paint_launcher_background(ctx, &bg_painter, bg_rect, effective_theme, &tokens);
             match self.current_tab {
                 NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
                 NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
@@ -1764,6 +1797,11 @@ impl MqApp {
 }
 
 impl eframe::App for MqApp {
+    #[cfg(feature = "test-hooks")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::test_hooks::on_raw_input(ctx, raw_input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.render_frame(ctx);
     }

@@ -2,6 +2,7 @@
 
 use egui::{Color32, Context, Frame, Margin, Stroke, Ui};
 
+use crate::components::registry::{register_rect, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_CARD};
 
 pub fn render_modal_container<R>(
@@ -38,18 +39,31 @@ pub fn render_modal_container<R>(
 
     let inner = area.show(ctx, |ui| {
         ui.set_width(modal_width);
-        frame
-            .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(title)
-                        .size(17.0)
-                        .strong()
-                        .color(tokens.text),
-                );
-                ui.add_space(16.0);
-                add_contents(ui)
-            })
-            .inner
+        let resp = frame.show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .size(17.0)
+                    .strong()
+                    .color(tokens.text),
+            );
+            ui.add_space(16.0);
+            add_contents(ui)
+        });
+        register_rect(
+            ui,
+            resp.response.id,
+            resp.response.rect,
+            true,
+            false,
+            false,
+            ElementMeta::new(ElementKind::Modal)
+                .label(title)
+                .text(title)
+                .interactive(false)
+                .fg(tokens.text)
+                .bg(tokens.bg_surface),
+        );
+        resp.inner
     });
 
     Some(inner.inner)
