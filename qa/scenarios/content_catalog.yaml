@@ -8,6 +8,9 @@ steps:
   - frame_stats: reset
   - goto:
       tab: "catalog"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
   - wait_for:
       label: "Поиск по названию"
       timeout_ms: 8000
