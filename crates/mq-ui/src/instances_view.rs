@@ -517,7 +517,9 @@ impl InstancesView {
 
         // Import modal
         if self.show_import_dialog
-            && ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.show_import_dialog = false;
             self.import_error = None;
@@ -1871,13 +1873,15 @@ impl InstancesView {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
                     if is_running {
-                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked() {
+                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
+                        {
                             let _ = state.cmd_sender.send(UiWorkerCommand::StopGame {
                                 instance_id: inst.id.clone(),
                             });
                         }
                     } else if is_downloading {
-                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked() {
+                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
+                        {
                             let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
                         }
                     } else if is_installed {
@@ -2007,16 +2011,30 @@ impl InstancesView {
             } else {
                 tokens.text_muted
             };
-            ui.add(
+            let resp = ui.add(
                 egui::Button::new(RichText::new(label).color(fg).size(12.5))
                     .fill(fill)
                     .stroke(Stroke::new(1.0_f32, stroke))
                     .corner_radius(RADIUS_TAG),
-            )
-            .clicked()
+            );
+            crate::components::registry::register_widget(
+                ui,
+                &resp,
+                crate::components::registry::ElementMeta::new(
+                    crate::components::registry::ElementKind::Tab,
+                )
+                .label(label)
+                .active(selected)
+                .fg(fg)
+                .bg(fill),
+            );
+            resp.clicked()
         }
 
-        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if ui
+            .ctx()
+            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
             state.show_create_instance_dialog = false;
             return;
         }
@@ -2129,10 +2147,21 @@ impl InstancesView {
                             } else {
                                 (ui.available_width() - 68.0).max(120.0)
                             };
-                            ui.add(
+                            let search_resp = ui.add(
                                 egui::TextEdit::singleline(&mut self.version_search)
                                     .hint_text("Поиск версии (1.21.4, 25w09b)...")
                                     .desired_width(search_w),
+                            );
+                            crate::components::registry::register_widget(
+                                ui,
+                                &search_resp,
+                                crate::components::registry::ElementMeta::new(
+                                    crate::components::registry::ElementKind::Input,
+                                )
+                                .label("Поиск версии")
+                                .text(self.version_search.as_str())
+                                .fg(tokens.text)
+                                .bg(tokens.bg_input),
                             );
                             if !self.version_search.is_empty()
                                 && button_secondary(ui, tokens, None, "Сброс").clicked()
@@ -2320,6 +2349,21 @@ impl InstancesView {
                                                     row_rect.center().y - ver_galley.size().y * 0.5,
                                                 );
                                                 painter.galley(ver_pos, ver_galley, ver_col);
+                                                crate::components::registry::register_widget(
+                                                    ui,
+                                                    &row_resp,
+                                                    crate::components::registry::ElementMeta::new(
+                                                        crate::components::registry::ElementKind::Button,
+                                                    )
+                                                    .label(vid)
+                                                    .active(is_sel)
+                                                    .fg(ver_col)
+                                                    .bg(if row_fill == Color32::TRANSPARENT {
+                                                        tokens.bg_input
+                                                    } else {
+                                                        row_fill
+                                                    }),
+                                                );
 
                                                 let pad = Vec2::new(6.0, 2.0);
                                                 let cat_col = cat.badge_color();
@@ -2945,8 +2989,7 @@ impl InstancesView {
             }
         });
 
-        if let Some((ref prompt_inst, ref deleted_file, ref orphans)) = state.orphaned_deps_prompt
-        {
+        if let Some((ref prompt_inst, ref deleted_file, ref orphans)) = state.orphaned_deps_prompt {
             if prompt_inst == inst_id && !orphans.is_empty() {
                 ui.add_space(6.0);
                 let deleted_file = deleted_file.clone();
@@ -3800,12 +3843,15 @@ impl InstancesView {
                     for idx in 0..len {
                         let name = order[idx].clone();
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(format!("{}. {name}", idx + 1)).color(tokens.text));
+                            ui.label(
+                                RichText::new(format!("{}. {name}", idx + 1)).color(tokens.text),
+                            );
                             if idx > 0 && secondary_glass_button(ui, None, "Вверх").clicked() {
                                 order.swap(idx, idx - 1);
                                 changed = true;
                             }
-                            if idx + 1 < len && secondary_glass_button(ui, None, "Вниз").clicked() {
+                            if idx + 1 < len && secondary_glass_button(ui, None, "Вниз").clicked()
+                            {
                                 order.swap(idx, idx + 1);
                                 changed = true;
                             }
