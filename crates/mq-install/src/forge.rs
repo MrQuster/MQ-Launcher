@@ -7,9 +7,10 @@ use std::path::{Component, Path, PathBuf};
 
 use mq_core::{ModLoaderKind, MqError, MqPaths, MqResult};
 use mq_meta::{
-    fetch_forge_recommended_version, forge_installer_url, maven_coord_to_artifact,
-    merge_inherits_from, normalize_forge_version, parse_forge_install_profile,
-    parse_loader_profile, ForgeInstallProfile, ResolvedLibrary, ResolvedVersion,
+    fetch_forge_recommended_version, fetch_neoforge_loader_versions, forge_installer_url,
+    maven_coord_to_artifact, merge_inherits_from, neoforge_installer_url, normalize_forge_version,
+    parse_forge_install_profile, parse_loader_profile, ForgeInstallProfile, ResolvedLibrary,
+    ResolvedVersion,
 };
 
 /// Prepared Forge installation artifacts extracted from the Forge installer JAR.
@@ -93,20 +94,94 @@ pub async fn prepare_forge_installation(
     mock_base_url: Option<&str>,
     resolved_ver: &mut ResolvedVersion,
 ) -> MqResult<PreparedForge> {
-    let raw_ver = match requested_loader_version {
-        Some(v) if !v.trim().is_empty() => v.trim().to_owned(),
-        _ => fetch_forge_recommended_version(client, mock_base_url, mc_version).await?,
+    prepare_installer_loader(
+        ModLoaderKind::Forge,
+        client,
+        paths,
+        installing_dir,
+        mc_version,
+        requested_loader_version,
+        mock_base_url,
+        resolved_ver,
+    )
+    .await
+}
+
+/// Downloads the NeoForge installer JAR, extracts `version.json` and `install_profile.json`,
+/// merges the NeoForge profile into `resolved_ver`, extracts bundled `maven/` artifacts and
+/// `data` files, and returns the prepared processor plan.
+pub async fn prepare_neoforge_installation(
+    client: &reqwest::Client,
+    paths: &MqPaths,
+    installing_dir: &Path,
+    mc_version: &str,
+    requested_loader_version: Option<&str>,
+    mock_base_url: Option<&str>,
+    resolved_ver: &mut ResolvedVersion,
+) -> MqResult<PreparedForge> {
+    prepare_installer_loader(
+        ModLoaderKind::NeoForge,
+        client,
+        paths,
+        installing_dir,
+        mc_version,
+        requested_loader_version,
+        mock_base_url,
+        resolved_ver,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_installer_loader(
+    loader: ModLoaderKind,
+    client: &reqwest::Client,
+    paths: &MqPaths,
+    installing_dir: &Path,
+    mc_version: &str,
+    requested_loader_version: Option<&str>,
+    mock_base_url: Option<&str>,
+    resolved_ver: &mut ResolvedVersion,
+) -> MqResult<PreparedForge> {
+    let (short_ver, installer_url, installer_filename) = match loader {
+        ModLoaderKind::Forge => {
+            let raw_ver = match requested_loader_version {
+                Some(v) if !v.trim().is_empty() => v.trim().to_owned(),
+                _ => fetch_forge_recommended_version(client, mock_base_url, mc_version).await?,
+            };
+            let (short_ver, _full_ver) = normalize_forge_version(mc_version, &raw_ver)?;
+            let url = forge_installer_url(mock_base_url, mc_version, &short_ver)?;
+            (short_ver, url, "forge-installer.jar")
+        }
+        ModLoaderKind::NeoForge => {
+            let ver = match requested_loader_version {
+                Some(v) if !v.trim().is_empty() => v.trim().to_owned(),
+                _ => {
+                    let versions =
+                        fetch_neoforge_loader_versions(client, mock_base_url, mc_version).await?;
+                    versions.into_iter().next().ok_or_else(|| {
+                        MqError::Metadata(format!(
+                            "no NeoForge loader version found for {mc_version}"
+                        ))
+                    })?
+                }
+            };
+            let url = neoforge_installer_url(mock_base_url, &ver)?;
+            (ver, url, "neoforge-installer.jar")
+        }
+        other => {
+            return Err(MqError::Metadata(format!(
+                "unsupported installer-based loader: {other:?}"
+            )));
+        }
     };
-    let (short_ver, _full_ver) = normalize_forge_version(mc_version, &raw_ver)?;
 
-    let installer_url = forge_installer_url(mock_base_url, mc_version, &short_ver)?;
-    tracing::info!(url = %installer_url, version = %short_ver, "downloading Forge installer");
+    tracing::info!(loader = ?loader, url = %installer_url, version = %short_ver, "downloading loader installer");
 
-    let resp = client
-        .get(&installer_url)
-        .send()
-        .await
-        .map_err(|e| MqError::Network(format!("failed to download Forge installer: {e}")))?;
+    let resp =
+        client.get(&installer_url).send().await.map_err(|e| {
+            MqError::Network(format!("failed to download {loader:?} installer: {e}"))
+        })?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -119,20 +194,19 @@ pub async fn prepare_forge_installation(
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| MqError::Network(format!("failed to read Forge installer body: {e}")))?;
+        .map_err(|e| MqError::Network(format!("failed to read {loader:?} installer body: {e}")))?;
 
-    let installer_jar_path = installing_dir.join("forge-installer.jar");
+    let installer_jar_path = installing_dir.join(installer_filename);
     fs::write(&installer_jar_path, &bytes)?;
 
     let file = fs::File::open(&installer_jar_path)?;
     let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| MqError::Archive(format!("invalid Forge installer JAR: {e}")))?;
+        .map_err(|e| MqError::Archive(format!("invalid {loader:?} installer JAR: {e}")))?;
 
     let version_json = read_zip_entry_string(&mut archive, "version.json")?;
-    let profile =
-        parse_loader_profile(&version_json, ModLoaderKind::Forge, Some(short_ver.clone()))?;
+    let profile = parse_loader_profile(&version_json, loader, Some(short_ver.clone()))?;
     *resolved_ver = merge_inherits_from(resolved_ver, &profile)?;
-    resolved_ver.loader = ModLoaderKind::Forge;
+    resolved_ver.loader = loader;
     resolved_ver.loader_version = Some(short_ver.clone());
 
     let install_profile_json = read_zip_entry_string(&mut archive, "install_profile.json")?;

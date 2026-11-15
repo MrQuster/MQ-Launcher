@@ -581,10 +581,19 @@ async fn install_game_transactional(
                 prepared_forge = Some(prep);
             }
             ModLoaderKind::NeoForge => {
-                return Err((
-                    current_stage,
-                    MqError::Metadata("NeoForge installation is not yet supported".to_string()),
-                ));
+                let prep = crate::forge::prepare_neoforge_installation(
+                    &client,
+                    paths,
+                    installing_dir,
+                    &req.mc_version,
+                    req.loader_version.as_deref(),
+                    req.mock_base_url.as_deref(),
+                    &mut resolved_ver,
+                )
+                .await
+                .map_err(|e| (current_stage, e))?;
+                state.loader_version = Some(prep.resolved_loader_version.clone());
+                prepared_forge = Some(prep);
             }
             ModLoaderKind::Vanilla => {}
         }
@@ -802,8 +811,31 @@ async fn install_game_transactional(
                 target.clone()
             };
 
-            let in_cas = art.sha1.is_some_and(|sha1| cas.has_blob(&sha1));
-            if !in_cas && !url_empty && queued_dest_paths.insert(blob_dest.clone()) {
+            let mut in_cas = art.sha1.is_some_and(|sha1| cas.has_blob(&sha1));
+            // Installer-bundled libraries (e.g. legacy Forge 1.12.2 universal JAR) are
+            // already extracted directly to `target` by `forge.rs`.
+            let mut already_extracted = false;
+            if !in_cas && fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() > 0) {
+                match art.sha1 {
+                    Some(expected) => {
+                        if let Ok(actual) = crate::cas::compute_file_sha1_streaming(&target) {
+                            if actual == expected
+                                && cas.store_verified_file(&target, expected).is_ok()
+                            {
+                                in_cas = true;
+                            }
+                        }
+                    }
+                    None => {
+                        already_extracted = true;
+                    }
+                }
+            }
+            if !in_cas
+                && !already_extracted
+                && !url_empty
+                && queued_dest_paths.insert(blob_dest.clone())
+            {
                 let mut spec = DownloadSpec {
                     id: format!("lib_{}", lib.name),
                     urls: vec![art.url.clone()],
@@ -1317,5 +1349,297 @@ mod tests {
         assert!(!final_natives_dir.join("stale.so").exists());
         assert!(!old_natives_dir.exists());
         assert!(!installing_dir.exists());
+    }
+
+    #[derive(Clone, Copy)]
+    enum MockFaultMode {
+        Healthy,
+        Http404,
+        Http403,
+        Http429Persistent,
+        Http500Persistent,
+        Http429ThenOk,
+        TruncatedBody,
+        CorruptSha1,
+    }
+
+    async fn spawn_fault_mock_server(mode: MockFaultMode) -> (String, tokio::task::JoinHandle<()>) {
+        use sha1::Digest as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local addr");
+        let base_url = format!("http://{addr}");
+
+        let client_bytes = b"PK\x03\x04mock-client-jar-payload-0123456789".to_vec();
+        let client_sha1 = hex::encode(sha1::Sha1::digest(&client_bytes));
+
+        let asset_bytes = b"{\"lang\":\"ru_ru\"}".to_vec();
+        let asset_sha1 = hex::encode(sha1::Sha1::digest(&asset_bytes));
+
+        let asset_index_json = serde_json::json!({
+            "objects": {
+                "minecraft/lang/ru_ru.json": {
+                    "hash": asset_sha1,
+                    "size": asset_bytes.len()
+                }
+            }
+        })
+        .to_string();
+        let asset_index_sha1 = hex::encode(sha1::Sha1::digest(asset_index_json.as_bytes()));
+
+        let version_json = serde_json::json!({
+            "id": "1.20.1",
+            "type": "release",
+            "mainClass": "net.minecraft.client.main.Main",
+            "javaVersion": { "component": "java-runtime-gamma", "majorVersion": 17 },
+            "assetIndex": {
+                "id": "5",
+                "sha1": asset_index_sha1,
+                "size": asset_index_json.len(),
+                "url": format!("{base_url}/assets/5.json")
+            },
+            "downloads": {
+                "client": {
+                    "sha1": client_sha1,
+                    "size": client_bytes.len(),
+                    "url": format!("{base_url}/client.jar")
+                }
+            },
+            "libraries": [],
+            "arguments": {
+                "game": ["--username", "${auth_player_name}"],
+                "jvm": ["-cp", "${classpath}"]
+            }
+        })
+        .to_string();
+        let version_sha1 = hex::encode(sha1::Sha1::digest(version_json.as_bytes()));
+
+        let manifest_json = serde_json::json!({
+            "latest": { "release": "1.20.1", "snapshot": "1.20.1" },
+            "versions": [{
+                "id": "1.20.1",
+                "type": "release",
+                "url": format!("{base_url}/versions/1.20.1.json"),
+                "time": "2023-06-12T00:00:00+00:00",
+                "releaseTime": "2023-06-12T00:00:00+00:00",
+                "sha1": version_sha1
+            }]
+        })
+        .to_string();
+
+        let client_hits = Arc::new(AtomicUsize::new(0));
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let manifest_json = manifest_json.clone();
+                let version_json = version_json.clone();
+                let asset_index_json = asset_index_json.clone();
+                let client_bytes = client_bytes.clone();
+                let asset_bytes = asset_bytes.clone();
+                let asset_sha1 = asset_sha1.clone();
+                let client_hits = Arc::clone(&client_hits);
+
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/");
+
+                    let (status, extra_hdr, body, truncate): (&str, &str, Vec<u8>, bool) =
+                        if path.contains("version_manifest_v2.json") {
+                            ("200 OK", "", manifest_json.into_bytes(), false)
+                        } else if path.contains("/versions/1.20.1.json") {
+                            ("200 OK", "", version_json.into_bytes(), false)
+                        } else if path.contains("/assets/5.json") {
+                            ("200 OK", "", asset_index_json.into_bytes(), false)
+                        } else if path.contains(&asset_sha1) {
+                            ("200 OK", "", asset_bytes, false)
+                        } else if path.contains("client.jar") {
+                            let hit = client_hits.fetch_add(1, Ordering::SeqCst);
+                            match mode {
+                                MockFaultMode::Healthy => ("200 OK", "", client_bytes, false),
+                                MockFaultMode::Http404 => {
+                                    ("404 Not Found", "", b"not found".to_vec(), false)
+                                }
+                                MockFaultMode::Http403 => {
+                                    ("403 Forbidden", "", b"forbidden".to_vec(), false)
+                                }
+                                MockFaultMode::Http429Persistent => (
+                                    "429 Too Many Requests",
+                                    "Retry-After: 0\r\n",
+                                    b"rate limited".to_vec(),
+                                    false,
+                                ),
+                                MockFaultMode::Http500Persistent => (
+                                    "500 Internal Server Error",
+                                    "",
+                                    b"server error".to_vec(),
+                                    false,
+                                ),
+                                MockFaultMode::Http429ThenOk => {
+                                    if hit == 0 {
+                                        (
+                                            "429 Too Many Requests",
+                                            "Retry-After: 0\r\n",
+                                            b"rate limited".to_vec(),
+                                            false,
+                                        )
+                                    } else {
+                                        ("200 OK", "", client_bytes, false)
+                                    }
+                                }
+                                MockFaultMode::TruncatedBody => ("200 OK", "", client_bytes, true),
+                                MockFaultMode::CorruptSha1 => {
+                                    let mut bad = client_bytes.clone();
+                                    bad[0] ^= 0xFF;
+                                    ("200 OK", "", bad, false)
+                                }
+                            }
+                        } else {
+                            ("404 Not Found", "", b"unknown".to_vec(), false)
+                        };
+
+                    let header = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra_hdr}Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    if truncate {
+                        let _ = stream.write_all(&body[..body.len().min(8)]).await;
+                    } else {
+                        let _ = stream.write_all(&body).await;
+                    }
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        (base_url, handle)
+    }
+
+    #[tokio::test]
+    async fn mock_http_faults_404_403_429_500_truncation_and_hash_mismatch() {
+        for (label, mode, expect_ok) in [
+            ("healthy", MockFaultMode::Healthy, true),
+            ("404", MockFaultMode::Http404, false),
+            ("403", MockFaultMode::Http403, false),
+            ("429_persistent", MockFaultMode::Http429Persistent, false),
+            ("500_persistent", MockFaultMode::Http500Persistent, false),
+            ("429_transient", MockFaultMode::Http429ThenOk, true),
+            ("truncated", MockFaultMode::TruncatedBody, false),
+            ("corrupt_sha1", MockFaultMode::CorruptSha1, false),
+        ] {
+            let (base_url, srv) = spawn_fault_mock_server(mode).await;
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let inst_dir = tmp.path().join("instances").join(label);
+            fs::create_dir_all(&inst_dir).unwrap();
+            let paths = MqPaths::with_root(tmp.path().join("mq_root"));
+            let cas = CasStore::new(paths.clone());
+            let net = NetEngine::with_defaults().expect("net");
+            let compute = ComputePool::new(2);
+            let epoch = Arc::new(CancelEpoch::new());
+            let guard = epoch.snapshot();
+
+            let req = InstallRequest {
+                mc_version: "1.20.1".to_string(),
+                loader: ModLoaderKind::Vanilla,
+                loader_version: None,
+                instance_dir: inst_dir.clone(),
+                mock_base_url: Some(base_url),
+            };
+            let res = install_game(&req, &paths, &net, &cas, &compute, &guard, None).await;
+            srv.abort();
+
+            if expect_ok {
+                assert!(res.is_ok(), "mode '{label}' expected Ok, got {res:?}");
+                assert!(
+                    inst_dir.join("client.jar").is_file(),
+                    "mode '{label}' missing client.jar"
+                );
+                assert!(
+                    !inst_dir.join(".installing").exists(),
+                    "mode '{label}' left .installing"
+                );
+            } else {
+                assert!(res.is_err(), "mode '{label}' expected Err, got Ok");
+                assert!(
+                    !inst_dir.join(".installing").exists(),
+                    "mode '{label}' left .installing"
+                );
+                assert!(
+                    !inst_dir.join("client.jar").exists(),
+                    "mode '{label}' committed partial client.jar"
+                );
+                let st = InstallState::load(&inst_dir).expect("state saved");
+                assert_eq!(st.status, InstallStatus::Failed, "mode '{label}' state");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_install_and_retry_succeeds() {
+        let (base_url, srv) = spawn_fault_mock_server(MockFaultMode::Healthy).await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let inst_dir = tmp.path().join("instances").join("cancel-retry");
+        fs::create_dir_all(&inst_dir).unwrap();
+        let paths = MqPaths::with_root(tmp.path().join("mq_root"));
+        let cas = CasStore::new(paths.clone());
+        let net = NetEngine::with_defaults().expect("net");
+        let compute = ComputePool::new(2);
+
+        // 1. Cancel before/during install
+        let epoch1 = Arc::new(CancelEpoch::new());
+        let guard1 = epoch1.snapshot();
+        epoch1.cancel_and_advance();
+        let req = InstallRequest {
+            mc_version: "1.20.1".to_string(),
+            loader: ModLoaderKind::Vanilla,
+            loader_version: None,
+            instance_dir: inst_dir.clone(),
+            mock_base_url: Some(base_url.clone()),
+        };
+        let res1 = install_game(&req, &paths, &net, &cas, &compute, &guard1, None).await;
+        assert!(matches!(res1, Err(MqError::Cancelled { .. })));
+        assert!(!inst_dir.join(".installing").exists());
+
+        // 2. Retry with fresh CancelEpoch -> succeeds
+        let epoch2 = Arc::new(CancelEpoch::new());
+        let guard2 = epoch2.snapshot();
+        let res2 = install_game(&req, &paths, &net, &cas, &compute, &guard2, None).await;
+        srv.abort();
+        assert!(res2.is_ok(), "retry after cancel failed: {res2:?}");
+        assert!(inst_dir.join("client.jar").is_file());
+    }
+
+    #[test]
+    fn skips_already_extracted_local_library_in_cas_and_disk_check() {
+        use sha1::Digest as _;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path().join("mq_root"));
+        let cas = CasStore::new(paths.clone());
+        let lib_rel = "net/minecraftforge/forge/1.12.2-14.23.5.2859/forge-1.12.2-14.23.5.2859.jar";
+        let target = paths.libraries_dir().join(lib_rel);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let payload = b"forge-universal-jar";
+        fs::write(&target, payload).unwrap();
+
+        let expected = Sha1Digest::from_bytes(sha1::Sha1::digest(payload).into());
+        let actual = crate::cas::compute_file_sha1_streaming(&target).expect("sha1");
+        assert_eq!(actual, expected);
+        cas.store_verified_file(&target, expected).expect("store");
+        assert!(cas.has_blob(&expected));
     }
 }

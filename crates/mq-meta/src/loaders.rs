@@ -36,6 +36,10 @@ pub const FORGE_PROMOTIONS_URL: &str =
 pub const FORGE_MAVEN_METADATA_URL: &str =
     "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
 
+/// Official NeoForge Maven metadata XML endpoint listing all published NeoForge versions.
+pub const NEOFORGE_MAVEN_METADATA_URL: &str =
+    "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
+
 /// Fallback Maven repository URL when a profile library omits both `downloads.artifact` and `url`.
 pub const DEFAULT_LIBRARIES_BASE_URL: &str = "https://libraries.minecraft.net";
 
@@ -1277,6 +1281,81 @@ pub async fn fetch_forge_recommended_version(
         .ok_or_else(|| MqError::Metadata(format!("no Forge loader version found for {mc}")))
 }
 
+/// Builds the NeoForge installer JAR download URL for `neoforge_version`.
+pub fn neoforge_installer_url(base_url: Option<&str>, neoforge_version: &str) -> MqResult<String> {
+    let ver = neoforge_version.trim();
+    if ver.is_empty() {
+        return Err(MqError::Metadata(
+            "NeoForge version must not be empty".to_string(),
+        ));
+    }
+    let base = base_url
+        .map(|u| u.trim().trim_end_matches('/'))
+        .filter(|u| !u.is_empty())
+        .unwrap_or(NEOFORGE_MAVEN_URL);
+    Ok(format!(
+        "{base}/net/neoforged/neoforge/{ver}/neoforge-{ver}-installer.jar"
+    ))
+}
+
+/// Extracts NeoForge versions for `mc_version` from Maven `maven-metadata.xml` content,
+/// ordered newest-first (with stable releases prioritized over `-beta`/`-alpha`).
+pub fn parse_neoforge_maven_metadata_versions(xml: &str, mc_version: &str) -> Vec<String> {
+    let mc = mc_version.trim();
+    let prefix = if let Some(rest) = mc.strip_prefix("1.") {
+        if rest.contains('.') {
+            format!("{rest}.")
+        } else {
+            format!("{rest}.0.")
+        }
+    } else {
+        format!("{mc}.")
+    };
+
+    let mut stable = Vec::new();
+    let mut pre = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<version>") {
+        let after_open = &rest[start + "<version>".len()..];
+        let Some(end) = after_open.find("</version>") else {
+            break;
+        };
+        let ver = after_open[..end].trim();
+        if ver.starts_with(&prefix) {
+            if ver.contains("-beta") || ver.contains("-alpha") {
+                pre.push(ver.to_owned());
+            } else {
+                stable.push(ver.to_owned());
+            }
+        }
+        rest = &after_open[end + "</version>".len()..];
+    }
+    stable.reverse();
+    pre.reverse();
+    stable.extend(pre);
+    stable
+}
+
+/// Fetches available NeoForge versions for `mc_version` (newest first) from NeoForge Maven metadata.
+pub async fn fetch_neoforge_loader_versions(
+    client: &reqwest::Client,
+    base_url: Option<&str>,
+    mc_version: &str,
+) -> MqResult<Vec<String>> {
+    let url_str = match base_url {
+        Some(base) => format!(
+            "{}/net/neoforged/neoforge/maven-metadata.xml",
+            base.trim().trim_end_matches('/')
+        ),
+        None => NEOFORGE_MAVEN_METADATA_URL.to_owned(),
+    };
+    let url = Url::parse(&url_str).map_err(|err| {
+        MqError::Metadata(format!("invalid NeoForge metadata URL '{url_str}': {err}"))
+    })?;
+    let body = get_text_checked(client, url).await?;
+    Ok(parse_neoforge_maven_metadata_versions(&body, mc_version))
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1748,6 +1827,26 @@ mod tests {
         assert_eq!(
             parse_forge_maven_metadata_versions(xml, "1.20.1"),
             vec!["47.3.0".to_owned(), "47.2.0".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parses_neoforge_maven_metadata_for_1_21_and_26_x() {
+        let xml = r#"
+<metadata><versioning><versions>
+  <version>21.1.263</version>
+  <version>26.3.0.99-beta</version>
+  <version>26.3.0.100</version>
+  <version>26.3.0.103</version>
+</versions></versioning></metadata>"#;
+        let v26 = parse_neoforge_maven_metadata_versions(xml, "26.3");
+        assert_eq!(v26, vec!["26.3.0.103", "26.3.0.100", "26.3.0.99-beta"]);
+        let v21 = parse_neoforge_maven_metadata_versions(xml, "1.21.1");
+        assert_eq!(v21, vec!["21.1.263"]);
+        let url = neoforge_installer_url(None, "26.3.0.103").expect("neoforge url");
+        assert_eq!(
+            url,
+            "https://maven.neoforged.net/releases/net/neoforged/neoforge/26.3.0.103/neoforge-26.3.0.103-installer.jar"
         );
     }
 }
