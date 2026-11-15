@@ -1,79 +1,74 @@
 name: loaders_modded
-description: Create and install Fabric (26.3, 1.20.1), Quilt (26.3), Forge (1.20.1, 1.12.2), and NeoForge (26.3) instances via UI modal
+description: Create Fabric (26.3, 1.20.1), Quilt (26.3), Forge (1.20.1, 1.12.2), and NeoForge (26.3) instances via UI modal
 window:
   width: 1024
   height: 640
 steps:
-  - wait_for:
-      label: "Создать инстанс"
-      timeout_ms: 15000
-  - wait_idle:
-      timeout_ms: 5000
-      frames: 3
-
-  # 1. Fabric 26.3 (latest)
-  - click: { label: "Создать инстанс" }
-  - wait_for: { label: "Обновить", timeout_ms: 15000 }
+  - wait_for: { label: "Создать инстанс", timeout_ms: 15000 }
   - wait_idle: { timeout_ms: 5000, frames: 3 }
-  - click: { x: 366, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "26.3", clear: false }
-  - wait_idle: { timeout_ms: 5000, frames: 3 }
+  - screenshot: "loaders_modded_00_initial.png"
+
+  # 1. fabric 26.3
+  - click: { label: "Создать инстанс" }
+  - wait_for: { label: "Обновить", timeout_ms: 15000 }
+  - wait_idle: { timeout_ms: 5000, frames: 20 }
+  - click: { x: 366, y: 203 }
   - click: { x: 400, y: 390 }
-  - wait_idle: { timeout_ms: 5000, frames: 3 }
-  - screenshot: "modded_01_fabric_26_3.png"
+  - screenshot: "loaders_modded_01_fabric_26.3.png"
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 2. Fabric 1.20.1
+  # 2. fabric 1.20.1
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 366, y: 202 }
+  - click: { x: 366, y: 203 }
   - click: { x: 400, y: 340 }
-  - type: { text: "1.20.1", clear: false }
-  - click: { x: 400, y: 390 }
+  - type: { text: "1.20.1", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 3. Quilt 26.3 (latest)
+  # 3. quilt 26.3
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 429, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "26.3", clear: false }
+  - click: { x: 429, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "26.3", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 4. Forge 1.20.1
+  # 4. forge 1.20.1
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 488, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.20.1", clear: false }
+  - click: { x: 488, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.20.1", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 5. Forge 1.12.2
+  # 5. forge 1.12.2
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 488, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.12.2", clear: false }
+  - click: { x: 488, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.12.2", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 6. NeoForge 26.3 (latest)
+  # 6. neoforge 26.3
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 557, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "26.3", clear: false }
+  - click: { x: 557, y: 252 }
   - click: { x: 400, y: 390 }
-  - screenshot: "modded_02_neoforge_26_3.png"
+  - type: { text: "26.3", clear: true }
+  - click: { x: 400, y: 444 }
+  - screenshot: "loaders_modded_06_neoforge_26.3.png"
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
-  - screenshot: "modded_03_done.png"
+
+  - dump_ui: {}
+  - screenshot: "loaders_modded_done.png"
   - quit: {}

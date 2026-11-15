@@ -60,11 +60,9 @@ pub fn discover_java_runtimes() -> Vec<JavaRuntime> {
     #[cfg(not(target_os = "windows"))]
     {
         jvm_roots.extend(SYSTEM_JVM_DIRS.iter().map(PathBuf::from));
-        if let Ok(home) = env::var("HOME") {
-            let mq_java = PathBuf::from(home).join(".local/share/mq/java");
-            if mq_java.exists() {
-                jvm_roots.push(mq_java);
-            }
+        let mq_java = mq_core::platform::default_data_dir().join("java");
+        if mq_java.exists() {
+            jvm_roots.push(mq_java);
         }
     }
 

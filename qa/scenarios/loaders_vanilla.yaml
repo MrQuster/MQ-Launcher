@@ -1,99 +1,94 @@
 name: loaders_vanilla
-description: Create and install Vanilla instances (1.7.10, 1.8.9, 1.12.2, 1.16.5, 1.18.2, 1.20.1, 1.21.11, 26.3) via UI modal
+description: Create Vanilla instances (26.3, 1.21.11, 1.20.1, 1.18.2, 1.16.5, 1.12.2, 1.8.9, 1.7.10) via UI modal
 window:
   width: 1024
   height: 640
 steps:
-  - wait_for:
-      label: "Создать инстанс"
-      timeout_ms: 15000
-  - wait_idle:
-      timeout_ms: 5000
-      frames: 3
-  - screenshot: "vanilla_00_initial.png"
-
-  # 1. Vanilla 1.7.10
-  - click: { label: "Создать инстанс" }
-  - wait_for: { label: "Обновить", timeout_ms: 15000 }
+  - wait_for: { label: "Создать инстанс", timeout_ms: 15000 }
   - wait_idle: { timeout_ms: 5000, frames: 3 }
-  - click: { x: 302, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.7.10", clear: false }
-  - wait_idle: { timeout_ms: 5000, frames: 3 }
+  - screenshot: "loaders_vanilla_00_initial.png"
+
+  # 1. vanilla 26.3
+  - click: { label: "Создать инстанс" }
+  - wait_for: { label: "Обновить", timeout_ms: 15000 }
+  - wait_idle: { timeout_ms: 5000, frames: 20 }
+  - click: { x: 302, y: 203 }
   - click: { x: 400, y: 390 }
-  - wait_idle: { timeout_ms: 5000, frames: 2 }
-  - screenshot: "vanilla_01_modal_1_7_10.png"
+  - screenshot: "loaders_vanilla_01_vanilla_26.3.png"
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 2. Vanilla 1.8.9
+  # 2. vanilla 1.21.11
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 302, y: 202 }
+  - click: { x: 302, y: 203 }
   - click: { x: 400, y: 340 }
-  - type: { text: "1.8.9", clear: false }
-  - click: { x: 400, y: 390 }
+  - type: { text: "1.21.11", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 3. Vanilla 1.12.2
+  # 3. vanilla 1.20.1
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 302, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.12.2", clear: false }
+  - click: { x: 302, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.20.1", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 4. Vanilla 1.16.5
+  # 4. vanilla 1.18.2
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 302, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.16.5", clear: false }
+  - click: { x: 302, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.18.2", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 5. Vanilla 1.18.2
+  # 5. vanilla 1.16.5
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 302, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.18.2", clear: false }
+  - click: { x: 302, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.16.5", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 6. Vanilla 1.20.1
+  # 6. vanilla 1.12.2
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 302, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.20.1", clear: false }
+  - click: { x: 302, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.12.2", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 7. Vanilla 1.21.11
+  # 7. vanilla 1.8.9
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 302, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "1.21.11", clear: false }
+  - click: { x: 302, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.8.9", clear: true }
+  - click: { x: 400, y: 444 }
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
 
-  # 8. Vanilla 26.3
+  # 8. vanilla 1.7.10
   - click: { label: "Создать инстанс" }
   - wait_for: { label: "Обновить", timeout_ms: 15000 }
-  - click: { x: 302, y: 202 }
-  - click: { x: 400, y: 340 }
-  - type: { text: "26.3", clear: false }
+  - click: { x: 302, y: 252 }
   - click: { x: 400, y: 390 }
+  - type: { text: "1.7.10", clear: true }
+  - click: { x: 400, y: 444 }
+  - screenshot: "loaders_vanilla_08_vanilla_1.7.10.png"
   - click: { id: "button_0759ba93" }
   - wait_for: { label: "Создать инстанс", timeout_ms: 10000 }
-  - screenshot: "vanilla_02_done.png"
+
+  - dump_ui: {}
+  - screenshot: "loaders_vanilla_done.png"
   - quit: {}
