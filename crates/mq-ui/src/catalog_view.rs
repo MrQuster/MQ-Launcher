@@ -88,6 +88,19 @@ pub fn source_error_text(source: CatalogSource, kind: CatalogErrorKind) -> Strin
     }
 }
 
+fn is_deterministic_test_mode(_ctx: &egui::Context) -> bool {
+    if std::env::var("MQ_TEST_DETERMINISTIC")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        return true;
+    }
+    #[cfg(feature = "test-hooks")]
+    if crate::test_hooks::is_solid_background(_ctx) {
+        return true;
+    }
+    false
+}
+
 pub const fn source_name(source: CatalogSource) -> &'static str {
     match source {
         CatalogSource::Modrinth => "Modrinth",
@@ -489,21 +502,34 @@ impl CatalogView {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
             paint_vector_icon(ui.painter(), rect, VectorIcon::Search, ACCENT_COBALT);
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut cat.query)
-                    .hint_text("Поиск по названию")
-                    .desired_width((ui.available_width() - 8.0).max(160.0)),
-            );
+            let input_w = (ui.available_width() - 24.0).max(144.0);
+            let mut inner_changed = false;
+            let frame_resp = egui::Frame::new()
+                .fill(tokens.bg_input)
+                .stroke(Stroke::new(1.0_f32, tokens.border))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.set_min_size(Vec2::new(input_w, 18.0));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut cat.query)
+                            .frame(false)
+                            .hint_text("Поиск по названию")
+                            .desired_width(input_w)
+                            .vertical_align(egui::Align::Center),
+                    );
+                    inner_changed = resp.changed();
+                });
             register_widget(
                 ui,
-                &resp,
+                &frame_resp.response,
                 ElementMeta::new(ElementKind::Input)
                     .label("Поиск по названию")
                     .text(cat.query.as_str())
                     .fg(tokens.text)
                     .bg(tokens.bg_input),
             );
-            changed |= resp.changed();
+            changed |= inner_changed;
         });
         changed
     }
@@ -595,7 +621,10 @@ impl CatalogView {
             });
         } else if let Some(left) = state.catalog.debounce_remaining(now) {
             ui.ctx().request_repaint_after(left);
-        } else if !state.catalog.searched && !state.catalog.loading {
+        } else if !state.catalog.searched
+            && !state.catalog.loading
+            && !is_deterministic_test_mode(ui.ctx())
+        {
             // First open of the screen: show popular projects without waiting for typing.
             state.catalog.mark_page_changed(now, false);
             ui.ctx().request_repaint();

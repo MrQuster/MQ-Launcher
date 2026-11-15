@@ -51,7 +51,10 @@ pub fn button_primary(
     icon: Option<VectorIcon>,
     text: &str,
 ) -> Response {
-    let fg_color = contrast_fg_for_bg(tokens.accent_text, tokens.accent);
+    let base_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.26);
+    let hover_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.38);
+    let active_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.44);
+    let fg_color = contrast_fg_for_bg(tokens.text, base_bg);
     let text_w = ui
         .painter()
         .layout_no_wrap(
@@ -69,16 +72,22 @@ pub fn button_primary(
     }
 
     let bg_color = if response.is_pointer_button_down_on() {
-        tokens.accent
+        active_bg
     } else if response.hovered() {
-        tokens.accent_hover
+        hover_bg
     } else {
-        tokens.accent
+        base_bg
     };
-    let fg_color = contrast_fg_for_bg(tokens.accent_text, bg_color);
+    let fg_color = contrast_fg_for_bg(tokens.text, bg_color);
 
     let painter = ui.painter();
     painter.rect_filled(rect, RADIUS_BUTTON, bg_color);
+    painter.rect_stroke(
+        rect,
+        RADIUS_BUTTON,
+        Stroke::new(1.5_f32, tokens.accent),
+        egui::StrokeKind::Inside,
+    );
 
     if response.has_focus() {
         painter.rect_stroke(
@@ -108,15 +117,17 @@ pub fn button_primary(
         fg_color,
     );
 
-    register_widget(
-        ui,
-        &response,
-        ElementMeta::new(ElementKind::Button)
-            .label(text)
-            .text(text)
-            .fg(fg_color)
-            .bg(bg_color),
-    );
+    if ui.is_enabled() {
+        register_widget(
+            ui,
+            &response,
+            ElementMeta::new(ElementKind::Button)
+                .label(text)
+                .text(text)
+                .fg(fg_color)
+                .bg(bg_color),
+        );
+    }
 
     response
 }
@@ -189,15 +200,17 @@ pub fn button_secondary(
         tokens.text,
     );
 
-    register_widget(
-        ui,
-        &response,
-        ElementMeta::new(ElementKind::Button)
-            .label(text)
-            .text(text)
-            .fg(tokens.text)
-            .bg(bg_color),
-    );
+    if ui.is_enabled() {
+        register_widget(
+            ui,
+            &response,
+            ElementMeta::new(ElementKind::Button)
+                .label(text)
+                .text(text)
+                .fg(tokens.text)
+                .bg(bg_color),
+        );
+    }
 
     response
 }

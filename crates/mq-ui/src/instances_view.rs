@@ -441,7 +441,9 @@ impl InstancesView {
 
         // Duplicate modal
         if self.show_duplicate_dialog {
-            if let Some(selected_inst) = state.selected_instance().cloned() {
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.show_duplicate_dialog = false;
+            } else if let Some(selected_inst) = state.selected_instance().cloned() {
                 egui::Window::new("Дублирование инстанса")
                     .collapsible(false)
                     .resizable(false)
@@ -452,7 +454,7 @@ impl InstancesView {
                         ui.label("Имя нового инстанса:");
                         ui.text_edit_singleline(&mut self.duplicate_name);
                         ui.add_space(10.0);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if primary_emerald_button(ui, Some(VectorIcon::Check), "Дублировать")
                                 .clicked()
                                 && !self.duplicate_name.trim().is_empty()
@@ -695,7 +697,10 @@ impl InstancesView {
 
         // Delete confirmation modal
         if self.show_delete_dialog {
-            if let Some((target_id, target_name)) = self.instance_to_delete.clone() {
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.show_delete_dialog = false;
+                self.instance_to_delete = None;
+            } else if let Some((target_id, target_name)) = self.instance_to_delete.clone() {
                 let is_running = state.running_instances.contains_key(&target_id);
                 let is_downloading = state.installing_instance.as_ref() == Some(&target_id);
 
@@ -704,54 +709,63 @@ impl InstancesView {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ui.ctx(), |ui| {
-                        let modal_w = 420.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
+                        let screen_rect = ui.ctx().screen_rect();
+                        let modal_w = 420.0_f32.min(screen_rect.width() - 32.0);
                         ui.set_width(modal_w);
 
-                        ui.horizontal(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-                            paint_vector_icon(
-                                ui.painter(),
-                                rect,
-                                VectorIcon::Warning,
-                                STATUS_DANGER,
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(format!("Удалить «{}»?", target_name))
-                                    .color(TEXT_PRIMARY)
-                                    .strong()
-                                    .size(15.0),
-                            );
-                        });
+                        let body_max_h = (screen_rect.height() - 110.0).max(60.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("delete_dialog_scroll")
+                            .max_height(body_max_h)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        Vec2::splat(22.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    paint_vector_icon(
+                                        ui.painter(),
+                                        rect,
+                                        VectorIcon::Warning,
+                                        STATUS_DANGER,
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(format!("Удалить «{}»?", target_name))
+                                            .color(TEXT_PRIMARY)
+                                            .strong()
+                                            .size(15.0),
+                                    );
+                                });
 
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(
-                                "Вы уверены, что хотите удалить этот инстанс? Это действие безвозвратно удалит директорию инстанса, включая все установленные моды, миры, скриншоты и настройки.",
-                            )
-                            .color(TEXT_MUTED)
-                            .size(12.5),
-                        );
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Вы уверены, что хотите удалить этот инстанс? Это действие безвозвратно удалит директорию инстанса, включая все установленные моды, миры, скриншоты и настройки.",
+                                    )
+                                    .color(TEXT_MUTED)
+                                    .size(12.5),
+                                );
 
-                        if is_running {
-                            ui.add_space(6.0);
-                            ui.label(
-                                RichText::new("Инстанс сейчас запущен! Закройте игру перед удалением.")
-                                    .color(STATUS_DANGER)
-                                    .strong(),
-                            );
-                        } else if is_downloading {
-                            ui.add_space(6.0);
-                            ui.label(
-                                RichText::new("Инстанс сейчас загружается/устанавливается. Дождитесь окончания или отмените загрузку.")
-                                    .color(STATUS_DANGER)
-                                    .strong(),
-                            );
-                        }
+                                if is_running {
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        RichText::new("Инстанс сейчас запущен! Закройте игру перед удалением.")
+                                            .color(STATUS_DANGER)
+                                            .strong(),
+                                    );
+                                } else if is_downloading {
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        RichText::new("Инстанс сейчас загружается/устанавливается. Дождитесь окончания или отмените загрузку.")
+                                            .color(STATUS_DANGER)
+                                            .strong(),
+                                    );
+                                }
+                            });
 
-                        ui.add_space(14.0);
-                        ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| {
                             let can_delete = !is_running && !is_downloading;
                             ui.add_enabled_ui(can_delete, |ui| {
                                 if danger_button(ui, Some(VectorIcon::Trash), "Удалить").clicked() {
@@ -830,8 +844,15 @@ impl InstancesView {
             }
         }
 
+        let any_modal_open = state.show_create_instance_dialog
+            || self.show_import_dialog
+            || self.show_delete_dialog
+            || self.show_duplicate_dialog;
+
         if state.instances.is_empty() {
-            self.render_empty_onboarding_hub(ui, state, &tokens);
+            ui.add_enabled_ui(!any_modal_open, |ui| {
+                self.render_empty_onboarding_hub(ui, state, &tokens);
+            });
             return;
         }
 
@@ -1220,11 +1241,9 @@ impl InstancesView {
                                             )
                                             .clicked()
                                             {
-                                                let _ = state.cmd_sender.send(
-                                                    UiWorkerCommand::StopGame {
-                                                        instance_id: inst_id.clone(),
-                                                    },
-                                                );
+                                                let _ = state
+                                                    .cmd_sender
+                                                    .send(UiWorkerCommand::CancelDownload);
                                             }
                                         } else if is_installed {
                                             if primary_emerald_button(
@@ -1269,7 +1288,7 @@ impl InstancesView {
                             .fill(CARD_SURFACE)
                             .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
                             .corner_radius(RADIUS_CARD)
-                            .inner_margin(egui::Margin::same(14));
+                            .inner_margin(egui::Margin::same(8));
 
                         header_frame.show(ui, |ui| {
                             let render_hero_button = |ui: &mut egui::Ui, state: &mut UiState| {
@@ -1295,9 +1314,9 @@ impl InstancesView {
                                     )
                                     .clicked()
                                     {
-                                        let _ = state.cmd_sender.send(UiWorkerCommand::StopGame {
-                                            instance_id: inst_id.clone(),
-                                        });
+                                        let _ = state
+                                            .cmd_sender
+                                            .send(UiWorkerCommand::CancelDownload);
                                     }
                                 } else if is_installed {
                                     let btn_text = if state.is_launching {
@@ -1576,7 +1595,7 @@ impl InstancesView {
                             });
                         });
 
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
                     }
 
                     // Tab selector with underline tabs (B5)
@@ -3432,9 +3451,9 @@ impl InstancesView {
         // Row 2: Search input and level filter chips (B6, B7)
         let tokens = Tokens::from_config(&state.config.theme);
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
             SearchField::new(&mut self.console_search, "Поиск в логе...")
-                .width(200.0)
+                .width(150.0)
                 .show(ui, &tokens);
 
             let info_count = state

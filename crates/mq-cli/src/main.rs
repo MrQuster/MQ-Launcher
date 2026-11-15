@@ -43,7 +43,7 @@ use mq_mods::{
     InstalledModEntry, LockSource, ModConflict, ModrinthClient, ProjectKind, ProjectVersion,
     ResolveOptions, ResolvedModDownload, SearchQuery,
 };
-use mq_net::{DownloadSpec, NetConfig, NetEngine};
+use mq_net::{NetConfig, NetEngine};
 use mq_sched::{
     compute_speedup, estimate_serial_fraction, read_peak_rss_mib, read_proc_stat, thread_ladder,
     BufferPool, CancelEpoch, ComputePool,
@@ -1992,22 +1992,17 @@ async fn cmd_mods(args: ModsArgs, paths: MqPaths, threads: Option<usize>) -> Res
                     .await?;
 
             let net = Arc::new(NetEngine::new(NetConfig::default())?);
-            let mods_dir = inst_dir.join("mods");
-            std::fs::create_dir_all(&mods_dir)?;
-
-            let mut specs = Vec::new();
-            for d in &downloads {
-                let mut spec = DownloadSpec::new(&d.filename, &d.url, mods_dir.join(&d.filename));
-                spec.expected_sha1 = d.sha1;
-                spec.expected_sha512 = d.sha512;
-                spec.expected_size = Some(d.size);
-                specs.push(spec);
-            }
-
-            let outcomes = net
-                .download_batch(specs, "install_mods", &cancel.snapshot())
-                .await?;
-            let successful_count = outcomes.len();
+            let installed = mq_mods::install_resolved_content(
+                &downloads,
+                &inst_dir,
+                mq_mods::ProjectKind::Mod,
+                mq_mods::LockSource::Modrinth,
+                &paths,
+                &net,
+                &cancel.snapshot(),
+            )
+            .await?;
+            let successful_count = installed.len();
 
             println!(
                 "--------------------------------------------------------------------------------"
