@@ -33,7 +33,9 @@ pub use options::{
     read_minecraft_options_lang, sync_minecraft_options_lang,
 };
 pub use prelaunch::ensure_prelaunch_assets;
-pub use runner::{kill_process_tree, spawn_and_stream_game};
+pub use runner::{
+    exit_status_code, kill_process_tree, spawn_and_stream_game, spawn_and_stream_game_with_pid,
+};
 
 #[cfg(test)]
 mod tests {
@@ -508,5 +510,78 @@ IMPLEMENTOR="Oracle Corporation"
             fs::canonicalize(&custom_java).unwrap_or(custom_java)
         );
         assert_eq!(selected.major_version, 21);
+    }
+
+    #[test]
+    fn analyze_crash_diagnoses_oom_incompatible_java_and_signals() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let oom = analyze_crash(
+            tmp.path(),
+            Some(1),
+            &[
+                "Error occurred during initialization of VM".to_owned(),
+                "Too small maximum heap".to_owned(),
+            ],
+        );
+        assert!(oom.summary.contains("OutOfMemoryError"));
+
+        let java_err = analyze_crash(
+            tmp.path(),
+            Some(1),
+            &["java.lang.UnsupportedClassVersionError: net/minecraft/client/main/Main has been compiled by a more recent version of the Java Runtime (class file version 69.0)".to_owned()],
+        );
+        assert!(java_err.summary.contains("UnsupportedClassVersionError"));
+
+        let sigsegv = analyze_crash(
+            tmp.path(),
+            Some(139),
+            &["# A fatal error has been detected".to_owned()],
+        );
+        assert!(sigsegv.summary.contains("SIGSEGV"));
+
+        let sigterm = analyze_crash(tmp.path(), Some(143), &[]);
+        assert!(sigterm.summary.contains("SIGTERM"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_reports_pid_kills_process_tree_and_preserves_signal_exit_code() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let script = tmp.path().join("sleepy.sh");
+        fs::write(&script, "#!/bin/sh\nsleep 30\n").expect("write script");
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let cmd = BuiltLaunchCommand {
+            program: script,
+            args: Vec::new(),
+            working_dir: tmp.path().to_path_buf(),
+            env: BTreeMap::new(),
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+
+        let status = rt.block_on(async move {
+            let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(async move {
+                spawn_and_stream_game_with_pid(&cmd, "test-inst", Vec::new(), None, Some(pid_tx))
+                    .await
+                    .expect("spawn")
+            });
+            let pid = pid_rx.await.expect("receive pid");
+            assert!(pid > 0);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            kill_process_tree(pid).expect("kill tree");
+            handle.await.expect("join")
+        });
+
+        assert!(!status.success());
+        assert_eq!(exit_status_code(&status), 137);
     }
 }
