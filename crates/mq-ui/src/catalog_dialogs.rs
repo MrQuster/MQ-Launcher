@@ -138,6 +138,7 @@ fn project_window(ctx: &Context, state: &mut UiState) {
     }
     if install_hit {
         state.open_install_content(hit);
+        close = true;
     }
     if close {
         state.project.close();
@@ -492,56 +493,113 @@ fn manual_window(ctx: &Context, state: &mut UiState) {
     ctx.request_repaint_after(std::time::Duration::from_secs(2));
 }
 
-/// "Загрузки" queue of catalog jobs, shown at the bottom of the catalog screen.
+/// Renders one compact row for an install job and records any cancel/retry action.
+fn render_job_row(
+    ui: &mut Ui,
+    j: &crate::catalog_flow::InstallJob,
+    tokens: &Tokens,
+    cancel: &mut Option<u64>,
+    retry: &mut Option<u64>,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 2.0);
+        ui.label(RichText::new(&j.title).color(tokens.text).small().strong());
+        ui.label(
+            RichText::new(&j.target_label)
+                .color(tokens.text_muted)
+                .small(),
+        );
+        match &j.status {
+            JobStatus::Running => {
+                ui.add(
+                    egui::ProgressBar::new(j.progress())
+                        .desired_width(140.0)
+                        .text(format!("{}/{}", j.done_files, j.total_files)),
+                );
+                if danger_button(ui, None, "Отмена").clicked() {
+                    *cancel = Some(j.id);
+                }
+            }
+            JobStatus::Done => version_badge(ui, "Готово", tokens.accent),
+            JobStatus::Cancelled => {
+                version_badge(ui, "Отменено", tokens.warning);
+                if secondary_glass_button(ui, None, "Повторить").clicked() {
+                    *retry = Some(j.id);
+                }
+            }
+            JobStatus::Failed(e) => {
+                ui.add(egui::Label::new(RichText::new(e).color(tokens.danger).small()).truncate())
+                    .on_hover_text(e);
+                if secondary_glass_button(ui, None, "Повторить").clicked() {
+                    *retry = Some(j.id);
+                }
+            }
+        }
+    });
+}
+
+/// "Загрузки" queue of catalog jobs, shown in a compact height-bounded bar.
 pub fn jobs_panel(ui: &mut Ui, state: &mut UiState) {
     if state.jobs.jobs.is_empty() {
         return;
     }
     let tokens = Tokens::active(ui.ctx());
-    ui.add_space(8.0);
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Загрузки").color(tokens.text).strong());
-        if secondary_glass_button(ui, None, "Очистить завершённые").clicked() {
-            state.jobs.remove_finished();
-        }
-    });
+    let has_finished = state.jobs.jobs.iter().any(|j| !j.is_active());
+    let mut clear_finished = false;
     let mut cancel = None;
     let mut retry = None;
-    for j in &state.jobs.jobs {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&j.title).color(tokens.text));
-            ui.label(
-                RichText::new(&j.target_label)
-                    .color(tokens.text_muted)
-                    .small(),
-            );
-            match &j.status {
-                JobStatus::Running => {
-                    ui.add(
-                        egui::ProgressBar::new(j.progress())
-                            .desired_width(160.0)
-                            .text(format!("{}/{}", j.done_files, j.total_files)),
+
+    ui.add_space(4.0);
+    egui::Frame::new()
+        .fill(tokens.bg_surface)
+        .stroke(Stroke::new(1.0_f32, tokens.border))
+        .corner_radius(RADIUS_CARD)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if state.jobs.jobs.len() == 1 {
+                let job = &state.jobs.jobs[0];
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
+                    ui.label(RichText::new("Загрузки:").color(tokens.text_muted).small());
+                    render_job_row(ui, job, &tokens, &mut cancel, &mut retry);
+                    if has_finished {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if secondary_glass_button(ui, None, "Очистить завершённые").clicked()
+                            {
+                                clear_finished = true;
+                            }
+                        });
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Загрузки ({})", state.jobs.jobs.len()))
+                            .color(tokens.text)
+                            .small()
+                            .strong(),
                     );
-                    if danger_button(ui, None, "Отмена").clicked() {
-                        cancel = Some(j.id);
+                    if has_finished
+                        && secondary_glass_button(ui, None, "Очистить завершённые").clicked()
+                    {
+                        clear_finished = true;
                     }
-                }
-                JobStatus::Done => version_badge(ui, "Готово", tokens.accent),
-                JobStatus::Cancelled => {
-                    version_badge(ui, "Отменено", tokens.warning);
-                    if secondary_glass_button(ui, None, "Повторить").clicked() {
-                        retry = Some(j.id);
-                    }
-                }
-                JobStatus::Failed(e) => {
-                    ui.label(RichText::new(e).color(tokens.danger).small());
-                    if secondary_glass_button(ui, None, "Повторить").clicked() {
-                        retry = Some(j.id);
-                    }
-                }
+                });
+                ScrollArea::vertical()
+                    .id_salt(ui.id().with("catalog_jobs_scroll"))
+                    .max_height(56.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for j in &state.jobs.jobs {
+                            render_job_row(ui, j, &tokens, &mut cancel, &mut retry);
+                        }
+                    });
             }
         });
+
+    if clear_finished {
+        state.jobs.remove_finished();
     }
     if let Some(id) = cancel {
         state.cancel_job(id);

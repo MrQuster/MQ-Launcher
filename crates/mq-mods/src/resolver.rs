@@ -222,6 +222,50 @@ impl ContentProvider for ModrinthClient {
     }
 }
 
+fn merge_curseforge_quilt_results(
+    quilt_res: MqResult<Vec<CatalogHit>>,
+    fabric_res: MqResult<Vec<CatalogHit>>,
+    sort: SearchSort,
+    limit: u32,
+) -> MqResult<Vec<CatalogHit>> {
+    if quilt_res.is_err() && fabric_res.is_err() {
+        return quilt_res;
+    }
+    let mut merged = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for hit in quilt_res
+        .unwrap_or_default()
+        .into_iter()
+        .chain(fabric_res.unwrap_or_default())
+    {
+        if let Some(&idx) = seen.get(&hit.project_id) {
+            let existing: &mut CatalogHit = &mut merged[idx];
+            for loader in hit.loaders {
+                if !existing
+                    .loaders
+                    .iter()
+                    .any(|l| l.eq_ignore_ascii_case(&loader))
+                {
+                    existing.loaders.push(loader);
+                }
+            }
+        } else {
+            seen.insert(hit.project_id.clone(), merged.len());
+            merged.push(hit);
+        }
+    }
+    if sort == SearchSort::Downloads {
+        merged.sort_by_key(|hit| std::cmp::Reverse(hit.downloads));
+    }
+    let cap = if limit == 0 {
+        20
+    } else {
+        limit.min(50) as usize
+    };
+    merged.truncate(cap);
+    Ok(merged)
+}
+
 impl ContentProvider for CurseForgeClient {
     fn source(&self) -> CatalogSource {
         CatalogSource::CurseForge
@@ -251,6 +295,15 @@ impl ContentProvider for CurseForgeClient {
                     .with_sort_field(CurseForgeSortField::LastUpdated)
                     .with_sort_order(CurseForgeSortOrder::Desc);
             }
+        }
+        if query.project_kind == ProjectKind::Mod && query.loader == Some(ModLoaderKind::Quilt) {
+            let mut fabric_query = query.clone();
+            fabric_query.loader = Some(ModLoaderKind::Fabric);
+            let (quilt_res, fabric_res) = tokio::join!(
+                self.search_with_options(query, &opts),
+                self.search_with_options(&fabric_query, &opts)
+            );
+            return merge_curseforge_quilt_results(quilt_res, fabric_res, query.sort, query.limit);
         }
         self.search_with_options(query, &opts).await
     }
@@ -1347,5 +1400,46 @@ mod tests {
             msg.contains("несовместим") && msg.contains("optifabric"),
             "unexpected error message: {msg}"
         );
+    }
+
+    #[test]
+    fn merge_curseforge_quilt_results_deduplicates_and_sorts() {
+        let mk = |id: &str, downloads: u64, loaders: &[&str]| CatalogHit {
+            source: CatalogSource::CurseForge,
+            project_id: id.into(),
+            slug: format!("mod-{id}"),
+            project_kind: ProjectKind::Mod,
+            title: format!("Mod {id}"),
+            description: String::new(),
+            author: String::new(),
+            downloads,
+            icon_url: None,
+            loaders: loaders.iter().map(|s| (*s).to_string()).collect(),
+            game_versions: vec![],
+            latest_version: None,
+        };
+        let quilt_hits = Ok(vec![mk("100", 500, &["Quilt"])]);
+        let fabric_hits = Ok(vec![
+            mk("100", 500, &["Fabric"]),
+            mk("200", 9000, &["Fabric"]),
+        ]);
+
+        let merged =
+            merge_curseforge_quilt_results(quilt_hits, fabric_hits, SearchSort::Downloads, 20)
+                .expect("merged ok");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].project_id, "200");
+        assert_eq!(merged[1].project_id, "100");
+        assert_eq!(merged[1].loaders, vec!["Quilt", "Fabric"]);
+
+        let partial = merge_curseforge_quilt_results(
+            Err(MqError::Network("timeout".into())),
+            Ok(vec![mk("300", 120, &["Fabric"])]),
+            SearchSort::Relevance,
+            20,
+        )
+        .expect("partial fallback ok");
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].project_id, "300");
     }
 }

@@ -139,7 +139,8 @@ impl CatalogView {
         ui.add_space(8.0);
         self.import_row(ui, state, &tokens);
 
-        self.render_catalog_body(ui, state, &tokens, now, changed);
+        self.render_catalog_body(ui, state, &tokens, now, changed, false);
+        crate::catalog_dialogs::show_overlays(ui.ctx(), state);
     }
 
     /// Renders the catalog browser embedded directly inside an instance's content tab
@@ -168,17 +169,18 @@ impl CatalogView {
             changed = true;
         }
 
-        if let Some((inst_name, inst_mc, inst_loader)) = inst_info {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+            if let Some((inst_name, inst_mc, inst_loader)) = inst_info {
                 ui.label(
                     RichText::new(format!(
-                        "Целевой инстанс: {} ({} · {})",
+                        "{} ({} · {})",
                         inst_name,
                         inst_mc,
                         inst_loader.as_str()
                     ))
-                    .color(tokens.text_muted),
+                    .color(tokens.text_muted)
+                    .small(),
                 );
                 if secondary_glass_button(ui, Some(VectorIcon::Refresh), "Фильтр под инстанс")
                     .clicked()
@@ -187,13 +189,12 @@ impl CatalogView {
                         .catalog
                         .sync_for_instance(tab, &inst_mc, inst_loader, now);
                 }
-            });
-            ui.add_space(4.0);
-        }
+                ui.separator();
+            }
+            changed |= self.source_items(ui, &mut state.catalog, &tokens);
+        });
 
-        changed |= self.source_row(ui, &mut state.catalog, &tokens);
-
-        self.render_catalog_body(ui, state, &tokens, now, changed);
+        self.render_catalog_body(ui, state, &tokens, now, changed, true);
     }
 
     fn render_catalog_body(
@@ -203,19 +204,21 @@ impl CatalogView {
         tokens: &Tokens,
         now: Instant,
         mut changed: bool,
+        compact: bool,
     ) {
+        let gap = if compact { 4.0 } else { 8.0 };
         let has_key = state.config.effective_cf_api_key().is_some();
         let cf_selected = state.catalog.source == CatalogSourceFilter::CurseForge;
         if !has_key && cf_selected {
-            ui.add_space(8.0);
+            ui.add_space(gap);
             self.key_panel(ui, state, tokens);
         }
 
-        ui.add_space(8.0);
+        ui.add_space(gap);
         changed |= self.search_row(ui, &mut state.catalog, tokens);
-        ui.add_space(8.0);
-        changed |= self.filters_row(ui, &mut state.catalog, tokens);
-        ui.add_space(8.0);
+        ui.add_space(gap);
+        changed |= self.filters_row(ui, &mut state.catalog, tokens, compact);
+        ui.add_space(gap);
 
         self.batch_queue_bar(ui, state, tokens);
 
@@ -250,7 +253,6 @@ impl CatalogView {
         crate::catalog_dialogs::jobs_panel(ui, state);
         ui.separator();
         self.results(ui, state, tokens);
-        crate::catalog_dialogs::show_overlays(ui.ctx(), state);
     }
 
     fn instance_target_selector(&self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
@@ -435,23 +437,27 @@ impl CatalogView {
         });
     }
 
+    fn source_items(&self, ui: &mut Ui, cat: &mut CatalogState, tokens: &Tokens) -> bool {
+        let mut changed = false;
+        ui.label(RichText::new("Источник").color(tokens.text_muted));
+        for (filter, label) in [
+            (CatalogSourceFilter::All, "Все"),
+            (CatalogSourceFilter::Modrinth, "Modrinth"),
+            (CatalogSourceFilter::CurseForge, "CurseForge"),
+        ] {
+            if ui.selectable_label(cat.source == filter, label).clicked() && cat.source != filter {
+                cat.source = filter;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn source_row(&self, ui: &mut Ui, cat: &mut CatalogState, tokens: &Tokens) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-            ui.label(RichText::new("Источник").color(tokens.text_muted));
-            for (filter, label) in [
-                (CatalogSourceFilter::All, "Все"),
-                (CatalogSourceFilter::Modrinth, "Modrinth"),
-                (CatalogSourceFilter::CurseForge, "CurseForge"),
-            ] {
-                if ui.selectable_label(cat.source == filter, label).clicked()
-                    && cat.source != filter
-                {
-                    cat.source = filter;
-                    changed = true;
-                }
-            }
+            changed |= self.source_items(ui, cat, tokens);
         });
         changed
     }
@@ -471,10 +477,21 @@ impl CatalogView {
         changed
     }
 
-    fn filters_row(&self, ui: &mut Ui, cat: &mut CatalogState, tokens: &Tokens) -> bool {
+    fn filters_row(
+        &self,
+        ui: &mut Ui,
+        cat: &mut CatalogState,
+        tokens: &Tokens,
+        compact: bool,
+    ) -> bool {
         let mut changed = false;
+        let row_spacing = if compact {
+            Vec2::new(6.0, 4.0)
+        } else {
+            Vec2::new(8.0, 8.0)
+        };
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            ui.spacing_mut().item_spacing = row_spacing;
             ui.label(RichText::new("Версия MC").color(tokens.text_muted));
             changed |= ui
                 .add(
@@ -516,9 +533,9 @@ impl CatalogView {
                 });
         });
 
-        ui.add_space(4.0);
+        ui.add_space(if compact { 2.0 } else { 4.0 });
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            ui.spacing_mut().item_spacing = row_spacing;
             ui.label(RichText::new("Категории").color(tokens.text_muted));
             for (slug, label) in categories_for(cat.tab) {
                 let on = cat.filters.categories.iter().any(|c| c == slug);
@@ -767,8 +784,19 @@ impl CatalogView {
                     }
                 }
 
-                let right_w = 248.0;
-                let mid_w = (ui.available_width() - right_w - 12.0).max(120.0);
+                let avail = ui.available_width();
+                let stack_actions =
+                    !installed && hit.project_kind != ProjectKind::Modpack && avail < 560.0;
+                let right_w = if hit.project_kind == ProjectKind::Modpack {
+                    216.0
+                } else if installed {
+                    224.0
+                } else if stack_actions {
+                    196.0
+                } else {
+                    336.0
+                };
+                let mid_w = (avail - right_w - 12.0).max(100.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(mid_w, ICON_SIZE),
                     egui::Layout::top_down(egui::Align::Min),
@@ -805,10 +833,24 @@ impl CatalogView {
                     },
                 );
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                    self.card_actions(ui, state, hit, installed, queued, tokens);
-                });
+                if stack_actions {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                        self.install_or_hint_button(ui, state, hit, tokens);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                            self.queue_toggle_button(ui, state, hit, queued, tokens);
+                            if secondary_glass_button(ui, None, "Подробнее").clicked() {
+                                state.open_project(hit.clone());
+                            }
+                        });
+                    });
+                } else {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                        self.card_actions(ui, state, hit, installed, queued, tokens);
+                    });
+                }
             });
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -825,6 +867,60 @@ impl CatalogView {
                 }
             });
         });
+    }
+
+    fn install_or_hint_button(
+        &self,
+        ui: &mut Ui,
+        state: &mut UiState,
+        hit: &CatalogHit,
+        tokens: &Tokens,
+    ) {
+        if state.selected_instance().is_some() {
+            if primary_emerald_button(ui, Some(VectorIcon::Plus), "Установить").clicked()
+            {
+                state.open_install_content(hit.clone());
+            }
+        } else {
+            ui.label(
+                RichText::new("Выберите инстанс")
+                    .color(tokens.text_muted)
+                    .small(),
+            );
+        }
+    }
+
+    fn queue_toggle_button(
+        &self,
+        ui: &mut Ui,
+        state: &mut UiState,
+        hit: &CatalogHit,
+        queued: bool,
+        tokens: &Tokens,
+    ) {
+        let queue_label = if queued {
+            "В очереди"
+        } else {
+            "+ В очередь"
+        };
+        let queue_btn = egui::Button::new(
+            RichText::new(queue_label)
+                .color(if queued { tokens.accent } else { tokens.text })
+                .small(),
+        )
+        .fill(if queued {
+            blend_color(tokens.bg_surface_hover, tokens.accent, 0.16)
+        } else {
+            tokens.bg_surface
+        })
+        .stroke(Stroke::new(
+            1.0_f32,
+            if queued { tokens.accent } else { tokens.border },
+        ))
+        .corner_radius(RADIUS_BUTTON);
+        if ui.add(queue_btn).clicked() {
+            state.catalog.toggle_queue(hit.clone());
+        }
     }
 
     fn card_actions(
@@ -844,41 +940,8 @@ impl CatalogView {
         } else if installed {
             version_badge(ui, "Уже добавлен", tokens.accent);
         } else {
-            if state.selected_instance().is_some() {
-                if primary_emerald_button(ui, Some(VectorIcon::Plus), "Установить").clicked()
-                {
-                    state.open_install_content(hit.clone());
-                }
-            } else {
-                ui.label(
-                    RichText::new("Выберите инстанс")
-                        .color(tokens.text_muted)
-                        .small(),
-                );
-            }
-            let queue_label = if queued {
-                "В очереди"
-            } else {
-                "+ В очередь"
-            };
-            let queue_btn = egui::Button::new(
-                RichText::new(queue_label)
-                    .color(if queued { tokens.accent } else { tokens.text })
-                    .small(),
-            )
-            .fill(if queued {
-                blend_color(tokens.bg_surface_hover, tokens.accent, 0.16)
-            } else {
-                tokens.bg_surface
-            })
-            .stroke(Stroke::new(
-                1.0_f32,
-                if queued { tokens.accent } else { tokens.border },
-            ))
-            .corner_radius(RADIUS_BUTTON);
-            if ui.add(queue_btn).clicked() {
-                state.catalog.toggle_queue(hit.clone());
-            }
+            self.install_or_hint_button(ui, state, hit, tokens);
+            self.queue_toggle_button(ui, state, hit, queued, tokens);
         }
         if secondary_glass_button(ui, None, "Подробнее").clicked() {
             state.open_project(hit.clone());
@@ -913,13 +976,149 @@ pub fn skeleton_card(ui: &mut Ui) {
         });
 }
 
+fn norm_alnum(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn strip_content_extensions(file_name: &str) -> String {
+    let mut s = file_name.trim().to_ascii_lowercase();
+    for ext in [".disabled", ".jar", ".zip"] {
+        if let Some(stripped) = s.strip_suffix(ext) {
+            s = stripped.to_owned();
+        }
+    }
+    s
+}
+
+fn tokenize_ident(s: &str) -> Vec<&str> {
+    s.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+fn is_loader_tag(tok: &str) -> bool {
+    matches!(
+        tok,
+        "fabric"
+            | "quilt"
+            | "forge"
+            | "neoforge"
+            | "universal"
+            | "common"
+            | "client"
+            | "server"
+            | "mod"
+            | "all"
+    )
+}
+
+fn is_version_or_build_token(tok: &str) -> bool {
+    let bytes = tok.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    if bytes[0].is_ascii_digit() {
+        return true;
+    }
+    if (bytes[0] == b'v' || bytes[0] == b'r') && bytes.get(1).is_some_and(u8::is_ascii_digit) {
+        return true;
+    }
+    if tok.starts_with("mc") && bytes.get(2).is_some_and(u8::is_ascii_digit) {
+        return true;
+    }
+    tok == "mc"
+}
+
+fn rest_starts_version_or_loader(rest: &[&str]) -> bool {
+    if rest.is_empty() {
+        return true;
+    }
+    let first = rest[0];
+    if is_version_or_build_token(first) {
+        return true;
+    }
+    if is_loader_tag(first) {
+        return rest.len() == 1 || rest_starts_version_or_loader(&rest[1..]);
+    }
+    false
+}
+
+/// Checks whether a mod/pack/shader file name matches a catalog project's `slug` or `title`
+/// without false-positive substring collisions (e.g. `"fabric"` or `"map"` inside `"journeymap-..."`).
+pub(crate) fn filename_matches_project(file_name: &str, slug: &str, title: &str) -> bool {
+    let stem = strip_content_extensions(file_name);
+    if stem.is_empty() {
+        return false;
+    }
+    let stem_tokens = tokenize_ident(&stem);
+    let norm_stem = norm_alnum(&stem);
+
+    for raw in [slug, title] {
+        let cand = raw.trim().to_ascii_lowercase();
+        if cand.is_empty() {
+            continue;
+        }
+        if stem == cand {
+            return true;
+        }
+        let cand_tokens = tokenize_ident(&cand);
+        if !cand_tokens.is_empty()
+            && stem_tokens.len() >= cand_tokens.len()
+            && stem_tokens[..cand_tokens.len()] == cand_tokens[..]
+            && rest_starts_version_or_loader(&stem_tokens[cand_tokens.len()..])
+        {
+            return true;
+        }
+        let norm_cand = norm_alnum(&cand);
+        if norm_cand.len() >= 3 && norm_stem == norm_cand {
+            return true;
+        }
+        if norm_cand.len() >= 5 {
+            if let Some(suffix) = norm_stem.strip_prefix(&norm_cand) {
+                if is_version_or_build_token(suffix) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn mod_entry_matches_project(m: &mq_mods::InstalledModEntry, slug: &str, title: &str) -> bool {
+    let norm_slug = norm_alnum(slug);
+    let norm_title = norm_alnum(title);
+    let mod_id = m.mod_id.trim();
+    let mod_name = m.name.trim();
+
+    if !slug.is_empty() && mod_id.eq_ignore_ascii_case(slug) {
+        return true;
+    }
+    let norm_id = norm_alnum(mod_id);
+    if !norm_id.is_empty()
+        && ((!norm_slug.is_empty() && norm_id == norm_slug)
+            || (!norm_title.is_empty() && norm_id == norm_title))
+    {
+        return true;
+    }
+    if (!title.is_empty() && mod_name.eq_ignore_ascii_case(title))
+        || (!slug.is_empty() && mod_name.eq_ignore_ascii_case(slug))
+    {
+        return true;
+    }
+    filename_matches_project(&m.file_name, slug, title)
+}
+
 fn dir_has_matching_pack(dir: &std::path::Path, slug: &str, title: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
     entries.flatten().any(|entry| {
-        let name = entry.file_name().to_string_lossy().to_lowercase();
-        (!slug.is_empty() && name.contains(slug)) || (!title.is_empty() && name.contains(title))
+        let name = entry.file_name();
+        let name_lossy = name.to_string_lossy();
+        filename_matches_project(&name_lossy, slug, title)
     })
 }
 
@@ -931,13 +1130,10 @@ fn is_hit_installed_in_instance(state: &UiState, hit: &CatalogHit) -> bool {
     }
 
     match hit.project_kind {
-        ProjectKind::Mod => state.installed_mods.iter().any(|m| {
-            let file = m.file_name.to_lowercase();
-            let name = m.name.to_lowercase();
-            let id = m.mod_id.to_lowercase();
-            (!slug.is_empty() && (file.contains(&slug) || name.contains(&slug) || id == slug))
-                || (!title.is_empty() && (file.contains(&title) || name.contains(&title)))
-        }),
+        ProjectKind::Mod => state
+            .installed_mods
+            .iter()
+            .any(|m| mod_entry_matches_project(m, &slug, &title)),
         ProjectKind::ResourcePack => state.selected_instance_id.as_ref().is_some_and(|id| {
             let dir = state.paths.instance_dir(id.as_str()).join("resourcepacks");
             dir_has_matching_pack(&dir, &slug, &title)
@@ -1077,5 +1273,63 @@ mod tests {
             &state,
             &make_hit(ProjectKind::Modpack, "sodium", "Sodium")
         ));
+
+        state.installed_mods.push(mq_mods::InstalledModEntry {
+            file_name: "journeymap-fabric-26.3-6.0.10.jar".into(),
+            path: std::path::PathBuf::from("mods/journeymap-fabric-26.3-6.0.10.jar"),
+            enabled: true,
+            mod_id: "journeymap".into(),
+            name: "JourneyMap".into(),
+            version: "6.0.10".into(),
+            authors: vec![],
+            description: None,
+            loader: Some(ModLoaderKind::Fabric),
+            dependencies: vec![],
+            sha1: mq_core::Sha1Digest::from_bytes([0u8; 20]),
+            sha512: mq_core::Sha512Digest::from_bytes([0u8; 64]),
+            size: 100,
+        });
+        state.installed_mods.push(mq_mods::InstalledModEntry {
+            file_name: "fabric-api-0.166.2-26.3.jar".into(),
+            path: std::path::PathBuf::from("mods/fabric-api-0.166.2-26.3.jar"),
+            enabled: true,
+            mod_id: "fabric-api".into(),
+            name: "Fabric API".into(),
+            version: "0.166.2".into(),
+            authors: vec![],
+            description: None,
+            loader: Some(ModLoaderKind::Fabric),
+            dependencies: vec![],
+            sha1: mq_core::Sha1Digest::from_bytes([0u8; 20]),
+            sha512: mq_core::Sha512Digest::from_bytes([0u8; 64]),
+            size: 100,
+        });
+
+        assert!(is_hit_installed_in_instance(
+            &state,
+            &make_hit(ProjectKind::Mod, "journeymap", "JourneyMap")
+        ));
+        assert!(is_hit_installed_in_instance(
+            &state,
+            &make_hit(ProjectKind::Mod, "fabric-api", "Fabric API")
+        ));
+        for unrelated in [
+            ("fabric", "Fabric"),
+            ("api", "API"),
+            ("map", "Map"),
+            ("journey", "Journey"),
+            ("fabric-language-kotlin", "Fabric Language Kotlin"),
+            ("sodium-extra", "Sodium Extra"),
+        ] {
+            assert!(
+                !is_hit_installed_in_instance(
+                    &state,
+                    &make_hit(ProjectKind::Mod, unrelated.0, unrelated.1)
+                ),
+                "unexpected false positive for {} / {}",
+                unrelated.0,
+                unrelated.1
+            );
+        }
     }
 }
