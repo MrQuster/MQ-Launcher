@@ -1,5 +1,5 @@
 name: launch_smoke
-description: UI game launch smoke scenario verifying Play button states, instance console logs, and Stop button.
+description: UI instance creation and console tab smoke scenario for game-launch QA (see scripts/qa/game_launch_helper.py for live Minecraft launch, OCR, parallel, and signal-crash verification).
 deterministic: true
 viewport:
   width: 1280
@@ -10,25 +10,28 @@ steps:
       timeout_ms: 5000
       frames: 3
   - screenshot: {}
-  - dump_ui: {}
   - click:
-      label: "Играть"
-  - wait_for:
-      text: "ОСТАНОВИТЬ"
-      timeout_ms: 15000
-  - screenshot: {}
-  - click:
-      label: "Консоль"
+      label: "Создать инстанс"
   - wait_idle:
       timeout_ms: 5000
-      frames: 3
-  - screenshot: {}
-  - dump_ui: {}
+      frames: 2
   - click:
-      label: "ОСТАНОВИТЬ"
+      label: "Создать"
   - wait_for:
-      text: "Играть"
+      label: "Моды"
       timeout_ms: 10000
   - screenshot: {}
+  - click:
+      label: "Моды"
+  - wait_for:
+      label: "Консоль"
+      timeout_ms: 5000
+  - click:
+      label: "Консоль"
+  - wait_for:
+      label: "Копировать лог"
+      timeout_ms: 5000
+  - screenshot: {}
+  - dump_ui: {}
   - state: {}
   - quit: {}
