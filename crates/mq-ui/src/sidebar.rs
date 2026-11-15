@@ -682,7 +682,7 @@ fn render_header(ui: &mut Ui, is_compact: bool, tokens: &Tokens) {
 
         let toggle_rect = Rect::from_center_size(
             Pos2::new(header_rect.center().x, header_rect.bottom() - 12.0),
-            Vec2::splat(22.0),
+            Vec2::splat(24.0),
         );
         let toggle_resp = ui.interact(
             toggle_rect,
@@ -1053,51 +1053,92 @@ pub fn render_sidebar_with_state(
         }
     }
 
-    // 3. Bottom-pinned «Система» group + Account block
-    ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-        if let Some(card_action) = render_bottom_account_profile(
-            ui,
-            accounts,
-            active_account_id,
-            is_compact,
-            state.update_available,
-            tokens,
-        ) {
-            action = Some(card_action);
-        }
-        ui.add_space(6.0);
-        paint_horizontal_divider(ui, tokens.border);
-        ui.add_space(6.0);
-
-        for &tab in NavGroup::System.tabs().iter().rev() {
-            if render_nav_row(
+    // 3. Bottom-pinned «Система» group + Account block (fall back to top-down when height is tight)
+    let needed_bottom_h = if is_compact { 155.0 } else { 195.0 };
+    if ui.available_height() >= needed_bottom_h {
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            if let Some(card_action) = render_bottom_account_profile(
                 ui,
-                tab,
-                tab == active_tab,
+                accounts,
+                active_account_id,
                 is_compact,
-                None,
-                lang_code,
+                state.update_available,
                 tokens,
             ) {
-                action = Some(SidebarAction::SelectTab(tab));
+                action = Some(card_action);
             }
-        }
-        if !is_compact {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(NAV_ROW_PADDING_X);
-                ui.label(
-                    RichText::new(NavGroup::System.label())
-                        .size(11.0)
-                        .color(tokens.text_muted),
-                );
-            });
-            ui.add_space(8.0);
-        } else {
             ui.add_space(6.0);
-        }
-        paint_horizontal_divider(ui, tokens.border);
-    });
+            paint_horizontal_divider(ui, tokens.border);
+            ui.add_space(6.0);
+
+            for &tab in NavGroup::System.tabs().iter().rev() {
+                if render_nav_row(
+                    ui,
+                    tab,
+                    tab == active_tab,
+                    is_compact,
+                    None,
+                    lang_code,
+                    tokens,
+                ) {
+                    action = Some(SidebarAction::SelectTab(tab));
+                }
+            }
+            if !is_compact {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(NAV_ROW_PADDING_X);
+                    ui.label(
+                        RichText::new(NavGroup::System.label())
+                            .size(11.0)
+                            .color(tokens.text_muted),
+                    );
+                });
+                ui.add_space(8.0);
+            } else {
+                ui.add_space(6.0);
+            }
+            paint_horizontal_divider(ui, tokens.border);
+        });
+    } else {
+        egui::ScrollArea::vertical()
+            .id_salt("mq_sidebar_overflow_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+                paint_horizontal_divider(ui, tokens.border);
+                render_group_heading(ui, NavGroup::System.label(), is_compact, tokens);
+                if is_compact {
+                    ui.add_space(6.0);
+                }
+                for &tab in NavGroup::System.tabs() {
+                    if render_nav_row(
+                        ui,
+                        tab,
+                        tab == active_tab,
+                        is_compact,
+                        None,
+                        lang_code,
+                        tokens,
+                    ) {
+                        action = Some(SidebarAction::SelectTab(tab));
+                    }
+                }
+                ui.add_space(6.0);
+                paint_horizontal_divider(ui, tokens.border);
+                ui.add_space(6.0);
+                if let Some(card_action) = render_bottom_account_profile(
+                    ui,
+                    accounts,
+                    active_account_id,
+                    is_compact,
+                    state.update_available,
+                    tokens,
+                ) {
+                    action = Some(card_action);
+                }
+            });
+    }
 
     action
 }
