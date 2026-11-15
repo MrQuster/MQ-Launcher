@@ -441,7 +441,9 @@ impl InstancesView {
 
         // Duplicate modal
         if self.show_duplicate_dialog {
-            if let Some(selected_inst) = state.selected_instance().cloned() {
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.show_duplicate_dialog = false;
+            } else if let Some(selected_inst) = state.selected_instance().cloned() {
                 egui::Window::new("Дублирование инстанса")
                     .collapsible(false)
                     .resizable(false)
@@ -452,7 +454,7 @@ impl InstancesView {
                         ui.label("Имя нового инстанса:");
                         ui.text_edit_singleline(&mut self.duplicate_name);
                         ui.add_space(10.0);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if primary_emerald_button(ui, Some(VectorIcon::Check), "Дублировать")
                                 .clicked()
                                 && !self.duplicate_name.trim().is_empty()
@@ -514,6 +516,12 @@ impl InstancesView {
         }
 
         // Import modal
+        if self.show_import_dialog
+            && ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.show_import_dialog = false;
+            self.import_error = None;
+        }
         if self.show_import_dialog {
             let hovered_file = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
             let dropped_file = ui.ctx().input(|i| {
@@ -689,9 +697,11 @@ impl InstancesView {
 
         // Delete confirmation modal
         if self.show_delete_dialog {
-            if let Some((target_id, target_name)) = self.instance_to_delete.clone() {
-                let is_running =
-                    state.game_running && state.running_instance.as_ref() == Some(&target_id);
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.show_delete_dialog = false;
+                self.instance_to_delete = None;
+            } else if let Some((target_id, target_name)) = self.instance_to_delete.clone() {
+                let is_running = state.running_instances.contains_key(&target_id);
                 let is_downloading = state.installing_instance.as_ref() == Some(&target_id);
 
                 egui::Window::new("Удаление инстанса")
@@ -699,54 +709,63 @@ impl InstancesView {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ui.ctx(), |ui| {
-                        let modal_w = 420.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
+                        let screen_rect = ui.ctx().screen_rect();
+                        let modal_w = 420.0_f32.min(screen_rect.width() - 32.0);
                         ui.set_width(modal_w);
 
-                        ui.horizontal(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-                            paint_vector_icon(
-                                ui.painter(),
-                                rect,
-                                VectorIcon::Warning,
-                                STATUS_DANGER,
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(format!("Удалить «{}»?", target_name))
-                                    .color(TEXT_PRIMARY)
-                                    .strong()
-                                    .size(15.0),
-                            );
-                        });
+                        let body_max_h = (screen_rect.height() - 110.0).max(60.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("delete_dialog_scroll")
+                            .max_height(body_max_h)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        Vec2::splat(22.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    paint_vector_icon(
+                                        ui.painter(),
+                                        rect,
+                                        VectorIcon::Warning,
+                                        STATUS_DANGER,
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(format!("Удалить «{}»?", target_name))
+                                            .color(TEXT_PRIMARY)
+                                            .strong()
+                                            .size(15.0),
+                                    );
+                                });
 
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(
-                                "Вы уверены, что хотите удалить этот инстанс? Это действие безвозвратно удалит директорию инстанса, включая все установленные моды, миры, скриншоты и настройки.",
-                            )
-                            .color(TEXT_MUTED)
-                            .size(12.5),
-                        );
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Вы уверены, что хотите удалить этот инстанс? Это действие безвозвратно удалит директорию инстанса, включая все установленные моды, миры, скриншоты и настройки.",
+                                    )
+                                    .color(TEXT_MUTED)
+                                    .size(12.5),
+                                );
 
-                        if is_running {
-                            ui.add_space(6.0);
-                            ui.label(
-                                RichText::new("Инстанс сейчас запущен! Закройте игру перед удалением.")
-                                    .color(STATUS_DANGER)
-                                    .strong(),
-                            );
-                        } else if is_downloading {
-                            ui.add_space(6.0);
-                            ui.label(
-                                RichText::new("Инстанс сейчас загружается/устанавливается. Дождитесь окончания или отмените загрузку.")
-                                    .color(STATUS_DANGER)
-                                    .strong(),
-                            );
-                        }
+                                if is_running {
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        RichText::new("Инстанс сейчас запущен! Закройте игру перед удалением.")
+                                            .color(STATUS_DANGER)
+                                            .strong(),
+                                    );
+                                } else if is_downloading {
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        RichText::new("Инстанс сейчас загружается/устанавливается. Дождитесь окончания или отмените загрузку.")
+                                            .color(STATUS_DANGER)
+                                            .strong(),
+                                    );
+                                }
+                            });
 
-                        ui.add_space(14.0);
-                        ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| {
                             let can_delete = !is_running && !is_downloading;
                             ui.add_enabled_ui(can_delete, |ui| {
                                 if danger_button(ui, Some(VectorIcon::Trash), "Удалить").clicked() {
@@ -825,8 +844,15 @@ impl InstancesView {
             }
         }
 
+        let any_modal_open = state.show_create_instance_dialog
+            || self.show_import_dialog
+            || self.show_delete_dialog
+            || self.show_duplicate_dialog;
+
         if state.instances.is_empty() {
-            self.render_empty_onboarding_hub(ui, state, &tokens);
+            ui.add_enabled_ui(!any_modal_open, |ui| {
+                self.render_empty_onboarding_hub(ui, state, &tokens);
+            });
             return;
         }
 
@@ -872,8 +898,7 @@ impl InstancesView {
                             let is_installed = state.is_instance_installed(&inst.id);
                             let is_downloading =
                                 state.installing_instance.as_ref() == Some(&inst.id);
-                            let is_running = state.game_running
-                                && state.running_instance.as_ref() == Some(&inst.id);
+                            let is_running = state.running_instances.contains_key(&inst.id);
 
                             let stroke_color = if is_downloading {
                                 ACCENT_COBALT
@@ -1044,8 +1069,7 @@ impl InstancesView {
                 if let Some((inst_id, inst_name, mc_ver, loader, memory_max_mb)) = selected_info {
                     let is_installed = state.is_instance_installed(&inst_id);
                     let is_downloading = state.installing_instance.as_ref() == Some(&inst_id);
-                    let is_running =
-                        state.game_running && state.running_instance.as_ref() == Some(&inst_id);
+                    let is_running = state.running_instances.contains_key(&inst_id);
 
                     // 1. Error Card (if any installation/verification error occurred)
                     let error_opt = if let Some(detailed) = state.detailed_install_error.clone() {
@@ -1203,9 +1227,11 @@ impl InstancesView {
                                             )
                                             .clicked()
                                             {
-                                                let _ = state
-                                                    .cmd_sender
-                                                    .send(UiWorkerCommand::CancelDownload);
+                                                let _ = state.cmd_sender.send(
+                                                    UiWorkerCommand::StopGame {
+                                                        instance_id: inst_id.clone(),
+                                                    },
+                                                );
                                             }
                                         } else if is_downloading {
                                             if secondary_glass_button(
@@ -1262,7 +1288,7 @@ impl InstancesView {
                             .fill(CARD_SURFACE)
                             .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
                             .corner_radius(RADIUS_CARD)
-                            .inner_margin(egui::Margin::same(14));
+                            .inner_margin(egui::Margin::same(8));
 
                         header_frame.show(ui, |ui| {
                             let render_hero_button = |ui: &mut egui::Ui, state: &mut UiState| {
@@ -1275,7 +1301,9 @@ impl InstancesView {
                                     )
                                     .clicked()
                                     {
-                                        let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
+                                        let _ = state.cmd_sender.send(UiWorkerCommand::StopGame {
+                                            instance_id: inst_id.clone(),
+                                        });
                                     }
                                 } else if is_downloading {
                                     if hero_action_button(
@@ -1286,7 +1314,9 @@ impl InstancesView {
                                     )
                                     .clicked()
                                     {
-                                        let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
+                                        let _ = state
+                                            .cmd_sender
+                                            .send(UiWorkerCommand::CancelDownload);
                                     }
                                 } else if is_installed {
                                     let btn_text = if state.is_launching {
@@ -1565,7 +1595,7 @@ impl InstancesView {
                             });
                         });
 
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
                     }
 
                     // Tab selector with underline tabs (B5)
@@ -1580,11 +1610,7 @@ impl InstancesView {
                         (InstanceDetailTab::Settings, "Параметры"),
                     ];
                     let prev_tab = self.current_tab;
-                    ScrollArea::horizontal()
-                        .id_salt("instance_detail_tabs_scroll")
-                        .show(ui, |ui| {
-                            render_underline_tabs(ui, &tokens, &detail_tabs, &mut self.current_tab);
-                        });
+                    render_underline_tabs(ui, &tokens, &detail_tabs, &mut self.current_tab);
                     if self.current_tab != prev_tab {
                         self.content_sub_mode = ContentSubMode::Installed;
                         self.local_file_input.clear();
@@ -1719,7 +1745,7 @@ impl InstancesView {
         let is_selected = state.selected_instance_id.as_ref() == Some(&inst.id);
         let is_installed = state.is_instance_installed(&inst.id);
         let is_downloading = state.installing_instance.as_ref() == Some(&inst.id);
-        let is_running = state.game_running && state.running_instance.as_ref() == Some(&inst.id);
+        let is_running = state.running_instances.contains_key(&inst.id);
 
         let border_stroke = if is_running || is_selected {
             Stroke::new(1.5_f32, tokens.accent)
@@ -1842,11 +1868,16 @@ impl InstancesView {
                 ui.add_space(6.0);
 
                 // Bottom row: Actions
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                    if is_running || is_downloading {
-                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
-                        {
+                    if is_running {
+                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked() {
+                            let _ = state.cmd_sender.send(UiWorkerCommand::StopGame {
+                                instance_id: inst.id.clone(),
+                            });
+                        }
+                    } else if is_downloading {
+                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked() {
                             let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
                         }
                     } else if is_installed {
@@ -1983,6 +2014,11 @@ impl InstancesView {
                     .corner_radius(RADIUS_TAG),
             )
             .clicked()
+        }
+
+        if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.show_create_instance_dialog = false;
+            return;
         }
 
         egui::Window::new("Создать инстанс")
@@ -2893,6 +2929,13 @@ impl InstancesView {
                     instance_id: inst_id.clone(),
                 });
             }
+            if secondary_glass_button(ui, Some(VectorIcon::Check), "Проверить зависимости")
+                .clicked()
+            {
+                let _ = state.cmd_sender.send(UiWorkerCommand::RunPreflight {
+                    instance_id: inst_id.clone(),
+                });
+            }
             if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить неиспользуемые")
                 .clicked()
             {
@@ -2901,6 +2944,129 @@ impl InstancesView {
                 });
             }
         });
+
+        if let Some((ref prompt_inst, ref deleted_file, ref orphans)) = state.orphaned_deps_prompt
+        {
+            if prompt_inst == inst_id && !orphans.is_empty() {
+                ui.add_space(6.0);
+                let deleted_file = deleted_file.clone();
+                let orphans_clone = orphans.clone();
+                let mut clear_prompt = false;
+                egui::Frame::new()
+                    .fill(tokens.bg_surface)
+                    .stroke(Stroke::new(1.0_f32, tokens.warning))
+                    .corner_radius(RADIUS_CARD)
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "После удаления «{deleted_file}» остались неиспользуемые зависимости ({}):",
+                                orphans_clone.len()
+                            ))
+                            .color(tokens.text)
+                            .strong(),
+                        );
+                        for o in &orphans_clone {
+                            ui.label(RichText::new(format!("• {o}")).color(tokens.text_muted).small());
+                        }
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if primary_emerald_button(
+                                ui,
+                                Some(VectorIcon::Trash),
+                                "Удалить зависимости",
+                            )
+                            .clicked()
+                            {
+                                let _ = state.cmd_sender.send(UiWorkerCommand::CleanupOrphanFiles {
+                                    instance_id: inst_id.clone(),
+                                    orphan_files: orphans_clone.clone(),
+                                });
+                                clear_prompt = true;
+                            }
+                            if secondary_glass_button(ui, None, "Оставить").clicked() {
+                                clear_prompt = true;
+                            }
+                        });
+                    });
+                if clear_prompt {
+                    state.orphaned_deps_prompt = None;
+                }
+            }
+        }
+
+        if let Some((ref report_inst, ref report)) = state.preflight_report {
+            if report_inst == inst_id && !report.issues.is_empty() {
+                ui.add_space(6.0);
+                let report_clone = report.clone();
+                let mut clear_report = false;
+                egui::Frame::new()
+                    .fill(tokens.bg_surface)
+                    .stroke(Stroke::new(1.0_f32, tokens.danger))
+                    .corner_radius(RADIUS_CARD)
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Проверка зависимостей: найдено проблем ({})",
+                                report_clone.issues.len()
+                            ))
+                            .color(tokens.text)
+                            .strong(),
+                        );
+                        for issue in &report_clone.issues {
+                            let msg = match issue {
+                                mq_mods::PreflightIssue::MissingDependency {
+                                    mod_id,
+                                    required_dep,
+                                    ..
+                                } => format!("• Нет зависимости «{required_dep}» для «{mod_id}»"),
+                                mq_mods::PreflightIssue::DuplicateModId { mod_id, files } => {
+                                    format!("• Дубликат «{mod_id}»: {}", files.join(", "))
+                                }
+                                mq_mods::PreflightIssue::WrongLoader {
+                                    mod_id,
+                                    mod_loader,
+                                    instance_loader,
+                                    ..
+                                } => format!(
+                                    "• Чужой загрузчик у «{mod_id}»: {mod_loader:?} вместо {instance_loader:?}"
+                                ),
+                                mq_mods::PreflightIssue::WrongMcVersion {
+                                    mod_id,
+                                    required_mc,
+                                    instance_mc,
+                                    ..
+                                } => format!(
+                                    "• Неверная версия MC у «{mod_id}»: требуется {required_mc} (инстанс {instance_mc})"
+                                ),
+                            };
+                            ui.label(RichText::new(msg).color(tokens.text_muted).small());
+                        }
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if primary_emerald_button(
+                                ui,
+                                Some(VectorIcon::Check),
+                                "Исправить автоматически",
+                            )
+                            .clicked()
+                            {
+                                let _ = state.cmd_sender.send(UiWorkerCommand::AutoFixPreflight {
+                                    instance_id: inst_id.clone(),
+                                    report: report_clone.clone(),
+                                });
+                            }
+                            if secondary_glass_button(ui, None, "Скрыть").clicked() {
+                                clear_report = true;
+                            }
+                        });
+                    });
+                if clear_report {
+                    state.preflight_report = None;
+                }
+            }
+        }
 
         ui.add_space(6.0);
         self.render_local_file_import_bar(
@@ -3179,7 +3345,7 @@ impl InstancesView {
         &mut self,
         ui: &mut Ui,
         state: &mut UiState,
-        _inst_id: &mq_core::InstanceId,
+        inst_id: &mq_core::InstanceId,
     ) {
         // 1. Crash Analysis Banner (if any failure detected)
         if let Some(ref analysis) = state.crash_analysis {
@@ -3284,10 +3450,10 @@ impl InstancesView {
 
         // Row 2: Search input and level filter chips (B6, B7)
         let tokens = Tokens::from_config(&state.config.theme);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
             SearchField::new(&mut self.console_search, "Поиск в логе...")
-                .width(200.0)
+                .width(150.0)
                 .show(ui, &tokens);
 
             let info_count = state
@@ -3373,6 +3539,9 @@ impl InstancesView {
                     } else {
                         let query = self.console_search.to_lowercase();
                         for entry in &state.game_logs {
+                            if entry.instance != inst_id.as_str() {
+                                continue;
+                            }
                             if let Some(flt) = state.log_filter {
                                 if entry.level != flt {
                                     continue;
@@ -3598,6 +3767,58 @@ impl InstancesView {
             "Путь к .zip ресурспаку или перетащите .zip в окно...",
             false,
         );
+
+        let inst_dir = state.paths.instance_dir(inst_id.as_str());
+        let installed = mq_mods::shaders::ShaderManager::list_resourcepacks(&inst_dir);
+        if !installed.is_empty() {
+            let tokens = Tokens::from_config(&state.config.theme);
+            let options_path = inst_dir.join("options.txt");
+            let mut order =
+                mq_launch::options::MinecraftOptionsManager::read_resource_packs(&options_path)
+                    .unwrap_or_default();
+            for pack in &installed {
+                let entry = format!("file/{pack}");
+                if !order.contains(&entry) {
+                    order.push(entry);
+                }
+            }
+            ui.add_space(10.0);
+            egui::Frame::new()
+                .fill(tokens.bg_surface)
+                .stroke(Stroke::new(1.0_f32, tokens.border))
+                .corner_radius(RADIUS_CARD)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Порядок ресурспаков (options.txt)")
+                            .color(tokens.text)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    let mut changed = false;
+                    let len = order.len();
+                    for idx in 0..len {
+                        let name = order[idx].clone();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(format!("{}. {name}", idx + 1)).color(tokens.text));
+                            if idx > 0 && secondary_glass_button(ui, None, "Вверх").clicked() {
+                                order.swap(idx, idx - 1);
+                                changed = true;
+                            }
+                            if idx + 1 < len && secondary_glass_button(ui, None, "Вниз").clicked() {
+                                order.swap(idx, idx + 1);
+                                changed = true;
+                            }
+                        });
+                    }
+                    if changed {
+                        let _ = mq_launch::options::MinecraftOptionsManager::update_resource_packs(
+                            &options_path,
+                            &order,
+                        );
+                    }
+                });
+        }
     }
 
     fn render_shaderpacks_tab(
@@ -3606,6 +3827,70 @@ impl InstancesView {
         state: &mut UiState,
         inst_id: &mq_core::InstanceId,
     ) {
+        let tokens = Tokens::from_config(&state.config.theme);
+        let inst_dir = state.paths.instance_dir(inst_id.as_str());
+        let loader = state
+            .instances
+            .iter()
+            .find(|i| &i.id == inst_id)
+            .map(|i| i.loader)
+            .unwrap_or(ModLoaderKind::Vanilla);
+        let engine = mq_mods::shaders::ShaderEngine::for_loader(loader);
+        let gpu = state
+            .gpu_diagnostics
+            .get_or_insert_with(mq_mods::shaders::GpuDiagnostics::probe)
+            .clone();
+
+        egui::Frame::new()
+            .fill(tokens.bg_surface)
+            .stroke(Stroke::new(1.0_f32, tokens.border))
+            .corner_radius(RADIUS_CARD)
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Движок шейдеров: {}", engine.display_name()))
+                            .color(tokens.text)
+                            .strong(),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "GPU: {} | OpenGL: {}",
+                            gpu.renderer, gpu.opengl_version
+                        ))
+                        .color(if gpu.is_supported {
+                            tokens.text_muted
+                        } else {
+                            tokens.danger
+                        })
+                        .small(),
+                    );
+                });
+                let packs = mq_mods::shaders::ShaderManager::list_shaderpacks(&inst_dir);
+                if !packs.is_empty() {
+                    let active = mq_mods::shaders::ShaderManager::read_active_shaderpack(&inst_dir);
+                    ui.add_space(4.0);
+                    for pack in packs {
+                        let mut is_active = active.as_deref() == Some(pack.as_str());
+                        ui.horizontal_wrapped(|ui| {
+                            if crate::components::toggle_switch(ui, &tokens, &mut is_active)
+                                .changed()
+                            {
+                                let next = if is_active { Some(pack.as_str()) } else { None };
+                                let _ = mq_mods::shaders::ShaderManager::set_active_shaderpack(
+                                    &inst_dir, next,
+                                );
+                            }
+                            ui.label(RichText::new(&pack).color(tokens.text));
+                            if is_active {
+                                version_badge(ui, "Используется", tokens.accent);
+                            }
+                        });
+                    }
+                }
+            });
+        ui.add_space(8.0);
+
         self.render_pack_tab(
             ui,
             state,

@@ -92,6 +92,28 @@ pub fn delete_mod(mods_dir: &Path, file_name: &str) -> MqResult<()> {
     Ok(())
 }
 
+/// Deletes a mod from `<instance_dir>/mods`, removes its entry from `.mq-lock.json`,
+/// and returns the filenames of any dependency mods that are no longer required by
+/// any explicitly installed mod.
+pub fn delete_mod_and_find_orphans(instance_dir: &Path, file_name: &str) -> MqResult<Vec<String>> {
+    let mods_dir = instance_dir.join("mods");
+    delete_mod(&mods_dir, file_name)?;
+
+    let mut lock = ModLockFile::load_for_instance(instance_dir);
+    let key_to_remove = lock.find_by_filename(file_name).map(|(k, _)| k.clone());
+    if let Some(ref key) = key_to_remove {
+        lock.remove_entry(key);
+        let _ = lock.save_for_instance(instance_dir);
+    }
+
+    let orphans = lock
+        .find_unused_dependencies()
+        .into_iter()
+        .filter_map(|k| lock.entries.get(&k).map(|e| e.filename.clone()))
+        .collect();
+    Ok(orphans)
+}
+
 /// Downloads and installs resolved mods and dependencies into `mods_dir` via CAS hardlinks,
 /// validating allowed download hosts and SHA-1/SHA-512 hashes.
 pub async fn install_resolved_mods(
@@ -192,10 +214,11 @@ async fn install_resolved_To_dir(
     net.download_batch(download_specs, "install_mods", epoch_guard)
         .await?;
 
-    let root_project_id = downloads
+    let root_project_ids: Vec<String> = downloads
         .iter()
-        .find(|d| !d.is_dependency)
-        .map(|d| d.project_id.clone());
+        .filter(|d| !d.is_dependency)
+        .map(|d| d.project_id.clone())
+        .collect();
 
     let mut lock = ModLockFile::load_or_default(target_dir);
     let mut installed_paths = Vec::with_capacity(downloads.len());
@@ -211,10 +234,15 @@ async fn install_resolved_To_dir(
         }
 
         let (actual_sha1, actual_sha512, _) = stream_hash_file_sha1_sha512(&dest_file)?;
-        let mut required_by = Vec::new();
+        let existing = lock.entries.get(&d.project_id).cloned();
+        let installed_as_dependency = existing
+            .as_ref()
+            .map(|e| e.installed_as_dependency && d.is_dependency)
+            .unwrap_or(d.is_dependency);
+        let mut required_by = existing.map(|e| e.required_by).unwrap_or_default();
         if d.is_dependency {
-            if let Some(ref root_id) = root_project_id {
-                if root_id != &d.project_id {
+            for root_id in &root_project_ids {
+                if root_id != &d.project_id && !required_by.contains(root_id) {
                     required_by.push(root_id.clone());
                 }
             }
@@ -230,7 +258,7 @@ async fn install_resolved_To_dir(
                 filename: d.filename.clone(),
                 sha1: Some(actual_sha1.to_hex()),
                 sha512: actual_sha512.to_hex(),
-                installed_as_dependency: d.is_dependency,
+                installed_as_dependency,
                 required_by,
                 kind,
             },
@@ -541,5 +569,241 @@ mod tests {
         assert_eq!(fs::read(&updated_path).unwrap(), new_bytes);
         assert!(!old_file.exists());
         assert!(!dir.path().join("sodium-0.5.0.jar.bak").exists());
+    }
+
+    #[test]
+    fn delete_mod_updates_lockfile_and_reports_orphans() {
+        let dir = tempdir().unwrap();
+        let mods_dir = dir.path().join("mods");
+        fs::create_dir_all(&mods_dir).unwrap();
+        fs::write(mods_dir.join("iris.jar"), b"iris").unwrap();
+        fs::write(mods_dir.join("sodium.jar"), b"sodium").unwrap();
+
+        let mut lock = ModLockFile::default();
+        lock.record_install(
+            "iris",
+            ModLockEntry::new(LockSource::Modrinth, "iris", "v1", "iris.jar"),
+        );
+        let mut dep_entry = ModLockEntry::new(LockSource::Modrinth, "sodium", "v2", "sodium.jar");
+        dep_entry.installed_as_dependency = true;
+        dep_entry.required_by = vec!["iris".into()];
+        lock.record_install("sodium", dep_entry);
+        lock.save_for_instance(dir.path()).unwrap();
+
+        let orphans = delete_mod_and_find_orphans(dir.path(), "iris.jar").unwrap();
+        assert!(!mods_dir.join("iris.jar").exists());
+        assert_eq!(orphans, vec!["sodium.jar".to_string()]);
+
+        let updated_lock = ModLockFile::load_for_instance(dir.path());
+        assert!(!updated_lock.entries.contains_key("iris"));
+        assert!(updated_lock.entries.contains_key("sodium"));
+    }
+
+    #[tokio::test]
+    async fn install_resolved_content_records_required_by_and_handles_faults() {
+        use mq_net::NetConfig;
+        use mq_sched::{BufferPool, CancelEpoch, MIN_CHUNK_SIZE};
+        use sha2::{Digest as _, Sha512};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let root_bytes = b"root-jar-payload".to_vec();
+        let dep_bytes = b"dep-jar-payload".to_vec();
+        let sha1_of = |b: &[u8]| {
+            let mut h = Sha1::new();
+            h.update(b);
+            Sha1Digest::from_bytes(h.finalize().into())
+        };
+        let sha512_of = |b: &[u8]| {
+            let mut h = Sha512::new();
+            h.update(b);
+            Sha512Digest::from_bytes(h.finalize().into())
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let root_b = root_bytes.clone();
+        let dep_b = dep_bytes.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let root_b = root_b.clone();
+                let dep_b = dep_b.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    match path {
+                        "/ok-root.jar" => {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                root_b.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes()).await;
+                            let _ = stream.write_all(&root_b).await;
+                        }
+                        "/ok-dep.jar" => {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                dep_b.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes()).await;
+                            let _ = stream.write_all(&dep_b).await;
+                        }
+                        "/bad-hash.jar" => {
+                            let bad = b"corrupted-bytes";
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                bad.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes()).await;
+                            let _ = stream.write_all(bad).await;
+                        }
+                        _ => {
+                            let _ = stream
+                                .write_all(
+                                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                )
+                                .await;
+                        }
+                    }
+                });
+            }
+        });
+
+        let tmp = tempdir().unwrap();
+        let paths = MqPaths::with_root(tmp.path().join("data"));
+        let inst_dir = paths.instance_dir("fabric-test");
+        let epoch = Arc::new(CancelEpoch::new());
+        let buffer_pool = Arc::new(BufferPool::with_limits(MIN_CHUNK_SIZE, 4, 4));
+        let net = NetEngine::with_components(
+            NetConfig::default().with_max_retries(0),
+            buffer_pool,
+            epoch.clone(),
+            None,
+        )
+        .unwrap();
+
+        // 1. Batch install of root + dependency records `required_by`
+        let downloads = vec![
+            ResolvedModDownload {
+                project_id: "root-mod".into(),
+                version_id: "v1".into(),
+                filename: "root-mod.jar".into(),
+                url: format!("http://{addr}/ok-root.jar"),
+                size: root_bytes.len() as u64,
+                sha1: Some(sha1_of(&root_bytes)),
+                sha512: Some(sha512_of(&root_bytes)),
+                is_dependency: false,
+            },
+            ResolvedModDownload {
+                project_id: "dep-lib".into(),
+                version_id: "v2".into(),
+                filename: "dep-lib.jar".into(),
+                url: format!("http://{addr}/ok-dep.jar"),
+                size: dep_bytes.len() as u64,
+                sha1: Some(sha1_of(&dep_bytes)),
+                sha512: Some(sha512_of(&dep_bytes)),
+                is_dependency: true,
+            },
+        ];
+        let guard = epoch.snapshot();
+        install_resolved_content(
+            &downloads,
+            &inst_dir,
+            ProjectKind::Mod,
+            LockSource::Modrinth,
+            &paths,
+            &net,
+            &guard,
+        )
+        .await
+        .expect("batch install succeeds");
+
+        let lock = ModLockFile::load_for_instance(&inst_dir);
+        let dep_entry = lock.entries.get("dep-lib").expect("dep-lib in lockfile");
+        assert!(dep_entry.installed_as_dependency);
+        assert_eq!(dep_entry.required_by, vec!["root-mod".to_string()]);
+
+        // 2. Network error (500)
+        let err_dl = vec![ResolvedModDownload {
+            project_id: "err-mod".into(),
+            version_id: "v1".into(),
+            filename: "err-mod.jar".into(),
+            url: format!("http://{addr}/err-500.jar"),
+            size: 10,
+            sha1: None,
+            sha512: None,
+            is_dependency: false,
+        }];
+        assert!(install_resolved_content(
+            &err_dl,
+            &inst_dir,
+            ProjectKind::Mod,
+            LockSource::Modrinth,
+            &paths,
+            &net,
+            &guard,
+        )
+        .await
+        .is_err());
+        assert!(!inst_dir.join("mods").join("err-mod.jar").exists());
+
+        // 3. Corrupt hash
+        let bad_hash_dl = vec![ResolvedModDownload {
+            project_id: "bad-hash".into(),
+            version_id: "v1".into(),
+            filename: "bad-hash.jar".into(),
+            url: format!("http://{addr}/bad-hash.jar"),
+            size: 15,
+            sha1: Some(sha1_of(&root_bytes)),
+            sha512: None,
+            is_dependency: false,
+        }];
+        assert!(install_resolved_content(
+            &bad_hash_dl,
+            &inst_dir,
+            ProjectKind::Mod,
+            LockSource::Modrinth,
+            &paths,
+            &net,
+            &guard,
+        )
+        .await
+        .is_err());
+        assert!(!inst_dir.join("mods").join("bad-hash.jar").exists());
+
+        // 4. Cancellation via CancelEpoch
+        epoch.cancel_and_advance();
+        let ok_again = vec![ResolvedModDownload {
+            project_id: "cancelled-mod".into(),
+            version_id: "v1".into(),
+            filename: "cancelled-mod.jar".into(),
+            url: format!("http://{addr}/ok-root.jar"),
+            size: root_bytes.len() as u64,
+            sha1: Some(sha1_of(&root_bytes)),
+            sha512: Some(sha512_of(&root_bytes)),
+            is_dependency: false,
+        }];
+        assert!(install_resolved_content(
+            &ok_again,
+            &inst_dir,
+            ProjectKind::Mod,
+            LockSource::Modrinth,
+            &paths,
+            &net,
+            &guard,
+        )
+        .await
+        .is_err());
+        assert!(!inst_dir.join("mods").join("cancelled-mod.jar").exists());
     }
 }

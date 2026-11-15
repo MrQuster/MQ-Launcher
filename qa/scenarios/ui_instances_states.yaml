@@ -1,0 +1,62 @@
+name: ui_instances_states
+description: Exercise Instances screen states (empty, create modal, import modal, demo instances, grid/list, instance detail tabs).
+deterministic: true
+steps:
+  - set_scale:
+      scale: 1.0
+  - frame_stats: reset
+  - dump_ui: {}
+  - screenshot: {}
+  - click:
+      label: "Импорт сборки"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - key:
+      key: Escape
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - click:
+      label: "Создать инстанс"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - key:
+      key: Escape
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - set_flag:
+      name: demo_instances
+      value: true
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - click:
+      label: "Список"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - click:
+      label: "Сетка"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - click:
+      label: "Детали"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - frame_stats: get
+  - quit: {}

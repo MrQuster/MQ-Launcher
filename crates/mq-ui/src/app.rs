@@ -330,6 +330,37 @@ impl MqApp {
                     instance_id,
                     file_name,
                 } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let mods_dir = inst_dir.join("mods");
+                    let pool = self.state.compute_pool.clone();
+                    let guard = self.state.cancel_epoch.snapshot();
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        if let Ok(orphans) =
+                            mq_mods::delete_mod_and_find_orphans(&inst_dir, &file_name)
+                        {
+                            if !orphans.is_empty() {
+                                let _ = resp_tx.send(UiWorkerResponse::OrphanedDepsFound {
+                                    instance_id: instance_id.clone(),
+                                    deleted_file: file_name.clone(),
+                                    orphans,
+                                });
+                            }
+                        }
+                        if let Ok(rep) =
+                            mq_mods::scan_mods_directory(&mods_dir, &pool, &guard).await
+                        {
+                            let _ = resp_tx.send(UiWorkerResponse::ScanModsResults {
+                                mods: rep.mods,
+                                conflicts: rep.conflicts,
+                            });
+                        }
+                    });
+                }
+                UiWorkerCommand::CleanupOrphanFiles {
+                    instance_id,
+                    orphan_files,
+                } => {
                     let mods_dir = self
                         .state
                         .paths
@@ -339,7 +370,16 @@ impl MqApp {
                     let guard = self.state.cancel_epoch.snapshot();
                     let resp_tx = self.state.resp_sender.clone();
                     tokio::spawn(async move {
-                        let _ = mq_mods::delete_mod(&mods_dir, &file_name);
+                        let mut removed = 0usize;
+                        for f in &orphan_files {
+                            if mq_mods::delete_mod(&mods_dir, f).is_ok() {
+                                removed += 1;
+                            }
+                        }
+                        let _ = resp_tx.send(UiWorkerResponse::UnusedDepsCleaned {
+                            removed,
+                            error: None,
+                        });
                         if let Ok(rep) =
                             mq_mods::scan_mods_directory(&mods_dir, &pool, &guard).await
                         {
@@ -348,6 +388,68 @@ impl MqApp {
                                 conflicts: rep.conflicts,
                             });
                         }
+                    });
+                }
+                UiWorkerCommand::RunPreflight { instance_id } => {
+                    let mods_dir = self
+                        .state
+                        .paths
+                        .instance_dir(instance_id.as_str())
+                        .join("mods");
+                    let inst_opt = self
+                        .state
+                        .instances
+                        .iter()
+                        .find(|i| i.id == instance_id)
+                        .cloned();
+                    let pool = self.state.compute_pool.clone();
+                    let guard = self.state.cancel_epoch.snapshot();
+                    let resp_tx = self.state.resp_sender.clone();
+                    if let Some(inst) = inst_opt {
+                        tokio::spawn(async move {
+                            if let Ok(report) = mq_mods::preflight_check_mods(
+                                &mods_dir,
+                                inst.loader,
+                                &inst.mc_version,
+                                &pool,
+                                &guard,
+                            )
+                            .await
+                            {
+                                let _ = resp_tx.send(UiWorkerResponse::PreflightResult {
+                                    instance_id,
+                                    report,
+                                });
+                            }
+                        });
+                    }
+                }
+                UiWorkerCommand::AutoFixPreflight {
+                    instance_id,
+                    report,
+                } => {
+                    let mods_dir = self
+                        .state
+                        .paths
+                        .instance_dir(instance_id.as_str())
+                        .join("mods");
+                    let pool = self.state.compute_pool.clone();
+                    let guard = self.state.cancel_epoch.snapshot();
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let _ = mq_mods::auto_fix_preflight(&mods_dir, &report);
+                        if let Ok(rep) =
+                            mq_mods::scan_mods_directory(&mods_dir, &pool, &guard).await
+                        {
+                            let _ = resp_tx.send(UiWorkerResponse::ScanModsResults {
+                                mods: rep.mods,
+                                conflicts: rep.conflicts,
+                            });
+                        }
+                        let _ = resp_tx.send(UiWorkerResponse::PreflightResult {
+                            instance_id,
+                            report: mq_mods::PreflightReport { issues: Vec::new() },
+                        });
                     });
                 }
                 UiWorkerCommand::VerifyInstance { instance_id }
@@ -573,6 +675,18 @@ impl MqApp {
                             },
                         );
                     }
+                }
+                UiWorkerCommand::StopGame { instance_id } => {
+                    self.state.stopped_by_user.insert(instance_id.clone());
+                    if let Some(Some(pid)) =
+                        self.state.running_instances.get(&instance_id).copied()
+                    {
+                        tokio::spawn(async move {
+                            let _ = mq_launch::kill_process_tree(pid);
+                        });
+                    }
+                    self.state.status_message =
+                        Some(("Остановка игры...".to_string(), false));
                 }
                 UiWorkerCommand::CancelDownload => {
                     self.state.cancel_epoch.cancel_and_advance();
@@ -897,15 +1011,28 @@ impl MqApp {
                                         ),
                                     }));
 
-                                    let exit_code = match mq_launch::spawn_and_stream_game(
+                                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+                                    let pid_resp_tx = resp_tx.clone();
+                                    let pid_inst = instance_id.clone();
+                                    tokio::spawn(async move {
+                                        if let Ok(pid) = pid_rx.await {
+                                            let _ = pid_resp_tx.send(UiWorkerResponse::GamePid {
+                                                instance_id: pid_inst,
+                                                pid,
+                                            });
+                                        }
+                                    });
+
+                                    let exit_code = match mq_launch::spawn_and_stream_game_with_pid(
                                         &built_cmd,
                                         instance_id.as_str(),
                                         Vec::new(),
                                         Some(bus.clone()),
+                                        Some(pid_tx),
                                     )
                                     .await
                                     {
-                                        Ok(status) => status.code().unwrap_or(0),
+                                        Ok(status) => mq_launch::exit_status_code(&status),
                                         Err(e) => {
                                             bus.publish(mq_core::Event::TaskError {
                                                 context: "Процесс игры".to_string(),

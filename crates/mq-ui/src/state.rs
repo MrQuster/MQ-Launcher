@@ -69,6 +69,15 @@ pub enum UiWorkerResponse {
         removed: usize,
         error: Option<String>,
     },
+    OrphanedDepsFound {
+        instance_id: InstanceId,
+        deleted_file: String,
+        orphans: Vec<String>,
+    },
+    PreflightResult {
+        instance_id: InstanceId,
+        report: mq_mods::PreflightReport,
+    },
     VersionManifestFetched {
         latest_release: Option<String>,
         versions: Vec<(String, String)>,
@@ -80,6 +89,10 @@ pub enum UiWorkerResponse {
         error: String,
     },
     GameStarted(InstanceId),
+    GamePid {
+        instance_id: InstanceId,
+        pid: u32,
+    },
     GameExited {
         instance_id: InstanceId,
         exit_code: i32,
@@ -182,6 +195,17 @@ pub enum UiWorkerCommand {
         instance_id: InstanceId,
         file_name: String,
     },
+    CleanupOrphanFiles {
+        instance_id: InstanceId,
+        orphan_files: Vec<String>,
+    },
+    RunPreflight {
+        instance_id: InstanceId,
+    },
+    AutoFixPreflight {
+        instance_id: InstanceId,
+        report: mq_mods::PreflightReport,
+    },
     VerifyInstance {
         instance_id: InstanceId,
     },
@@ -195,6 +219,9 @@ pub enum UiWorkerCommand {
         instance_id: InstanceId,
     },
     CancelDownload,
+    StopGame {
+        instance_id: InstanceId,
+    },
     LaunchInstance {
         instance_id: InstanceId,
         dry_run: bool,
@@ -233,6 +260,8 @@ pub struct UiState {
     // Game Console & Execution
     pub game_running: bool,
     pub running_instance: Option<InstanceId>,
+    pub running_instances: HashMap<InstanceId, Option<u32>>,
+    pub stopped_by_user: HashSet<InstanceId>,
     pub is_launching: bool,
     pub installing_instance: Option<InstanceId>,
     pub install_error: Option<String>,
@@ -298,6 +327,9 @@ pub struct UiState {
     pub mrpack_ipc_receiver:
         Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<std::path::PathBuf>>>>,
     pub picked_import_path: Option<std::path::PathBuf>,
+    pub orphaned_deps_prompt: Option<(InstanceId, String, Vec<String>)>,
+    pub preflight_report: Option<(InstanceId, mq_mods::PreflightReport)>,
+    pub gpu_diagnostics: Option<mq_mods::shaders::GpuDiagnostics>,
 }
 
 impl UiState {
@@ -354,6 +386,8 @@ impl UiState {
             status_message: Some(("MQ Launcher готов к работе".to_string(), false)),
             game_running: false,
             running_instance: None,
+            running_instances: HashMap::new(),
+            stopped_by_user: HashSet::new(),
             is_launching: false,
             installing_instance: None,
             install_error: None,
@@ -400,6 +434,9 @@ impl UiState {
             pending_mrpack_path: None,
             mrpack_ipc_receiver: None,
             picked_import_path: None,
+            orphaned_deps_prompt: None,
+            preflight_report: None,
+            gpu_diagnostics: None,
         })
     }
 
@@ -552,6 +589,29 @@ impl UiState {
                         ),
                     });
                 }
+                UiWorkerResponse::OrphanedDepsFound {
+                    instance_id,
+                    deleted_file,
+                    orphans,
+                } => {
+                    if !orphans.is_empty() {
+                        self.orphaned_deps_prompt = Some((instance_id, deleted_file, orphans));
+                    }
+                }
+                UiWorkerResponse::PreflightResult {
+                    instance_id,
+                    report,
+                } => {
+                    if report.issues.is_empty() {
+                        self.preflight_report = None;
+                        self.status_message = Some((
+                            "Проверка зависимостей: проблем не найдено".to_string(),
+                            false,
+                        ));
+                    } else {
+                        self.preflight_report = Some((instance_id, report));
+                    }
+                }
                 UiWorkerResponse::VersionManifestFetched {
                     latest_release,
                     versions,
@@ -598,27 +658,43 @@ impl UiState {
                 UiWorkerResponse::GameStarted(id) => {
                     self.is_launching = false;
                     self.game_running = true;
+                    self.running_instances.entry(id.clone()).or_insert(None);
                     self.running_instance = Some(id);
+                }
+                UiWorkerResponse::GamePid { instance_id, pid } => {
+                    self.running_instances.insert(instance_id, Some(pid));
                 }
                 UiWorkerResponse::GameExited {
                     instance_id,
                     exit_code,
                 } => {
-                    self.game_running = false;
-                    self.running_instance = None;
+                    self.running_instances.remove(&instance_id);
+                    self.game_running = !self.running_instances.is_empty();
+                    self.running_instance = self.running_instances.keys().next().cloned();
                     self.last_game_exit_code = Some(exit_code);
-                    self.status_message = Some((
-                        format!("Игра завершилась с кодом выхода {}", exit_code),
-                        exit_code != 0,
-                    ));
-                    if exit_code != 0 {
-                        let inst_dir = self.paths.instance_dir(instance_id.as_str());
-                        let lines: Vec<String> =
-                            self.game_logs.iter().map(|l| l.line.clone()).collect();
-                        let analysis = mq_launch::analyze_crash(&inst_dir, Some(exit_code), &lines);
-                        self.crash_analysis = Some(analysis);
-                    } else {
+                    let was_stopped = self.stopped_by_user.remove(&instance_id);
+                    if was_stopped {
+                        self.status_message = Some(("Игра остановлена пользователем".to_string(), false));
                         self.crash_analysis = None;
+                    } else {
+                        self.status_message = Some((
+                            format!("Игра завершилась с кодом выхода {}", exit_code),
+                            exit_code != 0,
+                        ));
+                        if exit_code != 0 {
+                            let inst_dir = self.paths.instance_dir(instance_id.as_str());
+                            let lines: Vec<String> = self
+                                .game_logs
+                                .iter()
+                                .filter(|l| l.instance == instance_id.as_str())
+                                .map(|l| l.line.clone())
+                                .collect();
+                            let analysis =
+                                mq_launch::analyze_crash(&inst_dir, Some(exit_code), &lines);
+                            self.crash_analysis = Some(analysis);
+                        } else {
+                            self.crash_analysis = None;
+                        }
                     }
                 }
             }

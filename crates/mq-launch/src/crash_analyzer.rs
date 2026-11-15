@@ -84,9 +84,14 @@ fn diagnose_text(
     let lower = text.to_lowercase();
     let mut suspected_mods = Vec::new();
 
-    // 1. Out of Memory (OOM)
+    // 1. Out of Memory (OOM) or JVM heap too small
     if lower.contains("outofmemoryerror")
         || lower.contains("java heap space")
+        || lower.contains("too small maximum heap")
+        || lower.contains("initial heap size set to a larger value than the maximum heap size")
+        || lower.contains("could not reserve enough space for")
+        || lower
+            .contains("there is insufficient memory for the java runtime environment to continue")
         || exit_code == Some(137)
     {
         return CrashAnalysis {
@@ -94,7 +99,7 @@ fn diagnose_text(
             summary: "Нехватка оперативной памяти (OutOfMemoryError)".to_string(),
             recommendation: "Выделенной памяти недостаточно для загрузки игры и модов. Перейдите в настройки инстанса и увеличьте максимальное выделение RAM (рекомендуется от 4096 МБ до 6144 МБ).".to_string(),
             suspected_mods: Vec::new(),
-            raw_snippet: extract_snippet(text, "OutOfMemoryError", 6),
+            raw_snippet: extract_snippet(text, "memory", 6),
             crash_report_file: report_file,
         };
     }
@@ -172,7 +177,33 @@ fn diagnose_text(
         };
     }
 
-    // 7. Generic Failure
+    // 7. Signal termination (SIGSEGV / SIGABRT / SIGTERM)
+    if matches!(exit_code, Some(139) | Some(134) | Some(143)) {
+        let (sig_name, rec) = match exit_code {
+            Some(139) => (
+                "SIGSEGV",
+                "Произошёл сбой нативной библиотеки или JVM (Segmentation Fault). Проверьте драйверы видеокарты, версию Java и нативные библиотеки.",
+            ),
+            Some(134) => (
+                "SIGABRT",
+                "Процесс JVM был аварийно прерван (SIGABRT). Проверьте журнал консоли и совместимость модов/драйверов.",
+            ),
+            _ => (
+                "SIGTERM",
+                "Процесс игры был завершён внешним сигналом (SIGTERM).",
+            ),
+        };
+        return CrashAnalysis {
+            exit_code,
+            summary: format!("Процесс игры завершён по сигналу ({sig_name})"),
+            recommendation: rec.to_string(),
+            suspected_mods,
+            raw_snippet: extract_tail_snippet(text, 12),
+            crash_report_file: report_file,
+        };
+    }
+
+    // 8. Generic Failure
     extract_mod_candidates(text, &mut suspected_mods);
     let code_str = exit_code.map(|c| format!(" (код {c})")).unwrap_or_default();
     CrashAnalysis {

@@ -1,0 +1,34 @@
+name: launch_smoke
+description: UI game launch smoke scenario verifying Play button states, instance console logs, and Stop button.
+deterministic: true
+viewport:
+  width: 1280
+  height: 800
+steps:
+  - goto: instances
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - screenshot: {}
+  - dump_ui: {}
+  - click:
+      label: "Играть"
+  - wait_for:
+      text: "ОСТАНОВИТЬ"
+      timeout_ms: 15000
+  - screenshot: {}
+  - click:
+      label: "Консоль"
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 3
+  - screenshot: {}
+  - dump_ui: {}
+  - click:
+      label: "ОСТАНОВИТЬ"
+  - wait_for:
+      text: "Играть"
+      timeout_ms: 10000
+  - screenshot: {}
+  - state: {}
+  - quit: {}

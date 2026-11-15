@@ -408,24 +408,22 @@ pub async fn run_content_job(
     let instance_dir = ctx.paths.instance_dir(instance_id.as_str());
     let total = downloads.len();
     progress(0, total);
-    for (i, d) in downloads.iter().enumerate() {
-        if cancel.load(Ordering::SeqCst) {
-            return Err("Отменено".to_string());
-        }
-        let guard = ctx.epoch.snapshot();
-        mq_mods::install_resolved_content(
-            std::slice::from_ref(d),
-            &instance_dir,
-            kind,
-            lock_source(source),
-            &ctx.paths,
-            &ctx.net,
-            &guard,
-        )
-        .await
-        .map_err(|e| err_text(&ctx.config, &e))?;
-        progress(i + 1, total);
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Отменено".to_string());
     }
+    let guard = ctx.epoch.snapshot();
+    mq_mods::install_resolved_content(
+        downloads,
+        &instance_dir,
+        kind,
+        lock_source(source),
+        &ctx.paths,
+        &ctx.net,
+        &guard,
+    )
+    .await
+    .map_err(|e| err_text(&ctx.config, &e))?;
+    progress(total, total);
     Ok(())
 }
 

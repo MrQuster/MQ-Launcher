@@ -908,14 +908,24 @@ impl SettingsView {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
                 crate::widgets::paint_vector_icon(ui.painter(), rect, VectorIcon::Search, Color32::from_rgb(0x3B, 0x82, 0xF6));
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.mc_locale_search)
-                        .hint_text("Поиск по всем 80+ языкам Minecraft (напр. українська, русский, polski)...")
-                        .desired_width(340.0),
-                );
+                let frame_resp = egui::Frame::new()
+                    .fill(tokens.bg_input)
+                    .stroke(Stroke::new(1.0_f32, tokens.border))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::symmetric(8, 5))
+                    .show(ui, |ui| {
+                        ui.set_min_size(Vec2::new(324.0, 18.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.mc_locale_search)
+                                .frame(false)
+                                .hint_text("Поиск по всем 80+ языкам Minecraft (напр. українська, русский, polski)...")
+                                .desired_width(324.0)
+                                .vertical_align(egui::Align::Center),
+                        );
+                    });
                 register_widget(
                     ui,
-                    &resp,
+                    &frame_resp.response,
                     ElementMeta::new(ElementKind::Input)
                         .id("mc_locale_search")
                         .label("Поиск языка Minecraft")
