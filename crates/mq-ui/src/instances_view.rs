@@ -1741,78 +1741,101 @@ impl InstancesView {
             .corner_radius(RADIUS_CARD)
             .inner_margin(egui::Margin::same(14));
 
-        let resp = card_frame.show(ui, |ui| {
+        card_frame.show(ui, |ui| {
             ui.set_width(card_w);
             ui.vertical(|ui| {
-                // Top row: Vector Icon + Name & Version/Loader Badges
-                ui.horizontal(|ui| {
-                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
-                    let (icon, icon_col) = match inst.loader {
-                        ModLoaderKind::Vanilla => (VectorIcon::Cube, tokens.text),
-                        ModLoaderKind::Fabric | ModLoaderKind::Quilt => {
-                            (VectorIcon::Layers, tokens.accent)
-                        }
-                        ModLoaderKind::Forge | ModLoaderKind::NeoForge => {
-                            (VectorIcon::Shield, ACCENT_COBALT)
-                        }
-                    };
-                    paint_vector_icon(ui.painter(), icon_rect, icon, icon_col);
+                // Clickable top region (above the separator) so card clicks/double-clicks
+                // never overlay or intercept clicks on the action buttons below.
+                let header_resp = ui.vertical(|ui| {
+                    ui.set_width(card_w);
+                    // Top row: Vector Icon + Name & Version/Loader Badges
+                    ui.horizontal(|ui| {
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+                        let (icon, icon_col) = match inst.loader {
+                            ModLoaderKind::Vanilla => (VectorIcon::Cube, tokens.text),
+                            ModLoaderKind::Fabric | ModLoaderKind::Quilt => {
+                                (VectorIcon::Layers, tokens.accent)
+                            }
+                            ModLoaderKind::Forge | ModLoaderKind::NeoForge => {
+                                (VectorIcon::Shield, ACCENT_COBALT)
+                            }
+                        };
+                        paint_vector_icon(ui.painter(), icon_rect, icon, icon_col);
 
-                    ui.vertical(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&inst.name)
-                                    .color(tokens.text)
-                                    .size(15.0)
-                                    .strong(),
-                            )
-                            .truncate(),
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&inst.name)
+                                        .color(tokens.text)
+                                        .size(15.0)
+                                        .strong(),
+                                )
+                                .truncate(),
+                            );
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                version_badge(ui, &inst.mc_version, ACCENT_COBALT);
+                                loader_badge(ui, inst.loader);
+                            });
+                        });
+                    });
+
+                    ui.add_space(10.0);
+
+                    // Status row: status dot + status label + playtime on right
+                    let (status_text, status_col) = if is_running {
+                        ("Запущен", tokens.accent)
+                    } else if is_downloading {
+                        ("Загрузка...", ACCENT_COBALT)
+                    } else if is_installed {
+                        ("Готов", tokens.accent)
+                    } else {
+                        ("Не скачан", tokens.warning)
+                    };
+
+                    ui.horizontal(|ui| {
+                        let (dot_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot_rect.center(), 3.5, status_col);
+                        ui.label(
+                            RichText::new(status_text)
+                                .color(status_col)
+                                .small()
+                                .strong(),
                         );
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            version_badge(ui, &inst.mc_version, ACCENT_COBALT);
-                            loader_badge(ui, inst.loader);
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let hours = (inst.playtime_secs as f32) / 3600.0;
+                            if hours >= 0.1 {
+                                ui.label(
+                                    RichText::new(format!("Время: {:.1} ч", hours))
+                                        .color(tokens.text_muted)
+                                        .small(),
+                                );
+                            } else {
+                                ui.label(RichText::new("Новый").color(tokens.text_muted).small());
+                            }
                         });
                     });
                 });
 
-                ui.add_space(10.0);
-
-                // Status row: status dot + status label + playtime on right
-                let (status_text, status_col) = if is_running {
-                    ("Запущен", tokens.accent)
-                } else if is_downloading {
-                    ("Загрузка...", ACCENT_COBALT)
-                } else if is_installed {
-                    ("Готов", tokens.accent)
-                } else {
-                    ("Не скачан", tokens.warning)
-                };
-
-                ui.horizontal(|ui| {
-                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                    ui.painter()
-                        .circle_filled(dot_rect.center(), 3.5, status_col);
-                    ui.label(
-                        RichText::new(status_text)
-                            .color(status_col)
-                            .small()
-                            .strong(),
-                    );
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let hours = (inst.playtime_secs as f32) / 3600.0;
-                        if hours >= 0.1 {
-                            ui.label(
-                                RichText::new(format!("Время: {:.1} ч", hours))
-                                    .color(tokens.text_muted)
-                                    .small(),
-                            );
-                        } else {
-                            ui.label(RichText::new("Новый").color(tokens.text_muted).small());
-                        }
+                let card_resp = header_resp.response.interact(Sense::click());
+                if card_resp.double_clicked() {
+                    state.selected_instance_id = Some(inst.id.clone());
+                    self.view_mode = InstanceViewMode::List;
+                    self.content_sub_mode = ContentSubMode::Installed;
+                    self.synced_catalog_context = None;
+                    let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                        instance_id: inst.id.clone(),
                     });
-                });
+                } else if card_resp.clicked() {
+                    state.selected_instance_id = Some(inst.id.clone());
+                    let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                        instance_id: inst.id.clone(),
+                    });
+                }
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -1858,6 +1881,8 @@ impl InstancesView {
                         state.selected_instance_id = Some(inst.id.clone());
                         self.view_mode = InstanceViewMode::List;
                         self.current_tab = InstanceDetailTab::Mods;
+                        self.content_sub_mode = ContentSubMode::Installed;
+                        self.synced_catalog_context = None;
                         let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
                             instance_id: inst.id.clone(),
                         });
@@ -1867,6 +1892,9 @@ impl InstancesView {
                     {
                         state.selected_instance_id = Some(inst.id.clone());
                         self.view_mode = InstanceViewMode::List;
+                        self.current_tab = InstanceDetailTab::Console;
+                        self.content_sub_mode = ContentSubMode::Installed;
+                        self.synced_catalog_context = None;
                         let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
                             instance_id: inst.id.clone(),
                         });
@@ -1886,20 +1914,6 @@ impl InstancesView {
                 });
             });
         });
-
-        let card_resp = resp.response.interact(Sense::click());
-        if card_resp.double_clicked() {
-            state.selected_instance_id = Some(inst.id.clone());
-            self.view_mode = InstanceViewMode::List;
-            let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
-                instance_id: inst.id.clone(),
-            });
-        } else if card_resp.clicked() {
-            state.selected_instance_id = Some(inst.id.clone());
-            let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
-                instance_id: inst.id.clone(),
-            });
-        }
     }
 
     fn render_create_instance_modal(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
@@ -4547,6 +4561,113 @@ mod tests {
         assert!(
             has_scroll_viewport_for_both_cards,
             "expected embedded catalog ScrollArea viewport >= 250px tall even with active job"
+        );
+    }
+
+    fn find_text_center_in_shape(shape: &egui::epaint::Shape, needle: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(ts) => {
+                (ts.galley.text() == needle).then(|| ts.pos + ts.galley.size() * 0.5)
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|s| find_text_center_in_shape(s, needle)),
+            _ => None,
+        }
+    }
+
+    fn find_text_center(shapes: &[egui::epaint::ClippedShape], needle: &str) -> egui::Pos2 {
+        shapes
+            .iter()
+            .find_map(|cs| find_text_center_in_shape(&cs.shape, needle))
+            .unwrap_or_else(|| panic!("expected text shape '{needle}'"))
+    }
+
+    #[test]
+    fn grid_card_buttons_receive_clicks_and_trigger_actions() {
+        let (_tmp, mut state) = test_ui_state();
+        let inst = state
+            .instance_mgr
+            .create_instance("quilt-26.3", "26.3", ModLoaderKind::Quilt, None)
+            .expect("quilt instance");
+        state.instances.push(inst);
+
+        let mut view = InstancesView {
+            view_mode: InstanceViewMode::Grid,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let make_input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(1024.0, 720.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let click_at = |view: &mut InstancesView, state: &mut UiState, pos: egui::Pos2| {
+            for pressed in [true, false] {
+                let _ = ctx.run(
+                    make_input(vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]),
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            view.ui(ui, state);
+                        });
+                    },
+                );
+            }
+        };
+
+        // 1. Settle layout so card and child button rects are registered.
+        let _ = ctx.run(make_input(vec![]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                view.ui(ui, &mut state);
+            });
+        });
+        let settled = ctx.run(make_input(vec![]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                view.ui(ui, &mut state);
+            });
+        });
+
+        // 2. Click "Моды" inside the Grid card.
+        let mods_pos = find_text_center(&settled.shapes, "Моды");
+        click_at(&mut view, &mut state, mods_pos);
+        assert_eq!(view.view_mode, InstanceViewMode::List);
+        assert_eq!(view.current_tab, InstanceDetailTab::Mods);
+
+        // 3. Switch back to Grid and click "Детали".
+        view.view_mode = InstanceViewMode::Grid;
+        let settled = ctx.run(make_input(vec![]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                view.ui(ui, &mut state);
+            });
+        });
+        let details_pos = find_text_center(&settled.shapes, "Детали");
+        click_at(&mut view, &mut state, details_pos);
+        assert_eq!(view.view_mode, InstanceViewMode::List);
+        assert_eq!(view.current_tab, InstanceDetailTab::Console);
+
+        // 4. Switch back to Grid and click "Скачать".
+        view.view_mode = InstanceViewMode::Grid;
+        let settled = ctx.run(make_input(vec![]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                view.ui(ui, &mut state);
+            });
+        });
+        let download_pos = find_text_center(&settled.shapes, "Скачать");
+        click_at(&mut view, &mut state, download_pos);
+        assert!(
+            state.is_launching,
+            "expected Скачать button click to trigger launch"
         );
     }
 }
