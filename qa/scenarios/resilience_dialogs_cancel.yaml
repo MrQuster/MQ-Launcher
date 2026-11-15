@@ -1,5 +1,6 @@
 name: resilience_dialogs_cancel
-description: 100 cycles open/close dialog + 50 cycles start/cancel.
+description: 100 cycles open/close Create Instance dialog + 50 cycles open/cancel
+  Import dialog.
 deterministic: true
 viewport:
   width: 1280
@@ -8,602 +9,1052 @@ steps:
 - frame_stats: reset
 - click:
     label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
-- key:
-    key: Escape
-- click:
-    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - click:
     label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Создать инстанс
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
+- click:
+    label: Отмена
+- click:
+    label: Импорт сборки
+- wait_for:
+    label: Отмена
+    timeout_ms: 5000
 - click:
     label: Отмена
 - frame_stats: get

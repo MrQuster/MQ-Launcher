@@ -202,7 +202,7 @@ def run_weston_resize(mq_bin: Path, data_root: Path) -> dict[str, Any]:
     )
     time.sleep(1.0)
     log_f = (data_dir / "launcher.log").open("w", encoding="utf-8")
-    proc = subprocess.Popen([str(mq_bin), "--test-hooks", "--backend", "auto"], cwd=REPO_ROOT, env=env, stdout=log_f, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen([str(mq_bin), "--test-hooks", "--backend", "glow"], cwd=REPO_ROOT, env=env, stdout=log_f, stderr=subprocess.STDOUT, text=True)
     try:
         sock = wait_for_socket(Path(env["MQ_TEST_HOOKS_SOCKET"]), proc)
         cli = Client(sock)
@@ -287,7 +287,7 @@ def run_stress_data(mq_bin: Path, data_root: Path) -> dict[str, Any]:
         time.sleep(0.5)
 
     log_f = (data_dir / "launcher.log").open("w", encoding="utf-8")
-    proc = subprocess.Popen([str(mq_bin), "--test-hooks", "--backend", "auto"], cwd=REPO_ROOT, env=env, stdout=log_f, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen([str(mq_bin), "--test-hooks", "--backend", "glow"], cwd=REPO_ROOT, env=env, stdout=log_f, stderr=subprocess.STDOUT, text=True)
     try:
         sock = wait_for_socket(Path(env["MQ_TEST_HOOKS_SOCKET"]), proc)
         cli = Client(sock)
