@@ -5,6 +5,18 @@
 
 ---
 
+## [v2.6.8] — 2026-11-18 ("CI Smoke Stabilization, Updated Demo Screenshots & Packaging Sync")
+
+### Исправлено и улучшено
+- **UI и детерминизм каталога (`mq-ui`):**
+  - Включена пост-QA доработка детерминированного режима каталога (`is_deterministic_test_mode`) и перегенерированы актуальные демо-скриншоты интерфейса в `docs/assets/screenshots/` по состоянию после QA-исправлений.
+- **Стабильность headless CI:**
+  - Зафиксирована установка системных зависимостей `libglx-mesa0` и `libxkbcommon-x11-0` для стабильного запуска Xvfb + `--backend glow` в GitHub Actions.
+- **Синхронизация пакетных манифестов (`packaging/`):**
+  - Обновлены версии и ссылки релиза до `2.6.8` в `PKGBUILD`, Scoop (`packaging/scoop/mq.json`), Winget (`packaging/winget/`), Inno Setup (`packaging/windows/mq.iss`) и примерах `install.ps1`.
+
+---
+
 ## [v2.6.7] — 2026-11-15 ("Autonomous QA Hardening, Loader/Mod Fixes & CI Smoke")
 
 ### Исправлено и улучшено
