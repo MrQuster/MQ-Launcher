@@ -100,6 +100,13 @@ impl SnapshotSession {
         apply_theme(&egui_ctx, &app.state.config.theme);
         configure_system_fonts(&egui_ctx);
         egui_ctx.set_pixels_per_point(scale);
+        crate::theme::init_wgpu_liquid_glass_for_renderer(
+            &self.device,
+            &self.queue,
+            target_format,
+            &mut renderer,
+            &egui_ctx,
+        );
 
         let mut events = Vec::new();
         if let Some(pos) = opts.pointer_pos {

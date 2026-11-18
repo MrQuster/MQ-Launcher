@@ -5,6 +5,17 @@
 
 ---
 
+## [v2.7.0] — 2026-11-18 ("Hardware-Accelerated WGPU Liquid Glass Shader")
+
+### Добавлено и улучшено
+- **Аппаратный WGSL-шейдер Liquid Glass (`mq-ui/src/shaders/liquid_glass.wgsl`, `theme.rs`, `theme_styles.rs`, `app.rs`, `snapshot.rs`):**
+  - Добавлен фрагментно-вершинный WGSL-шейдер для `egui 0.31` + `wgpu 24` через `egui_wgpu::CallbackTrait` (`PaintCallback`): аналитическая SDF-маска скруглённого прямоугольника (`sd_rounded_box`), преломление фаски Снеллиуса, RGB хроматическая аберрация, адаптивная под яркость обоев матовая вуаль и направленные каустические блики, реагирующие на позицию курсора.
+  - Перенесены резкая и GPU-размытая текстуры обоев в `egui_wgpu::CallbackResources` (`LiquidGlassGpuResources`) с 4-проходным separable GPU blur, обновляемым только при смене обоев или ресайзе окна.
+  - Реализован динамический uniform-буфер с выравниванием по `min_uniform_buffer_offset_alignment` и масштабирование координат через `pixels_per_point()`.
+  - Сохранён безопасный fallback на `egui::Mesh` + CPU-блюр при запуске без Vulkan/wgpu (`--backend glow` / OpenGL и unit-тесты).
+
+---
+
 ## [v2.6.10] — 2026-11-18 ("Serpantinum 1:1 Liquid Glass & Automatic CurseForge CDN Downloads")
 
 ### Добавлено и улучшено

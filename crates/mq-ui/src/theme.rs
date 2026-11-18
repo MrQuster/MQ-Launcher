@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use egui::epaint::{Mesh, Vertex};
 use egui::style::{Selection, WidgetVisuals, Widgets};
@@ -15,7 +16,8 @@ use mq_core::{BackgroundStyle, ThemeConfig, ThemePreset, UiDensity};
 
 use crate::theme_styles::{
     paint_liquid_glass_ambient_backdrop, paint_translucent_clean_backdrop,
-    store_active_backdrop_texture, ActiveBackdropTexture, ThemeStyleParams,
+    sample_liquid_glass_wallpaper, store_active_backdrop_texture, ActiveBackdropTexture,
+    ThemeStyleParams,
 };
 
 /// Curated calm accent swatch preset for customization controls.
@@ -704,12 +706,796 @@ pub fn solid_hud_frame(tokens: &Tokens) -> Frame {
         .inner_margin(Margin::symmetric(12, 4))
 }
 
+/// Raw wallpaper RGBA buffer prepared for GPU upload into [`LiquidGlassGpuResources`].
+#[derive(Clone)]
+pub struct GpuBackdropSource {
+    pub key: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<Vec<u8>>,
+}
+
+/// Active screen-space backdrop geometry & image source passed to `wgpu` Liquid Glass callbacks.
+#[derive(Clone)]
+pub struct ActiveGpuBackdrop {
+    pub source: GpuBackdropSource,
+    pub screen_rect: Rect,
+    pub uv_rect: Rect,
+    pub backdrop_dim: f32,
+    pub generation: u64,
+}
+
 #[derive(Clone)]
 struct CachedBackdrop {
     path: String,
     texture: Option<TextureHandle>,
     blurred_texture: Option<TextureHandle>,
+    sharp_rgba: Option<Arc<Vec<u8>>>,
     size: [usize; 2],
+}
+
+/// GPU uniform payload for the `liquid_glass.wgsl` fragment shader (112 bytes, 16-byte aligned).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LiquidGlassUniforms {
+    pub rect_min: [f32; 2],
+    pub rect_size: [f32; 2],
+    pub screen_size: [f32; 2],
+    pub light_dir: [f32; 2],
+    pub uv_min: [f32; 2],
+    pub uv_size: [f32; 2],
+    pub backdrop_min: [f32; 2],
+    pub backdrop_size: [f32; 2],
+    pub tint_color: [f32; 4],
+    pub corner_radius: f32,
+    pub bevel_width: f32,
+    pub ior_strength: f32,
+    pub dispersion: f32,
+    pub cursor_pos: [f32; 2],
+    pub spec_radius: f32,
+    pub hover_t: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlurUniforms {
+    texel_step: [f32; 2],
+    radius: f32,
+    _pad: f32,
+}
+
+const WGPU_GLASS_AVAILABLE_KEY: &str = "mq_wgpu_liquid_glass_available";
+const ACTIVE_GPU_BACKDROP_KEY: &str = "mq_active_gpu_glass_backdrop";
+
+/// Returns `true` when `egui_wgpu::CallbackResources` has initialized GPU Liquid Glass pipelines.
+#[inline]
+pub fn is_wgpu_glass_available(ctx: &Context) -> bool {
+    ctx.data(|d| {
+        d.get_temp::<bool>(Id::new(WGPU_GLASS_AVAILABLE_KEY))
+            .unwrap_or(false)
+    })
+}
+
+/// Stores the active backdrop descriptor consumed by [`LiquidGlassGpuResources`] during `prepare()`.
+#[inline]
+pub fn store_active_gpu_backdrop(ctx: &Context, active: Option<ActiveGpuBackdrop>) {
+    let key = Id::new(ACTIVE_GPU_BACKDROP_KEY);
+    ctx.data_mut(|d| {
+        d.insert_temp(key, active);
+    });
+}
+
+/// Returns the active GPU backdrop descriptor for the current frame, if any.
+#[inline]
+pub fn active_gpu_backdrop(ctx: &Context) -> Option<ActiveGpuBackdrop> {
+    ctx.data(|d| {
+        d.get_temp::<Option<ActiveGpuBackdrop>>(Id::new(ACTIVE_GPU_BACKDROP_KEY))
+            .flatten()
+    })
+}
+
+/// Persistent `wgpu` pipelines, cached sharp & GPU-blurred wallpaper textures, and dynamic uniform
+/// ring buffer stored inside [`egui_wgpu::CallbackResources`].
+pub struct LiquidGlassGpuResources {
+    blur_pipeline: wgpu::RenderPipeline,
+    blur_bind_group_layout: wgpu::BindGroupLayout,
+    blur_u_h1: wgpu::Buffer,
+    blur_u_v1: wgpu::Buffer,
+    blur_u_h2: wgpu::Buffer,
+    blur_u_v2: wgpu::Buffer,
+    glass_pipeline: wgpu::RenderPipeline,
+    glass_bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    sharp_texture: wgpu::Texture,
+    sharp_view: wgpu::TextureView,
+    blur_temp_texture: wgpu::Texture,
+    blur_temp_view: wgpu::TextureView,
+    blurred_texture: wgpu::Texture,
+    blurred_view: wgpu::TextureView,
+    glass_uniform_buffer: wgpu::Buffer,
+    glass_uniform_capacity: usize,
+    glass_bind_group: wgpu::BindGroup,
+    uniform_stride: usize,
+    staging_bytes: Vec<u8>,
+    current_gen: Option<u64>,
+    frame_flushed: bool,
+    loaded_key: String,
+    sharp_size: [u32; 2],
+    blur_size: [u32; 2],
+    loaded_window_px: [u32; 2],
+}
+
+impl LiquidGlassGpuResources {
+    /// Compiles WGSL shaders and allocates initial sharp/blurred textures and dynamic uniform buffer.
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shader_src = include_str!("shaders/liquid_glass.wgsl");
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mq_liquid_glass_wgsl"),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("mq_liquid_glass_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let blur_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mq_glass_blur_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<BlurUniforms>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mq_glass_blur_pl"),
+            bind_group_layouts: &[&blur_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mq_glass_blur_pipeline"),
+            layout: Some(&blur_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_blur"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_blur"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let uniform_size = std::mem::size_of::<LiquidGlassUniforms>() as u64;
+        let glass_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mq_liquid_glass_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(uniform_size),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let glass_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("mq_liquid_glass_pl"),
+                bind_group_layouts: &[&glass_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let glass_entry = if target_format.is_srgb() {
+            "fs_main_linear"
+        } else {
+            "fs_main_gamma"
+        };
+
+        let glass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mq_liquid_glass_pipeline"),
+            layout: Some(&glass_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(glass_entry),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let make_blur_buf = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of::<BlurUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+
+        let (sharp_texture, sharp_view) = Self::create_rgba_texture(device, "mq_glass_sharp", 4, 4);
+        let (blur_temp_texture, blur_temp_view) =
+            Self::create_rgba_texture(device, "mq_glass_blur_tmp", 4, 4);
+        let (blurred_texture, blurred_view) =
+            Self::create_rgba_texture(device, "mq_glass_blurred", 4, 4);
+
+        let fallback_px = vec![24_u8; 4 * 4 * 4];
+        for tex in [&sharp_texture, &blur_temp_texture, &blurred_texture] {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &fallback_px,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * 4),
+                    rows_per_image: Some(4),
+                },
+                wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let align = device.limits().min_uniform_buffer_offset_alignment.max(1) as usize;
+        let uniform_stride = (std::mem::size_of::<LiquidGlassUniforms>()).div_ceil(align) * align;
+        let glass_uniform_capacity = uniform_stride * 64;
+        let glass_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mq_glass_dynamic_uniforms"),
+            size: glass_uniform_capacity as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let glass_bind_group = Self::build_glass_bind_group(
+            device,
+            &glass_bind_group_layout,
+            &glass_uniform_buffer,
+            &sharp_view,
+            &blurred_view,
+            &sampler,
+        );
+
+        Self {
+            blur_pipeline,
+            blur_bind_group_layout,
+            blur_u_h1: make_blur_buf("mq_blur_u_h1"),
+            blur_u_v1: make_blur_buf("mq_blur_u_v1"),
+            blur_u_h2: make_blur_buf("mq_blur_u_h2"),
+            blur_u_v2: make_blur_buf("mq_blur_u_v2"),
+            glass_pipeline,
+            glass_bind_group_layout,
+            sampler,
+            sharp_texture,
+            sharp_view,
+            blur_temp_texture,
+            blur_temp_view,
+            blurred_texture,
+            blurred_view,
+            glass_uniform_buffer,
+            glass_uniform_capacity,
+            glass_bind_group,
+            uniform_stride,
+            staging_bytes: Vec::with_capacity(glass_uniform_capacity),
+            current_gen: None,
+            frame_flushed: false,
+            loaded_key: String::new(),
+            sharp_size: [4, 4],
+            blur_size: [4, 4],
+            loaded_window_px: [0, 0],
+        }
+    }
+
+    fn create_rgba_texture(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    fn build_glass_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniform_buffer: &wgpu::Buffer,
+        sharp_view: &wgpu::TextureView,
+        blurred_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        let binding_len = std::mem::size_of::<LiquidGlassUniforms>() as u64;
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mq_liquid_glass_bg"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: uniform_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(binding_len),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(sharp_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(blurred_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    }
+
+    /// Ensures per-frame dynamic uniform staging starts cleanly on frame `gen`.
+    pub fn begin_frame_if_needed(&mut self, gen: u64) {
+        if self.current_gen != Some(gen) {
+            self.current_gen = Some(gen);
+            self.frame_flushed = false;
+            self.staging_bytes.clear();
+        }
+    }
+
+    /// Appends one panel's `LiquidGlassUniforms` padded to `min_uniform_buffer_offset_alignment`.
+    pub fn push_uniforms(&mut self, uniforms: &LiquidGlassUniforms) -> u32 {
+        let aligned = self.staging_bytes.len().div_ceil(self.uniform_stride) * self.uniform_stride;
+        self.staging_bytes.resize(aligned + self.uniform_stride, 0);
+        let bytes = bytemuck::bytes_of(uniforms);
+        self.staging_bytes[aligned..aligned + bytes.len()].copy_from_slice(bytes);
+        aligned as u32
+    }
+
+    /// Uploads all staged panel uniforms for this frame in a single buffer write before `paint()`.
+    pub fn flush_uniforms(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.frame_flushed || self.staging_bytes.is_empty() {
+            return;
+        }
+        if self.staging_bytes.len() > self.glass_uniform_capacity {
+            let new_cap = self
+                .staging_bytes
+                .len()
+                .next_power_of_two()
+                .max(self.uniform_stride * 64);
+            self.glass_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mq_glass_dynamic_uniforms"),
+                size: new_cap as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.glass_uniform_capacity = new_cap;
+            self.glass_bind_group = Self::build_glass_bind_group(
+                device,
+                &self.glass_bind_group_layout,
+                &self.glass_uniform_buffer,
+                &self.sharp_view,
+                &self.blurred_view,
+                &self.sampler,
+            );
+        }
+        queue.write_buffer(&self.glass_uniform_buffer, 0, &self.staging_bytes);
+        self.frame_flushed = true;
+    }
+
+    /// Uploads wallpaper sharp pixels when changed and executes 4-pass GPU separable blur
+    /// only when wallpaper changes or window size changes.
+    pub fn sync_backdrop(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &GpuBackdropSource,
+        window_px: [u32; 2],
+    ) {
+        let target_w = (window_px[0] / 2).clamp(160, 960);
+        let target_h = (window_px[1] / 2).clamp(120, 640);
+        let target_blur = [target_w, target_h];
+
+        let key_changed =
+            self.loaded_key != source.key || self.sharp_size != [source.width, source.height];
+        let size_changed = self.blur_size != target_blur || self.loaded_window_px != window_px;
+
+        if !key_changed && !size_changed {
+            return;
+        }
+
+        let mut rebuild_bg = false;
+
+        if key_changed && source.width > 0 && source.height > 0 {
+            let expected_len = (source.width as usize)
+                .saturating_mul(source.height as usize)
+                .saturating_mul(4);
+            if source.rgba.len() >= expected_len {
+                if self.sharp_size != [source.width, source.height] {
+                    let (tex, view) = Self::create_rgba_texture(
+                        device,
+                        "mq_glass_sharp",
+                        source.width,
+                        source.height,
+                    );
+                    self.sharp_texture = tex;
+                    self.sharp_view = view;
+                    self.sharp_size = [source.width, source.height];
+                    rebuild_bg = true;
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.sharp_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &source.rgba[..expected_len],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(source.width * 4),
+                        rows_per_image: Some(source.height),
+                    },
+                    wgpu::Extent3d {
+                        width: source.width,
+                        height: source.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            self.loaded_key = source.key.clone();
+        }
+
+        if self.blur_size != target_blur {
+            let (tmp_tex, tmp_view) =
+                Self::create_rgba_texture(device, "mq_glass_blur_tmp", target_w, target_h);
+            let (out_tex, out_view) =
+                Self::create_rgba_texture(device, "mq_glass_blurred", target_w, target_h);
+            self.blur_temp_texture = tmp_tex;
+            self.blur_temp_view = tmp_view;
+            self.blurred_texture = out_tex;
+            self.blurred_view = out_view;
+            self.blur_size = target_blur;
+            rebuild_bg = true;
+        }
+
+        self.loaded_window_px = window_px;
+
+        let dx = 1.0 / (target_w as f32);
+        let dy = 1.0 / (target_h as f32);
+        let pass_params = [
+            (&self.blur_u_h1, [dx, 0.0], 2.2_f32),
+            (&self.blur_u_v1, [0.0, dy], 2.2_f32),
+            (&self.blur_u_h2, [dx, 0.0], 3.4_f32),
+            (&self.blur_u_v2, [0.0, dy], 3.4_f32),
+        ];
+        for (buf, step, rad) in pass_params {
+            let u = BlurUniforms {
+                texel_step: step,
+                radius: rad,
+                _pad: 0.0,
+            };
+            queue.write_buffer(buf, 0, bytemuck::bytes_of(&u));
+        }
+
+        let passes = [
+            (
+                &self.blur_u_h1,
+                &self.sharp_view,
+                &self.blur_temp_view,
+                "mq_blur_h1",
+            ),
+            (
+                &self.blur_u_v1,
+                &self.blur_temp_view,
+                &self.blurred_view,
+                "mq_blur_v1",
+            ),
+            (
+                &self.blur_u_h2,
+                &self.blurred_view,
+                &self.blur_temp_view,
+                "mq_blur_h2",
+            ),
+            (
+                &self.blur_u_v2,
+                &self.blur_temp_view,
+                &self.blurred_view,
+                "mq_blur_v2",
+            ),
+        ];
+
+        for (ubuf, src_view, dst_view, label) in passes {
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.blur_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ubuf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_viewport(0.0, 0.0, target_w as f32, target_h as f32, 0.0, 1.0);
+            rpass.set_pipeline(&self.blur_pipeline);
+            rpass.set_bind_group(0, &bg, &[]);
+            rpass.draw(0..6, 0..1);
+        }
+
+        if rebuild_bg {
+            self.glass_bind_group = Self::build_glass_bind_group(
+                device,
+                &self.glass_bind_group_layout,
+                &self.glass_uniform_buffer,
+                &self.sharp_view,
+                &self.blurred_view,
+                &self.sampler,
+            );
+        }
+    }
+
+    /// Returns the compiled Liquid Glass render pipeline.
+    #[inline]
+    pub fn glass_pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.glass_pipeline
+    }
+
+    /// Returns the bind group holding dynamic panel uniforms + sharp/blurred GPU textures.
+    #[inline]
+    pub fn glass_bind_group(&self) -> &wgpu::BindGroup {
+        &self.glass_bind_group
+    }
+}
+
+/// Registers [`LiquidGlassGpuResources`] into `renderer.callback_resources` and enables the GPU
+/// `wgpu` Liquid Glass path on `ctx` (leaves OpenGL/`glow` fallback untouched when unavailable).
+pub fn init_wgpu_liquid_glass_for_renderer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target_format: wgpu::TextureFormat,
+    renderer: &mut egui_wgpu::Renderer,
+    ctx: &Context,
+) {
+    let resources = LiquidGlassGpuResources::new(device, queue, target_format);
+    renderer.callback_resources.insert(resources);
+    ctx.data_mut(|d| {
+        d.insert_temp(Id::new(WGPU_GLASS_AVAILABLE_KEY), true);
+    });
+}
+
+/// Initializes GPU Liquid Glass pipelines from `eframe::CreationContext` if running under `wgpu`.
+pub fn init_wgpu_liquid_glass(cc: &eframe::CreationContext<'_>) {
+    if let Some(rs) = cc.wgpu_render_state.as_ref() {
+        let mut renderer = rs.renderer.write();
+        init_wgpu_liquid_glass_for_renderer(
+            &rs.device,
+            &rs.queue,
+            rs.target_format,
+            &mut renderer,
+            &cc.egui_ctx,
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn mark_wgpu_glass_available_for_test(ctx: &Context) {
+    ctx.data_mut(|d| {
+        d.insert_temp(Id::new(WGPU_GLASS_AVAILABLE_KEY), true);
+    });
+}
+
+fn build_ambient_gpu_backdrop(
+    ctx: &Context,
+    style: &ThemeStyleParams,
+    tokens: &Tokens,
+    solid_only: bool,
+) -> GpuBackdropSource {
+    let key = format!(
+        "ambient:{}:{:02x}{:02x}{:02x}:{:02x}{:02x}{:02x}:{:02x}{:02x}{:02x}",
+        u8::from(solid_only),
+        tokens.bg_app.r(),
+        tokens.bg_app.g(),
+        tokens.bg_app.b(),
+        style.ambient_lobe_a.r(),
+        style.ambient_lobe_a.g(),
+        style.ambient_lobe_a.b(),
+        style.ambient_lobe_b.r(),
+        style.ambient_lobe_b.g(),
+        style.ambient_lobe_b.b(),
+    );
+    let cache_id = Id::new("mq_ambient_gpu_backdrop_cache");
+    if let Some(cached) = ctx.data(|d| d.get_temp::<GpuBackdropSource>(cache_id)) {
+        if cached.key == key {
+            return cached;
+        }
+    }
+
+    let w = 96u32;
+    let h = 64u32;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let fy = y as f32 / (h - 1) as f32;
+        for x in 0..w {
+            let fx = x as f32 / (w - 1) as f32;
+            let col = if solid_only {
+                tokens.bg_app
+            } else {
+                sample_liquid_glass_wallpaper(fx, fy, 0.0, style, tokens)
+            };
+            rgba.extend_from_slice(&[col.r(), col.g(), col.b(), 255]);
+        }
+    }
+
+    let source = GpuBackdropSource {
+        key,
+        width: w,
+        height: h,
+        rgba: Arc::new(rgba),
+    };
+    ctx.data_mut(|d| {
+        d.insert_temp(cache_id, source.clone());
+    });
+    source
 }
 
 fn build_blurred_backdrop_image(src: &[u8], w: usize, h: usize) -> ColorImage {
@@ -815,20 +1601,51 @@ fn build_blurred_backdrop_image(src: &[u8], w: usize, h: usize) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([dw, dh], &out_rgba)
 }
 
-fn resolve_backdrop_texture(
-    ctx: &Context,
-    path: &str,
-) -> Option<(TextureHandle, TextureHandle, [usize; 2])> {
+struct ResolvedBackdrop {
+    sharp_tex: TextureHandle,
+    blurred_tex: Option<TextureHandle>,
+    gpu_source: Option<GpuBackdropSource>,
+    size: [usize; 2],
+}
+
+fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<ResolvedBackdrop> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return None;
     }
 
+    let use_wgpu = is_wgpu_glass_available(ctx);
     let cache_id = Id::new("mq_backdrop_tex_cache");
-    if let Some(cached) = ctx.data(|d| d.get_temp::<CachedBackdrop>(cache_id)) {
+    if let Some(mut cached) = ctx.data(|d| d.get_temp::<CachedBackdrop>(cache_id)) {
         if cached.path == trimmed {
-            if let (Some(t), Some(b)) = (cached.texture, cached.blurred_texture) {
-                return Some((t, b, cached.size));
+            if let Some(sharp_tex) = cached.texture.clone() {
+                if !use_wgpu && cached.blurred_texture.is_none() {
+                    if let Some(raw) = cached.sharp_rgba.as_ref() {
+                        let blur_img =
+                            build_blurred_backdrop_image(raw, cached.size[0], cached.size[1]);
+                        let blur_tex = ctx.load_texture(
+                            "mq_glass_blur_backdrop",
+                            blur_img,
+                            TextureOptions::LINEAR,
+                        );
+                        cached.blurred_texture = Some(blur_tex);
+                        ctx.data_mut(|d| {
+                            d.insert_temp(cache_id, cached.clone());
+                        });
+                    }
+                }
+                let gpu_source = cached.sharp_rgba.as_ref().map(|rgba| GpuBackdropSource {
+                    key: trimmed.to_owned(),
+                    width: cached.size[0] as u32,
+                    height: cached.size[1] as u32,
+                    rgba: Arc::clone(rgba),
+                });
+                return Some(ResolvedBackdrop {
+                    sharp_tex,
+                    blurred_tex: cached.blurred_texture,
+                    gpu_source,
+                    size: cached.size,
+                });
             }
             return None;
         }
@@ -842,12 +1659,22 @@ fn resolve_backdrop_texture(
         if size[0] == 0 || size[1] == 0 {
             return None;
         }
-        let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+        let raw_arc = Arc::new(rgba.into_raw());
+        let color_image = ColorImage::from_rgba_unmultiplied(size, &raw_arc);
         let tex = ctx.load_texture("mq_custom_backdrop", color_image, TextureOptions::LINEAR);
-        let blur_image = build_blurred_backdrop_image(rgba.as_raw(), size[0], size[1]);
-        let blur_tex =
-            ctx.load_texture("mq_glass_blur_backdrop", blur_image, TextureOptions::LINEAR);
-        Some((tex, blur_tex, size))
+        let blur_tex = if use_wgpu {
+            None
+        } else {
+            let blur_image = build_blurred_backdrop_image(&raw_arc, size[0], size[1]);
+            Some(ctx.load_texture("mq_glass_blur_backdrop", blur_image, TextureOptions::LINEAR))
+        };
+        let gpu_source = GpuBackdropSource {
+            key: trimmed.to_owned(),
+            width: size[0] as u32,
+            height: size[1] as u32,
+            rgba: Arc::clone(&raw_arc),
+        };
+        Some((tex, blur_tex, raw_arc, gpu_source, size))
     })();
 
     ctx.data_mut(|d| {
@@ -855,14 +1682,22 @@ fn resolve_backdrop_texture(
             cache_id,
             CachedBackdrop {
                 path: trimmed.to_owned(),
-                texture: loaded.as_ref().map(|(t, _, _)| t.clone()),
-                blurred_texture: loaded.as_ref().map(|(_, b, _)| b.clone()),
-                size: loaded.as_ref().map(|(_, _, s)| *s).unwrap_or([1, 1]),
+                texture: loaded.as_ref().map(|(t, _, _, _, _)| t.clone()),
+                blurred_texture: loaded.as_ref().and_then(|(_, b, _, _, _)| b.clone()),
+                sharp_rgba: loaded.as_ref().map(|(_, _, r, _, _)| Arc::clone(r)),
+                size: loaded.as_ref().map(|(_, _, _, _, s)| *s).unwrap_or([1, 1]),
             },
         );
     });
 
-    loaded
+    loaded.map(
+        |(sharp_tex, blurred_tex, _, gpu_source, size)| ResolvedBackdrop {
+            sharp_tex,
+            blurred_tex,
+            gpu_source: Some(gpu_source),
+            size,
+        },
+    )
 }
 
 fn serpantinum_wallpaper_fallback_path() -> Option<String> {
@@ -1040,21 +1875,37 @@ pub fn paint_launcher_background(
     }
     let style = ThemeStyleParams::from_config(cfg);
     let deterministic = is_deterministic_backdrop(ctx);
+    let generation = ctx.cumulative_pass_nr();
     let mut active_glass_tex: Option<ActiveBackdropTexture> = None;
+    let mut active_gpu: Option<ActiveGpuBackdrop> = None;
 
     match cfg.background_style {
         BackgroundStyle::Solid => {
             painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
+            if cfg.preset == ThemePreset::LiquidGlass {
+                active_gpu = Some(ActiveGpuBackdrop {
+                    source: build_ambient_gpu_backdrop(ctx, &style, tokens, true),
+                    screen_rect: rect,
+                    uv_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    backdrop_dim: 0.0,
+                    generation,
+                });
+            }
         }
         BackgroundStyle::Procedural => match cfg.preset {
             ThemePreset::LiquidGlass => {
-                if let Some((tex, blur_tex, size)) = serpantinum_wallpaper_fallback_path()
+                if let Some(resolved) = serpantinum_wallpaper_fallback_path()
                     .as_deref()
                     .and_then(|p| resolve_backdrop_texture(ctx, p))
                 {
                     painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
-                    let uv =
-                        draw_aspect_fill_wallpaper(painter, rect, &tex, size, style.window_alpha);
+                    let uv = draw_aspect_fill_wallpaper(
+                        painter,
+                        rect,
+                        &resolved.sharp_tex,
+                        resolved.size,
+                        style.window_alpha,
+                    );
                     let dim = crate::state::safe_clamp_f32(cfg.backdrop_dim, 0.0, 0.92);
                     if dim > 0.01 {
                         painter.rect_filled(
@@ -1068,11 +1919,22 @@ pub fn paint_launcher_background(
                             ),
                         );
                     }
-                    active_glass_tex = Some(ActiveBackdropTexture {
-                        tex_id: blur_tex.id(),
-                        screen_rect: rect,
-                        uv_rect: uv,
-                    });
+                    if let Some(blur_tex) = resolved.blurred_tex {
+                        active_glass_tex = Some(ActiveBackdropTexture {
+                            tex_id: blur_tex.id(),
+                            screen_rect: rect,
+                            uv_rect: uv,
+                        });
+                    }
+                    if let Some(gpu_source) = resolved.gpu_source {
+                        active_gpu = Some(ActiveGpuBackdrop {
+                            source: gpu_source,
+                            screen_rect: rect,
+                            uv_rect: uv,
+                            backdrop_dim: dim,
+                            generation,
+                        });
+                    }
                 } else {
                     paint_liquid_glass_ambient_backdrop(
                         ctx,
@@ -1082,6 +1944,13 @@ pub fn paint_launcher_background(
                         tokens,
                         deterministic,
                     );
+                    active_gpu = Some(ActiveGpuBackdrop {
+                        source: build_ambient_gpu_backdrop(ctx, &style, tokens, false),
+                        screen_rect: rect,
+                        uv_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        backdrop_dim: 0.0,
+                        generation,
+                    });
                 }
             }
             ThemePreset::Translucent => {
@@ -1107,8 +1976,14 @@ pub fn paint_launcher_background(
                         None
                     }
                 });
-            if let Some((tex, blur_tex, size)) = resolved {
-                let uv = draw_aspect_fill_wallpaper(painter, rect, &tex, size, style.window_alpha);
+            if let Some(resolved) = resolved {
+                let uv = draw_aspect_fill_wallpaper(
+                    painter,
+                    rect,
+                    &resolved.sharp_tex,
+                    resolved.size,
+                    style.window_alpha,
+                );
 
                 let dim = crate::state::safe_clamp_f32(cfg.backdrop_dim, 0.0, 0.92);
                 if dim > 0.01 {
@@ -1121,22 +1996,42 @@ pub fn paint_launcher_background(
                     painter.rect_filled(rect, CornerRadius::ZERO, scrim);
                 }
                 if cfg.preset == ThemePreset::LiquidGlass {
-                    active_glass_tex = Some(ActiveBackdropTexture {
-                        tex_id: blur_tex.id(),
-                        screen_rect: rect,
-                        uv_rect: uv,
-                    });
+                    if let Some(blur_tex) = resolved.blurred_tex {
+                        active_glass_tex = Some(ActiveBackdropTexture {
+                            tex_id: blur_tex.id(),
+                            screen_rect: rect,
+                            uv_rect: uv,
+                        });
+                    }
+                    if let Some(gpu_source) = resolved.gpu_source {
+                        active_gpu = Some(ActiveGpuBackdrop {
+                            source: gpu_source,
+                            screen_rect: rect,
+                            uv_rect: uv,
+                            backdrop_dim: dim,
+                            generation,
+                        });
+                    }
                 }
             } else {
                 match cfg.preset {
-                    ThemePreset::LiquidGlass => paint_liquid_glass_ambient_backdrop(
-                        ctx,
-                        painter,
-                        rect,
-                        &style,
-                        tokens,
-                        deterministic,
-                    ),
+                    ThemePreset::LiquidGlass => {
+                        paint_liquid_glass_ambient_backdrop(
+                            ctx,
+                            painter,
+                            rect,
+                            &style,
+                            tokens,
+                            deterministic,
+                        );
+                        active_gpu = Some(ActiveGpuBackdrop {
+                            source: build_ambient_gpu_backdrop(ctx, &style, tokens, false),
+                            screen_rect: rect,
+                            uv_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            backdrop_dim: 0.0,
+                            generation,
+                        });
+                    }
                     ThemePreset::Translucent => {
                         paint_translucent_clean_backdrop(painter, rect, &style, tokens)
                     }
@@ -1147,6 +2042,7 @@ pub fn paint_launcher_background(
     }
 
     store_active_backdrop_texture(ctx, active_glass_tex);
+    store_active_gpu_backdrop(ctx, active_gpu);
 }
 
 // Aliases for legacy call sites

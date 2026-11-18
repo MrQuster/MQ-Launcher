@@ -1,6 +1,9 @@
 //! Theme style parameters (`ThemeStyleParams`) and optical **Liquid Glass** renderer
-//! modeled 1:1 after the Serpantinum shader (`liquid_glass.frag` / `GlassFill.qml`),
-//! alongside the clean **Translucent** preset.
+//! using hardware-accelerated WGSL shaders via `egui_wgpu::CallbackTrait` (`PaintCallback`),
+//! with an automatic `egui::Mesh` + CPU-blur fallback when running under `egui_glow` / OpenGL.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use egui::epaint::{Mesh, Vertex};
 use egui::{
@@ -9,7 +12,10 @@ use egui::{
 };
 use mq_core::{ThemeConfig, ThemePreset};
 
-use crate::theme::{blend_color, Tokens};
+use crate::theme::{
+    active_gpu_backdrop, blend_color, is_wgpu_glass_available, ActiveGpuBackdrop,
+    LiquidGlassGpuResources, LiquidGlassUniforms, Tokens,
+};
 
 /// Active blurred wallpaper texture info shared between background painting and glass overlays.
 #[derive(Clone, Copy, Debug)]
@@ -634,8 +640,179 @@ fn build_serpantinum_refracted_glass_mesh(
     Some(mesh)
 }
 
-/// Collects Serpantinum Liquid Glass shapes (subtle drop shadow, blurred wallpaper refraction mesh,
-/// neutral frosted legibility veil, and meniscus inner highlight) strictly beneath child content.
+struct LiquidGlassCallback {
+    backdrop: Option<Arc<ActiveGpuBackdrop>>,
+    uniforms: LiquidGlassUniforms,
+    generation: u64,
+    slot_offset: AtomicU32,
+}
+
+impl egui_wgpu::CallbackTrait for LiquidGlassCallback {
+    fn prepare(
+        &self,
+        device: &egui_wgpu::wgpu::Device,
+        queue: &egui_wgpu::wgpu::Queue,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        egui_encoder: &mut egui_wgpu::wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<egui_wgpu::wgpu::CommandBuffer> {
+        let Some(resources) = callback_resources.get_mut::<LiquidGlassGpuResources>() else {
+            return Vec::new();
+        };
+        resources.begin_frame_if_needed(self.generation);
+        if let Some(ref backdrop) = self.backdrop {
+            resources.sync_backdrop(
+                device,
+                queue,
+                egui_encoder,
+                &backdrop.source,
+                screen_descriptor.size_in_pixels,
+            );
+        }
+        let mut u = self.uniforms;
+        u.screen_size = [
+            screen_descriptor.size_in_pixels[0].max(1) as f32,
+            screen_descriptor.size_in_pixels[1].max(1) as f32,
+        ];
+        let offset = resources.push_uniforms(&u);
+        self.slot_offset.store(offset, Ordering::Relaxed);
+        Vec::new()
+    }
+
+    fn finish_prepare(
+        &self,
+        device: &egui_wgpu::wgpu::Device,
+        queue: &egui_wgpu::wgpu::Queue,
+        _egui_encoder: &mut egui_wgpu::wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<egui_wgpu::wgpu::CommandBuffer> {
+        if let Some(resources) = callback_resources.get_mut::<LiquidGlassGpuResources>() {
+            resources.flush_uniforms(device, queue);
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        render_pass: &mut egui_wgpu::wgpu::RenderPass<'static>,
+        callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Some(resources) = callback_resources.get::<LiquidGlassGpuResources>() else {
+            return;
+        };
+        if info.screen_size_px[0] == 0 || info.screen_size_px[1] == 0 {
+            return;
+        }
+        render_pass.set_viewport(
+            0.0,
+            0.0,
+            info.screen_size_px[0] as f32,
+            info.screen_size_px[1] as f32,
+            0.0,
+            1.0,
+        );
+        render_pass.set_pipeline(resources.glass_pipeline());
+        let offset = self.slot_offset.load(Ordering::Relaxed);
+        render_pass.set_bind_group(0, resources.glass_bind_group(), &[offset]);
+        render_pass.draw(0..6, 0..1);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_gpu_liquid_glass_shape(
+    ctx: &Context,
+    rect: Rect,
+    callback_rect: Rect,
+    radius_pt: f32,
+    bevel_pt: f32,
+    tint_color: [f32; 4],
+    ior_strength: f32,
+    dispersion: f32,
+    spec_radius_pt: f32,
+    hover_t: f32,
+) -> Shape {
+    let ppp = ctx.pixels_per_point().max(0.5);
+    let screen_pts = ctx.screen_rect().size();
+    let screen_px = [(screen_pts.x * ppp).max(1.0), (screen_pts.y * ppp).max(1.0)];
+
+    let phys_min = [rect.left() * ppp, rect.top() * ppp];
+    let phys_size = [
+        (rect.width() * ppp).max(1.0),
+        (rect.height() * ppp).max(1.0),
+    ];
+    let corner_radius =
+        (radius_pt * ppp).clamp(0.0, (phys_size[0].min(phys_size[1]) * 0.49).max(0.0));
+    let bevel_width = if bevel_pt > 0.0 {
+        (bevel_pt * ppp).clamp(2.0 * ppp, (phys_size[0].min(phys_size[1]) * 0.45).max(1.0))
+    } else {
+        0.0
+    };
+
+    let cursor_pos = smoothed_pointer_pos(ctx)
+        .map(|p| [p.x * ppp, p.y * ppp])
+        .unwrap_or([-10000.0, -10000.0]);
+
+    let backdrop_opt = active_gpu_backdrop(ctx).map(Arc::new);
+    let (uv_min, uv_size, backdrop_min, backdrop_size, backdrop_dim, generation) =
+        if let Some(ref b) = backdrop_opt {
+            (
+                [b.uv_rect.left(), b.uv_rect.top()],
+                [b.uv_rect.width().max(0.001), b.uv_rect.height().max(0.001)],
+                [b.screen_rect.left() * ppp, b.screen_rect.top() * ppp],
+                [
+                    (b.screen_rect.width() * ppp).max(1.0),
+                    (b.screen_rect.height() * ppp).max(1.0),
+                ],
+                b.backdrop_dim,
+                b.generation,
+            )
+        } else {
+            (
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                screen_px,
+                0.0,
+                ctx.cumulative_pass_nr(),
+            )
+        };
+
+    let mut effective_tint = tint_color;
+    effective_tint[3] = (effective_tint[3] + backdrop_dim * 0.18).clamp(0.0, 0.90);
+
+    let uniforms = LiquidGlassUniforms {
+        rect_min: phys_min,
+        rect_size: phys_size,
+        screen_size: screen_px,
+        light_dir: [-0.5523, -0.8336],
+        uv_min,
+        uv_size,
+        backdrop_min,
+        backdrop_size,
+        tint_color: effective_tint,
+        corner_radius,
+        bevel_width,
+        ior_strength,
+        dispersion,
+        cursor_pos,
+        spec_radius: spec_radius_pt * ppp,
+        hover_t: hover_t.clamp(0.0, 1.0),
+    };
+
+    Shape::Callback(egui_wgpu::Callback::new_paint_callback(
+        callback_rect,
+        LiquidGlassCallback {
+            backdrop: backdrop_opt,
+            uniforms,
+            generation,
+            slot_offset: AtomicU32::new(0),
+        },
+    ))
+}
+
+/// Collects Liquid Glass shapes (`egui_wgpu::CallbackTrait` on wgpu, or Serpantinum `Mesh` + border
+/// on `glow`/CPU fallback) strictly beneath child content.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_glass_underlay_shapes(
     ctx: &Context,
@@ -655,9 +832,38 @@ pub fn collect_glass_underlay_shapes(
     let r = (radius.nw as f32)
         .min(rect.width() * 0.49)
         .min(rect.height() * 0.49);
+
+    if is_wgpu_glass_available(ctx) {
+        let bevel_pt = (rect.width().min(rect.height()) * 0.28).clamp(4.0, 12.0);
+        let veil_a = if is_button {
+            0.32 + 0.06 * hover_t
+        } else {
+            0.28 + 0.05 * hover_t
+        };
+        let tint = [16.0 / 255.0, 18.0 / 255.0, 24.0 / 255.0, veil_a];
+        let spec_r = if is_button {
+            style.specular_radius_button
+        } else {
+            style.specular_radius_card
+        };
+        out.push(build_gpu_liquid_glass_shape(
+            ctx,
+            rect,
+            rect.expand(3.0),
+            r,
+            bevel_pt,
+            tint,
+            if is_button { 0.036 } else { 0.045 },
+            0.11,
+            spec_r,
+            hover_t,
+        ));
+        return;
+    }
+
     let cr = CornerRadius::same(r.round() as u8);
 
-    // 1. Subtle Serpantinum drop shadow (`shadow = 0.13`, offset y +2px)
+    // Fallback (OpenGL / glow / unit tests): Subtle Serpantinum drop shadow
     if rect.height() >= 18.0 {
         out.push(Shape::rect_stroke(
             rect.translate(egui::vec2(0.0, 1.5)).expand(1.0),
@@ -670,12 +876,11 @@ pub fn collect_glass_underlay_shapes(
         ));
     }
 
-    // 2. Real blurred wallpaper refraction mesh (central lens zoom + bezel displacement)
+    // Fallback: CPU-blurred wallpaper refraction mesh
     if let Some(glass_mesh) =
         build_serpantinum_refracted_glass_mesh(ctx, rect, r, hover_t, is_button, None)
     {
         out.push(Shape::Mesh(glass_mesh.into()));
-        // Delicate translucent neutral dark glaze over the blurred backdrop so text always reads >= 5:1
         let veil_a = if is_button {
             (72.0 + 18.0 * hover_t).round() as u8
         } else {
@@ -687,7 +892,6 @@ pub fn collect_glass_underlay_shapes(
             Color32::from_rgba_unmultiplied(16, 18, 24, veil_a),
         ));
     } else {
-        // Clean neutral graphite glass fallback when no wallpaper texture exists
         let fallback_a =
             ((style.surface_alpha + 0.34 + 0.08 * hover_t).clamp(0.45, 0.84) * 255.0).round() as u8;
         out.push(Shape::rect_filled(
@@ -697,7 +901,6 @@ pub fn collect_glass_underlay_shapes(
         ));
     }
 
-    // 3. Soft internal meniscus gleam (`wide` top band in liquid_glass.frag)
     if style.inner_sheen_alpha > 0 && rect.height() > 14.0 && rect.width() > 16.0 {
         let sheen_h = (rect.height() * 0.22).clamp(4.0, 14.0);
         let sheen_rect = Rect::from_min_max(
@@ -719,7 +922,7 @@ pub fn collect_glass_underlay_shapes(
     }
 }
 
-/// Paints Serpantinum Liquid Glass surface and directional 1px bezel hairline border over `rect`.
+/// Paints Liquid Glass surface (`PaintCallback` in WGSL on wgpu, or `Mesh` border fallback on `glow`).
 #[allow(clippy::too_many_arguments)]
 pub fn paint_glass_surface_overlay(
     ctx: &Context,
@@ -751,28 +954,30 @@ pub fn paint_glass_surface_overlay(
         painter.add(shape);
     }
 
-    let r = (radius.nw as f32)
-        .min(rect.width() * 0.49)
-        .min(rect.height() * 0.49);
-    paint_refractive_gradient_border(
-        painter,
-        rect,
-        r,
-        style.refraction_top_left,
-        style.refraction_bottom_right,
-        tokens.accent,
-        smoothed_pointer_pos(ctx),
-        if is_button {
-            style.specular_radius_button
-        } else {
-            style.specular_radius_card
-        },
-        hover_t,
-    );
+    if !is_wgpu_glass_available(ctx) {
+        let r = (radius.nw as f32)
+            .min(rect.width() * 0.49)
+            .min(rect.height() * 0.49);
+        paint_refractive_gradient_border(
+            painter,
+            rect,
+            r,
+            style.refraction_top_left,
+            style.refraction_bottom_right,
+            tokens.accent,
+            smoothed_pointer_pos(ctx),
+            if is_button {
+                style.specular_radius_button
+            } else {
+                style.specular_radius_card
+            },
+            hover_t,
+        );
+    }
 }
 
-/// Paints a tinted variant of Serpantinum Liquid Glass for active navigation rows,
-/// segmented controls, and primary action buttons.
+/// Paints a tinted variant of Liquid Glass for active navigation rows, segmented controls, and
+/// primary action buttons (via WGSL `PaintCallback` on wgpu, or `Mesh` fallback on `glow`).
 #[allow(clippy::too_many_arguments)]
 pub fn paint_tinted_glass_pill(
     ctx: &Context,
@@ -792,12 +997,34 @@ pub fn paint_tinted_glass_pill(
         .min(rect.width() * 0.49)
         .min(rect.height() * 0.49);
 
+    if is_wgpu_glass_available(ctx) {
+        let bevel_pt = (rect.width().min(rect.height()) * 0.28).clamp(4.0, 11.0);
+        let tint_norm = [
+            tint.r() as f32 / 255.0,
+            tint.g() as f32 / 255.0,
+            tint.b() as f32 / 255.0,
+            0.32 + 0.08 * hover_t,
+        ];
+        painter.add(build_gpu_liquid_glass_shape(
+            ctx,
+            rect,
+            rect.expand(3.0),
+            r,
+            bevel_pt,
+            tint_norm,
+            0.036,
+            0.11,
+            style.specular_radius_button,
+            hover_t,
+        ));
+        return;
+    }
+
     if let Some(mesh) =
         build_serpantinum_refracted_glass_mesh(ctx, rect, r, hover_t, true, Some(tint))
     {
         painter.add(Shape::Mesh(mesh.into()));
     }
-    // Delicate translucent color tint matching `GlassFill.qml` (`tintAmount = 0.22..0.35`)
     painter.rect_filled(
         rect.shrink(0.5),
         CornerRadius::same(r.round() as u8),
@@ -850,7 +1077,20 @@ pub fn paint_sidebar_glass_dock(
         return;
     }
 
-    if let Some(backdrop) = active_backdrop_texture(ctx) {
+    if is_wgpu_glass_available(ctx) {
+        painter.add(build_gpu_liquid_glass_shape(
+            ctx,
+            rect,
+            rect,
+            0.0,
+            0.0,
+            [14.0 / 255.0, 16.0 / 255.0, 22.0 / 255.0, 0.34],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ));
+    } else if let Some(backdrop) = active_backdrop_texture(ctx) {
         let mut mesh = Mesh::with_texture(backdrop.tex_id);
         let col = Color32::from_rgb(176, 180, 190);
         for &pos in &[
@@ -896,7 +1136,7 @@ pub fn paint_sidebar_glass_dock(
     );
 }
 
-/// Renders bottom HUD dock using the same Serpantinum frosted wallpaper glass + 1px upper hairline.
+/// Renders bottom HUD dock using frosted blurred wallpaper glass + 1px upper hairline.
 pub fn paint_hud_glass_dock(
     ctx: &Context,
     painter: &Painter,
@@ -907,7 +1147,20 @@ pub fn paint_hud_glass_dock(
     if !rect.is_positive() || !style.refraction_border {
         return;
     }
-    if let Some(backdrop) = active_backdrop_texture(ctx) {
+    if is_wgpu_glass_available(ctx) {
+        painter.add(build_gpu_liquid_glass_shape(
+            ctx,
+            rect,
+            rect,
+            0.0,
+            0.0,
+            [14.0 / 255.0, 16.0 / 255.0, 22.0 / 255.0, 0.37],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ));
+    } else if let Some(backdrop) = active_backdrop_texture(ctx) {
         let mut mesh = Mesh::with_texture(backdrop.tex_id);
         let col = Color32::from_rgb(168, 172, 182);
         for &pos in &[
@@ -951,8 +1204,8 @@ pub fn paint_hud_glass_dock(
     );
 }
 
-/// Renders an `egui::Frame` with Serpantinum blurred glass interior + bezel refraction +
-/// 1px directional specular edge strictly beneath child widgets.
+/// Renders an `egui::Frame` with blurred glass interior + bezel refraction + 1px directional
+/// specular edge strictly beneath child widgets.
 pub fn show_themed_card<R>(
     ui: &mut Ui,
     frame: egui::Frame,
@@ -996,17 +1249,19 @@ pub fn show_themed_card<R>(
         ui.painter().set(overlay_slot, Shape::Vec(under_shapes));
     }
 
-    paint_refractive_gradient_border(
-        ui.painter(),
-        frame_resp.rect,
-        effective_radius.nw as f32,
-        style.refraction_top_left,
-        style.refraction_bottom_right,
-        tokens.accent,
-        smoothed_pointer_pos(ui.ctx()),
-        style.specular_radius_card,
-        hover_t,
-    );
+    if !is_wgpu_glass_available(ui.ctx()) {
+        paint_refractive_gradient_border(
+            ui.painter(),
+            frame_resp.rect,
+            effective_radius.nw as f32,
+            style.refraction_top_left,
+            style.refraction_bottom_right,
+            tokens.accent,
+            smoothed_pointer_pos(ui.ctx()),
+            style.specular_radius_card,
+            hover_t,
+        );
+    }
 
     InnerResponse::new(inner, frame_resp)
 }
@@ -1284,5 +1539,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gpu_liquid_glass_uniforms_alignment_dpi_scaling_and_callback_dispatch() {
+        assert_eq!(std::mem::size_of::<LiquidGlassUniforms>(), 112);
+        assert_eq!(std::mem::size_of::<LiquidGlassUniforms>() % 16, 0);
+
+        let ctx = Context::default();
+        ctx.set_pixels_per_point(2.0);
+        let cfg = ThemeConfig::preset_liquid_glass();
+        let style = ThemeStyleParams::from_config(&cfg);
+        let tokens = Tokens::from_config(&cfg);
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), egui::vec2(200.0, 80.0));
+
+        // 1. Without wgpu initialized, falls back cleanly to non-Callback Mesh/border shapes
+        let mut fallback_shapes = Vec::new();
+        collect_glass_underlay_shapes(
+            &ctx,
+            rect,
+            CornerRadius::same(10),
+            &style,
+            &tokens,
+            0.5,
+            false,
+            &mut fallback_shapes,
+        );
+        assert!(fallback_shapes
+            .iter()
+            .all(|s| !matches!(s, Shape::Callback(_))));
+
+        // 2. When wgpu glass is active, emits PaintCallback with coordinates scaled by pixels_per_point (2.0)
+        crate::theme::mark_wgpu_glass_available_for_test(&ctx);
+        let shape = build_gpu_liquid_glass_shape(
+            &ctx,
+            rect,
+            rect.expand(3.0),
+            10.0,
+            8.0,
+            [0.06, 0.07, 0.09, 0.25],
+            0.045,
+            0.24,
+            180.0,
+            0.5,
+        );
+        let Shape::Callback(cb) = shape else {
+            panic!("expected Shape::Callback when wgpu is active");
+        };
+        let glass_cb = cb
+            .callback
+            .downcast_ref::<egui_wgpu::Callback>()
+            .expect("expected egui_wgpu::Callback");
+        let _ = glass_cb;
+
+        let mut gpu_shapes = Vec::new();
+        collect_glass_underlay_shapes(
+            &ctx,
+            rect,
+            CornerRadius::same(10),
+            &style,
+            &tokens,
+            0.5,
+            false,
+            &mut gpu_shapes,
+        );
+        assert_eq!(gpu_shapes.len(), 1);
+        assert!(matches!(gpu_shapes[0], Shape::Callback(_)));
     }
 }

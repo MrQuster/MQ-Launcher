@@ -146,6 +146,7 @@ impl MqApp {
     pub fn new(cc: &eframe::CreationContext<'_>, state: UiState) -> Self {
         apply_theme(&cc.egui_ctx, &state.config.theme);
         configure_system_fonts(&cc.egui_ctx);
+        crate::theme::init_wgpu_liquid_glass(cc);
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::init_for_context(&cc.egui_ctx, &state.paths);
         Self::from_state(state)
