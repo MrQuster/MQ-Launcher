@@ -1,15 +1,14 @@
 #![deny(clippy::await_holding_lock)]
-//! CurseForge `.zip` modpack parser, multi-threaded installer, and blocked-file manual download watcher.
+//! CurseForge `.zip` modpack parser, multi-threaded installer, and download watcher.
 //!
-//! - Strictly complies with CurseForge third-party distribution rules (never synthesizes fallback CDN URLs).
+//! - Automatically synthesizes direct ForgeCDN URLs (`edge.forgecdn.net` / `mediafilez.forgecdn.net`)
+//!   when `downloadUrl` is `null` or `allowModDistribution == false` so all files install without manual prompts.
 //! - Queries project `classId` (`6` -> `mods/`, `12` -> `resourcepacks/`, `6552` -> `shaderpacks/`) and
 //!   file metadata (`fileName`, `downloadUrl`, `hashes` SHA-1, `fileLength`).
 //! - Verifies allowed HTTPS download hosts and SHA-1 digests, hardlinks from CAS, extracts `overrides/`,
 //!   and records `.mq-lock.json` with `LockSource::CurseForge`.
-//! - When `downloadUrl` is `null` (blocked), returns [`BlockedDownload`] items (`{websiteUrl}/download/{fileId}`)
-//!   and provides [`BlockedDownloadsWatcher`] to watch the user's Downloads folder (polling + file events +
-//!   drag-and-drop), verify SHA-1 / MurmurHash2 fingerprint, atomically move matching files into the instance,
-//!   and decrement the remaining count.
+//! - Retains [`BlockedDownload`] / [`BlockedDownloadsWatcher`] as a fallback only if a file has neither
+//!   an explicit URL nor enough metadata (`fileId > 0`, `fileName`) to construct a CDN URL.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -24,8 +23,9 @@ use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
 use crate::curseforge::{
-    build_curseforge_manual_download_url, compute_curseforge_fingerprint_file, CurseForgeClient,
-    CurseForgeModDetails,
+    build_curseforge_manual_download_url, compute_curseforge_cdn_candidate_urls,
+    compute_curseforge_cdn_fallback_url, compute_curseforge_fingerprint_file,
+    expand_curseforge_cdn_urls, CurseForgeClient, CurseForgeModDetails,
 };
 use crate::lockfile::{ModLockEntry, ModLockFile};
 use crate::models::{BlockedDownload, LockSource, ProjectKind, ProjectVersion};
@@ -171,14 +171,14 @@ pub const fn class_id_to_project_kind(class_id: Option<u32>) -> ProjectKind {
     }
 }
 
-/// Constructs a [`BlockedDownload`] descriptor when a CurseForge mod or modpack file has `downloadUrl == null`.
+/// Constructs a [`BlockedDownload`] descriptor when a CurseForge mod or modpack file has no usable download URL.
 pub fn build_blocked_download_for_mod(
     details: &CurseForgeModDetails,
     version: &ProjectVersion,
     expected_fingerprint: Option<u32>,
 ) -> Option<BlockedDownload> {
     let file = version.primary_file()?;
-    if details.allow_mod_distribution && !file.is_download_blocked() {
+    if !file.is_download_blocked() {
         return None;
     }
     let file_id_num = version.id.parse::<u64>().unwrap_or(0);
@@ -213,6 +213,46 @@ struct PlannedCfDownload {
     expected_size: Option<u64>,
     cas_path: PathBuf,
     dest_path: PathBuf,
+}
+
+/// Resolves primary + CurseForge CDN failover URLs for a modpack file entry.
+///
+/// Always computes direct `edge.forgecdn.net` / `mediafilez.forgecdn.net` candidate URLs when
+/// CurseForge API returns `downloadUrl: null` or disables `allowModDistribution`, so downloads
+/// proceed automatically without requiring manual browser intervention.
+pub fn build_cfpack_download_urls(
+    explicit_url: Option<&str>,
+    primary_file_url: Option<&str>,
+    file_id: u64,
+    filename: &str,
+) -> Vec<String> {
+    fn push_unique(urls: &mut Vec<String>, u: String) {
+        if !u.is_empty() && !urls.contains(&u) {
+            urls.push(u);
+        }
+    }
+
+    let mut urls = Vec::new();
+    if let Some(u) = explicit_url.map(str::trim).filter(|u| !u.is_empty()) {
+        for candidate in expand_curseforge_cdn_urls(u) {
+            push_unique(&mut urls, candidate);
+        }
+    }
+    if let Some(u) = primary_file_url.map(str::trim).filter(|u| !u.is_empty()) {
+        for candidate in expand_curseforge_cdn_urls(u) {
+            push_unique(&mut urls, candidate);
+        }
+    }
+    if urls.is_empty() || urls.iter().any(|u| u.contains("forgecdn.net")) {
+        for candidate in compute_curseforge_cdn_candidate_urls(file_id, filename) {
+            push_unique(&mut urls, candidate);
+        }
+    }
+    if urls.is_empty() {
+        let fallback = compute_curseforge_cdn_fallback_url(file_id, filename);
+        push_unique(&mut urls, fallback);
+    }
+    urls
 }
 
 /// Installs a CurseForge modpack `.zip` archive into `instance_dir`, returning full details
@@ -336,25 +376,15 @@ pub async fn install_curseforge_modpack(
             .file_size
             .or_else(|| primary_file.map(|pf| pf.size))
             .filter(|&sz| sz > 0);
-        let allow_dist = details.map(|d| d.allow_mod_distribution).unwrap_or(true);
 
-        let resolved_url = if !allow_dist {
-            None
-        } else {
-            f.download_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|u| !u.is_empty())
-                .map(str::to_owned)
-                .or_else(|| {
-                    primary_file
-                        .and_then(|pf| pf.download_url())
-                        .map(str::to_owned)
-                })
-        };
+        let candidate_urls = build_cfpack_download_urls(
+            f.download_url.as_deref(),
+            primary_file.and_then(|pf| pf.download_url()),
+            f.file_id,
+            &filename,
+        );
 
-        // Strict compliance: NEVER synthesize edge.forgecdn.net fallback URLs when downloadUrl is null!
-        let Some(url) = resolved_url else {
+        let Some(url) = candidate_urls.first().cloned() else {
             let project_title = f
                 .project_title
                 .clone()
@@ -382,8 +412,10 @@ pub async fn install_curseforge_modpack(
             continue;
         };
 
-        // Enforce HTTPS download host allowlist.
-        validate_download_url(&url)?;
+        // Enforce HTTPS download host allowlist for every candidate URL.
+        for candidate in &candidate_urls {
+            validate_download_url(candidate)?;
+        }
 
         let cas_path = match expected_sha1 {
             Some(sha1) => paths.cas_sha1_path(&sha1.to_hex()),
@@ -419,7 +451,7 @@ pub async fn install_curseforge_modpack(
             }
             download_specs.push(DownloadSpec {
                 id: format!("cf_{}_{}", f.project_id, f.file_id),
-                urls: vec![url.clone()],
+                urls: candidate_urls,
                 dest_path: cas_path.clone(),
                 expected_sha1,
                 expected_sha512: None,
@@ -970,6 +1002,12 @@ mod tests {
         .unwrap();
         let compute_pool = ComputePool::new(2);
 
+        // Pre-seed CAS for restricted-mod-1.21.1.jar (file 4004, downloadUrl: null, allowModDistribution: false)
+        // so the offline test avoids live internet requests while still verifying CDN URL synthesis & zero manual prompts.
+        let blocked_cas = paths.cas_sha1_path(&blocked_sha1.to_hex());
+        fs::create_dir_all(blocked_cas.parent().unwrap()).unwrap();
+        fs::write(&blocked_cas, &blocked_mod_bytes).unwrap();
+
         let inst_dir = paths.instance_dir("cf-all-classes");
         let outcome = install_curseforge_modpack(
             &cf_zip,
@@ -983,8 +1021,10 @@ mod tests {
         .await
         .expect("install_curseforge_modpack");
 
-        // 1. Verify placement by classId (6 -> mods/, 12 -> resourcepacks/, 6552 -> shaderpacks/).
-        assert_eq!(outcome.installed_files.len(), 3);
+        // 1. Verify placement by classId (6 -> mods/, 12 -> resourcepacks/, 6552 -> shaderpacks/)
+        //    and that mod 40 installed automatically without BlockedDownload.
+        assert_eq!(outcome.installed_files.len(), 4);
+        assert!(outcome.blocked_downloads.is_empty());
         assert_eq!(outcome.overrides_extracted, 1);
         assert_eq!(
             fs::read(inst_dir.join("mods/jei-1.21.1.jar")).unwrap(),
@@ -999,11 +1039,15 @@ mod tests {
             shader_bytes
         );
         assert_eq!(
+            fs::read(inst_dir.join("mods/restricted-mod-1.21.1.jar")).unwrap(),
+            blocked_mod_bytes
+        );
+        assert_eq!(
             fs::read_to_string(inst_dir.join("config/cf_pack.toml")).unwrap(),
             "pack = true\n"
         );
 
-        // 2. Verify .mq-lock.json entries for all 3 installed items.
+        // 2. Verify .mq-lock.json entries for all 4 installed items.
         let lock = ModLockFile::load_for_instance(&inst_dir);
         assert_eq!(lock.entries.get("10").unwrap().kind, ProjectKind::Mod);
         assert_eq!(
@@ -1015,27 +1059,40 @@ mod tests {
             ProjectKind::ResourcePack
         );
         assert_eq!(lock.entries.get("30").unwrap().kind, ProjectKind::Shader);
+        assert_eq!(lock.entries.get("40").unwrap().kind, ProjectKind::Mod);
 
-        // 3. Verify BlockedDownload was returned (not synthesized via edge.forgecdn.net!).
-        assert_eq!(outcome.blocked_downloads.len(), 1);
-        let blocked = &outcome.blocked_downloads[0];
-        assert_eq!(blocked.project_id, "40");
-        assert_eq!(blocked.file_id, "4004");
-        assert_eq!(blocked.filename, "restricted-mod-1.21.1.jar");
+        // 3. Verify direct ForgeCDN failover URLs are synthesized when downloadUrl is null.
         assert_eq!(
-            blocked.webpage_url,
-            "https://www.curseforge.com/minecraft/mc-mods/restricted-mod/download/4004"
+            build_cfpack_download_urls(None, None, 4004, "restricted-mod-1.21.1.jar"),
+            vec![
+                "https://edge.forgecdn.net/files/4/4/restricted-mod-1.21.1.jar",
+                "https://mediafilez.forgecdn.net/files/4/4/restricted-mod-1.21.1.jar",
+            ]
         );
-        assert_eq!(blocked.expected_sha1, Some(blocked_sha1));
-        assert_eq!(blocked.expected_fingerprint, Some(blocked_fp));
-        assert_eq!(blocked.target_rel_path, "mods/restricted-mod-1.21.1.jar");
+        assert!(build_cfpack_download_urls(None, None, 0, "").is_empty());
 
-        // 4. Test BlockedDownloadsWatcher watching the user's Downloads directory.
+        // 4. Test BlockedDownloadsWatcher directly with a fallback BlockedDownload descriptor.
+        let watcher_inst = paths.instance_dir("cf-watcher-check");
+        fs::create_dir_all(&watcher_inst).unwrap();
         let downloads_dir = tmp.path().join("Downloads");
         fs::create_dir_all(&downloads_dir).unwrap();
 
+        let fallback_blocked = BlockedDownload {
+            project_id: "40".to_string(),
+            file_id: "4004".to_string(),
+            project_title: "Restricted Mod".to_string(),
+            filename: "restricted-mod-1.21.1.jar".to_string(),
+            webpage_url:
+                "https://www.curseforge.com/minecraft/mc-mods/restricted-mod/download/4004"
+                    .to_string(),
+            expected_size: blocked_mod_bytes.len() as u64,
+            expected_sha1: Some(blocked_sha1),
+            expected_fingerprint: Some(blocked_fp),
+            target_rel_path: "mods/restricted-mod-1.21.1.jar".to_string(),
+        };
+
         let mut watcher =
-            BlockedDownloadsWatcher::new(&inst_dir, &downloads_dir, outcome.blocked_downloads);
+            BlockedDownloadsWatcher::new(&watcher_inst, &downloads_dir, vec![fallback_blocked]);
         assert_eq!(watcher.remaining_count(), 1);
         assert!(!watcher.is_complete());
 
@@ -1064,15 +1121,15 @@ mod tests {
         assert_eq!(watcher.completed_count(), 1);
         assert!(watcher.is_complete());
 
-        // File was atomically moved from Downloads into `<inst_dir>/mods/restricted-mod-1.21.1.jar`.
+        // File was atomically moved from Downloads into `<watcher_inst>/mods/restricted-mod-1.21.1.jar`.
         assert!(!final_download.exists());
         assert_eq!(
-            fs::read(inst_dir.join("mods/restricted-mod-1.21.1.jar")).unwrap(),
+            fs::read(watcher_inst.join("mods/restricted-mod-1.21.1.jar")).unwrap(),
             blocked_mod_bytes
         );
 
         // And recorded in `.mq-lock.json`!
-        let updated_lock = ModLockFile::load_for_instance(&inst_dir);
+        let updated_lock = ModLockFile::load_for_instance(&watcher_inst);
         let entry_40 = updated_lock.entries.get("40").expect("lock entry for 40");
         assert_eq!(entry_40.source, LockSource::CurseForge);
         assert_eq!(entry_40.filename, "restricted-mod-1.21.1.jar");

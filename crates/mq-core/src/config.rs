@@ -383,24 +383,24 @@ impl ThemeConfig {
     pub fn preset_liquid_glass() -> Self {
         Self {
             preset: ThemePreset::LiquidGlass,
-            window_opacity: 0.88,
-            card_opacity: 0.62,
-            border_glow: 0.65,
-            bg_window: [0x0B, 0x11, 0x1E],
-            bg_card: [0x16, 0x22, 0x36],
-            accent_primary: [0x58, 0xB8, 0xF8],
-            accent_secondary: [0x3B, 0x93, 0xD8],
-            text_primary: [0xF4, 0xF8, 0xFF],
-            text_muted: [0xB0, 0xC2, 0xDA],
-            status_success: [0x4C, 0xC3, 0x8A],
-            status_error: [0xF0, 0x55, 0x60],
-            corner_radius: 12.0,
+            window_opacity: 0.92,
+            card_opacity: 0.32,
+            border_glow: 0.45,
+            bg_window: [0x10, 0x10, 0x14],
+            bg_card: [0x1A, 0x1A, 0x24],
+            accent_primary: [0xA6, 0xC6, 0xE8],
+            accent_secondary: [0x82, 0xA8, 0xCE],
+            text_primary: [0xF2, 0xF5, 0xFA],
+            text_muted: [0xB2, 0xBC, 0xCB],
+            status_success: [0x52, 0xC4, 0x8E],
+            status_error: [0xEB, 0x5A, 0x65],
+            corner_radius: 10.0,
             density: UiDensity::Comfortable,
             ui_scale: 1.0,
             font_size: 14.0,
             background_style: BackgroundStyle::Procedural,
             backdrop_path: None,
-            backdrop_dim: 0.0,
+            backdrop_dim: 0.18,
             launch_action: LaunchAction::KeepOpen,
         }
     }
@@ -472,7 +472,11 @@ impl ThemeConfig {
         };
         new_cfg.background_style = self.background_style;
         new_cfg.backdrop_path = self.backdrop_path.clone();
-        new_cfg.backdrop_dim = self.backdrop_dim;
+        new_cfg.backdrop_dim = if preset == ThemePreset::LiquidGlass {
+            self.backdrop_dim.min(0.24)
+        } else {
+            self.backdrop_dim
+        };
         new_cfg.launch_action = self.launch_action;
         *self = new_cfg;
     }
@@ -957,11 +961,11 @@ mod tests {
 
         let glass = ThemeConfig::preset_liquid_glass();
         assert_eq!(glass.preset, ThemePreset::LiquidGlass);
-        assert!((glass.window_opacity - 0.88).abs() < 1e-6);
-        assert!((glass.card_opacity - 0.62).abs() < 1e-6);
-        assert!((glass.border_glow - 0.65).abs() < 1e-6);
-        assert_eq!(glass.corner_radius, 12.0);
-        assert_eq!(glass.bg_window, [0x0B, 0x11, 0x1E]);
+        assert!((glass.window_opacity - 0.92).abs() < 1e-6);
+        assert!((glass.card_opacity - 0.32).abs() < 1e-6);
+        assert!((glass.border_glow - 0.45).abs() < 1e-6);
+        assert_eq!(glass.corner_radius, 10.0);
+        assert_eq!(glass.bg_window, [0x10, 0x10, 0x14]);
 
         let trans = ThemeConfig::preset_translucent();
         assert_eq!(trans.preset, ThemePreset::Translucent);

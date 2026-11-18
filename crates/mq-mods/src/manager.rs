@@ -11,7 +11,7 @@ use mq_core::{resolve_safe_path, MqError, MqPaths, MqResult, Sha1Digest, Sha512D
 use mq_net::{DownloadSpec, NetEngine};
 use mq_sched::EpochGuard;
 
-use crate::curseforge::is_allowed_curseforge_download_url;
+use crate::curseforge::{expand_curseforge_cdn_urls, is_allowed_curseforge_download_url};
 use crate::lockfile::{ModLockEntry, ModLockFile};
 use crate::models::{LockSource, ProjectKind, ResolvedModDownload};
 use crate::modrinth::is_allowed_modrinth_download_url;
@@ -200,7 +200,7 @@ async fn install_resolved_To_dir(
 
         download_specs.push(DownloadSpec {
             id: format!("{}_{}_{}", kind, d.project_id, d.version_id),
-            urls: vec![d.url.clone()],
+            urls: expand_curseforge_cdn_urls(&d.url),
             dest_path: cas_blob.clone(),
             expected_sha1: d.sha1,
             expected_sha512: d.sha512,
@@ -388,7 +388,7 @@ pub async fn update_installed_content(
                 "update_{}_{}_{}",
                 kind, new_download.project_id, new_download.version_id
             ),
-            urls: vec![new_download.url.clone()],
+            urls: expand_curseforge_cdn_urls(&new_download.url),
             dest_path: cas_blob.clone(),
             expected_sha1: new_download.sha1,
             expected_sha512: new_download.sha512,

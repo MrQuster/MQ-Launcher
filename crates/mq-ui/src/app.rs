@@ -1275,8 +1275,8 @@ impl MqApp {
         }
     }
 
-    /// Paints seamless full-window aurora/translucent backdrop behind sidebar, HUD, and central
-    /// area when running in `LiquidGlass` or `Translucent` with `Procedural` background.
+    /// Paints seamless full-window blurred wallpaper / aurora backdrop behind sidebar, HUD,
+    /// and central area when running in `LiquidGlass` or `Translucent`.
     fn paint_full_window_glass_backdrop(
         ctx: &egui::Context,
         effective_theme: &mq_core::ThemeConfig,
@@ -1284,7 +1284,9 @@ impl MqApp {
     ) -> bool {
         let full_window = matches!(
             effective_theme.background_style,
-            mq_core::BackgroundStyle::Procedural | mq_core::BackgroundStyle::Solid
+            mq_core::BackgroundStyle::Procedural
+                | mq_core::BackgroundStyle::Solid
+                | mq_core::BackgroundStyle::CustomImage
         ) && matches!(
             effective_theme.preset,
             mq_core::ThemePreset::LiquidGlass | mq_core::ThemePreset::Translucent

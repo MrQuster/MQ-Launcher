@@ -14,7 +14,8 @@ use egui::{
 use mq_core::{BackgroundStyle, ThemeConfig, ThemePreset, UiDensity};
 
 use crate::theme_styles::{
-    paint_liquid_glass_ambient_backdrop, paint_translucent_clean_backdrop, ThemeStyleParams,
+    paint_liquid_glass_ambient_backdrop, paint_translucent_clean_backdrop,
+    store_active_backdrop_texture, ActiveBackdropTexture, ThemeStyleParams,
 };
 
 /// Curated calm accent swatch preset for customization controls.
@@ -249,25 +250,25 @@ impl Tokens {
         }
     }
 
-    /// Liquid Glass — deep oceanic slate base tuned for Apple-style frosted translucency & icy refraction.
+    /// Liquid Glass (`Serpantinum v2.5.1` style) — neutral charcoal base with frosted crystal clarity.
     pub const fn liquid_glass() -> Self {
         Self {
-            bg_app: Color32::from_rgb(0x0B, 0x11, 0x1E),
-            bg_sidebar: Color32::from_rgb(0x10, 0x18, 0x28),
-            bg_surface: Color32::from_rgb(0x16, 0x22, 0x36),
-            bg_surface_hover: Color32::from_rgb(0x20, 0x30, 0x4B),
-            bg_input: Color32::from_rgb(0x0E, 0x15, 0x23),
-            border: Color32::from_rgb(0x32, 0x46, 0x66),
-            border_strong: Color32::from_rgb(0x52, 0x6F, 0x99),
-            text: Color32::from_rgb(0xF4, 0xF8, 0xFF),
-            text_muted: Color32::from_rgb(0xB0, 0xC2, 0xDA),
-            text_disabled: Color32::from_rgb(0x64, 0x77, 0x93),
-            accent: Color32::from_rgb(0x58, 0xB8, 0xF8),
-            accent_hover: Color32::from_rgb(0x3B, 0x93, 0xD8),
-            accent_text: Color32::from_rgb(0x07, 0x12, 0x1E),
-            danger: Color32::from_rgb(0xF0, 0x55, 0x60),
+            bg_app: Color32::from_rgb(0x10, 0x10, 0x14),
+            bg_sidebar: Color32::from_rgb(0x16, 0x17, 0x1C),
+            bg_surface: Color32::from_rgb(0x1A, 0x1C, 0x24),
+            bg_surface_hover: Color32::from_rgb(0x25, 0x28, 0x34),
+            bg_input: Color32::from_rgb(0x14, 0x16, 0x1C),
+            border: Color32::from_rgb(0x38, 0x3D, 0x4A),
+            border_strong: Color32::from_rgb(0x58, 0x60, 0x73),
+            text: Color32::from_rgb(0xF2, 0xF5, 0xFA),
+            text_muted: Color32::from_rgb(0xB2, 0xBC, 0xCB),
+            text_disabled: Color32::from_rgb(0x6D, 0x75, 0x85),
+            accent: Color32::from_rgb(0xA6, 0xC6, 0xE8),
+            accent_hover: Color32::from_rgb(0x82, 0xA8, 0xCE),
+            accent_text: Color32::from_rgb(0x0D, 0x10, 0x16),
+            danger: Color32::from_rgb(0xEB, 0x5A, 0x65),
             warning: Color32::from_rgb(0xF5, 0xAD, 0x36),
-            success: Color32::from_rgb(0x4C, 0xC3, 0x8A),
+            success: Color32::from_rgb(0x52, 0xC4, 0x8E),
         }
     }
 
@@ -685,10 +686,7 @@ pub fn solid_hud_frame_with_config(tokens: &Tokens, cfg: &ThemeConfig) -> Frame 
     let style = ThemeStyleParams::from_config(cfg);
     if style.refraction_border {
         return Frame::new()
-            .fill(crate::theme_styles::with_alpha(
-                tokens.bg_sidebar,
-                style.hud_alpha * 0.78,
-            ))
+            .fill(Color32::TRANSPARENT)
             .stroke(Stroke::NONE)
             .inner_margin(Margin::symmetric(12, 4));
     }
@@ -710,10 +708,117 @@ pub fn solid_hud_frame(tokens: &Tokens) -> Frame {
 struct CachedBackdrop {
     path: String,
     texture: Option<TextureHandle>,
+    blurred_texture: Option<TextureHandle>,
     size: [usize; 2],
 }
 
-fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<(TextureHandle, [usize; 2])> {
+fn build_blurred_backdrop_image(src: &[u8], w: usize, h: usize) -> ColorImage {
+    let scale = (480.0 / (w.max(h) as f32)).min(1.0);
+    let dw = ((w as f32 * scale).round() as usize).max(16);
+    let dh = ((h as f32 * scale).round() as usize).max(16);
+    let mut buf = vec![0.0_f32; dw * dh * 4];
+    for y in 0..dh {
+        let sy = ((y as f32 + 0.5) * h as f32 / dh as f32 - 0.5)
+            .clamp(0.0, (h.saturating_sub(1)) as f32) as usize;
+        for x in 0..dw {
+            let sx = ((x as f32 + 0.5) * w as f32 / dw as f32 - 0.5)
+                .clamp(0.0, (w.saturating_sub(1)) as f32) as usize;
+            let si = (sy * w + sx) * 4;
+            let di = (y * dw + x) * 4;
+            buf[di] = src[si] as f32;
+            buf[di + 1] = src[si + 1] as f32;
+            buf[di + 2] = src[si + 2] as f32;
+            buf[di + 3] = 255.0;
+        }
+    }
+
+    let mut tmp = vec![0.0_f32; dw * dh * 4];
+    let rad = 7isize;
+    for _pass in 0..2 {
+        // Horizontal box blur using sliding sum
+        for y in 0..dh {
+            let row = y * dw * 4;
+            let mut acc = [0.0_f32; 3];
+            let mut cnt = 0.0_f32;
+            for x in 0..=(rad as usize).min(dw - 1) {
+                let idx = row + x * 4;
+                acc[0] += buf[idx];
+                acc[1] += buf[idx + 1];
+                acc[2] += buf[idx + 2];
+                cnt += 1.0;
+            }
+            for x in 0..dw {
+                let xi = x as isize;
+                if xi - rad > 0 {
+                    let rem = row + ((xi - rad - 1) as usize) * 4;
+                    acc[0] -= buf[rem];
+                    acc[1] -= buf[rem + 1];
+                    acc[2] -= buf[rem + 2];
+                    cnt -= 1.0;
+                }
+                if x > 0 && xi + rad < dw as isize {
+                    let add = row + ((xi + rad) as usize) * 4;
+                    acc[0] += buf[add];
+                    acc[1] += buf[add + 1];
+                    acc[2] += buf[add + 2];
+                    cnt += 1.0;
+                }
+                let di = row + x * 4;
+                let inv = 1.0 / cnt.max(1.0);
+                tmp[di] = acc[0] * inv;
+                tmp[di + 1] = acc[1] * inv;
+                tmp[di + 2] = acc[2] * inv;
+                tmp[di + 3] = 255.0;
+            }
+        }
+        // Vertical box blur using sliding sum
+        for x in 0..dw {
+            let mut acc = [0.0_f32; 3];
+            let mut cnt = 0.0_f32;
+            for y in 0..=(rad as usize).min(dh - 1) {
+                let idx = (y * dw + x) * 4;
+                acc[0] += tmp[idx];
+                acc[1] += tmp[idx + 1];
+                acc[2] += tmp[idx + 2];
+                cnt += 1.0;
+            }
+            for y in 0..dh {
+                let yi = y as isize;
+                if yi - rad > 0 {
+                    let rem = (((yi - rad - 1) as usize) * dw + x) * 4;
+                    acc[0] -= tmp[rem];
+                    acc[1] -= tmp[rem + 1];
+                    acc[2] -= tmp[rem + 2];
+                    cnt -= 1.0;
+                }
+                if y > 0 && yi + rad < dh as isize {
+                    let add = (((yi + rad) as usize) * dw + x) * 4;
+                    acc[0] += tmp[add];
+                    acc[1] += tmp[add + 1];
+                    acc[2] += tmp[add + 2];
+                    cnt += 1.0;
+                }
+                let di = (y * dw + x) * 4;
+                let inv = 1.0 / cnt.max(1.0);
+                buf[di] = acc[0] * inv;
+                buf[di + 1] = acc[1] * inv;
+                buf[di + 2] = acc[2] * inv;
+                buf[di + 3] = 255.0;
+            }
+        }
+    }
+
+    let out_rgba: Vec<u8> = buf
+        .into_iter()
+        .map(|v| v.round().clamp(0.0, 255.0) as u8)
+        .collect();
+    ColorImage::from_rgba_unmultiplied([dw, dh], &out_rgba)
+}
+
+fn resolve_backdrop_texture(
+    ctx: &Context,
+    path: &str,
+) -> Option<(TextureHandle, TextureHandle, [usize; 2])> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return None;
@@ -722,7 +827,10 @@ fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<(TextureHandle,
     let cache_id = Id::new("mq_backdrop_tex_cache");
     if let Some(cached) = ctx.data(|d| d.get_temp::<CachedBackdrop>(cache_id)) {
         if cached.path == trimmed {
-            return cached.texture.map(|tex| (tex, cached.size));
+            if let (Some(t), Some(b)) = (cached.texture, cached.blurred_texture) {
+                return Some((t, b, cached.size));
+            }
+            return None;
         }
     }
 
@@ -736,7 +844,10 @@ fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<(TextureHandle,
         }
         let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
         let tex = ctx.load_texture("mq_custom_backdrop", color_image, TextureOptions::LINEAR);
-        Some((tex, size))
+        let blur_image = build_blurred_backdrop_image(rgba.as_raw(), size[0], size[1]);
+        let blur_tex =
+            ctx.load_texture("mq_glass_blur_backdrop", blur_image, TextureOptions::LINEAR);
+        Some((tex, blur_tex, size))
     })();
 
     ctx.data_mut(|d| {
@@ -744,13 +855,24 @@ fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<(TextureHandle,
             cache_id,
             CachedBackdrop {
                 path: trimmed.to_owned(),
-                texture: loaded.as_ref().map(|(t, _)| t.clone()),
-                size: loaded.as_ref().map(|(_, s)| *s).unwrap_or([1, 1]),
+                texture: loaded.as_ref().map(|(t, _, _)| t.clone()),
+                blurred_texture: loaded.as_ref().map(|(_, b, _)| b.clone()),
+                size: loaded.as_ref().map(|(_, _, s)| *s).unwrap_or([1, 1]),
             },
         );
     });
 
     loaded
+}
+
+fn serpantinum_wallpaper_fallback_path() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let p = Path::new(&home)
+        .join(".cache")
+        .join("serpantinum")
+        .join("wallpaper")
+        .join("current_wallpaper.png");
+    p.is_file().then(|| p.to_string_lossy().into_owned())
 }
 
 fn paint_procedural_backdrop(painter: &Painter, rect: Rect, tokens: &Tokens) {
@@ -877,6 +999,34 @@ fn is_deterministic_backdrop(ctx: &Context) -> bool {
     }
 }
 
+fn draw_aspect_fill_wallpaper(
+    painter: &Painter,
+    rect: Rect,
+    tex: &TextureHandle,
+    size: [usize; 2],
+    window_alpha: f32,
+) -> Rect {
+    let tex_aspect = (size[0] as f32) / (size[1].max(1) as f32);
+    let rect_aspect = rect.width() / rect.height().max(1.0);
+    let uv = if rect_aspect > tex_aspect {
+        let h = tex_aspect / rect_aspect;
+        let pad = (1.0 - h) * 0.5;
+        Rect::from_min_max(Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
+    } else {
+        let w = rect_aspect / tex_aspect;
+        let pad = (1.0 - w) * 0.5;
+        Rect::from_min_max(Pos2::new(pad, 0.0), Pos2::new(1.0 - pad, 1.0))
+    };
+    let tint = Color32::from_rgba_unmultiplied(
+        255,
+        255,
+        255,
+        (crate::state::safe_clamp_f32(window_alpha, 0.35, 1.0) * 255.0).round() as u8,
+    );
+    painter.image(tex.id(), rect, uv, tint);
+    uv
+}
+
 /// Paints the configured launcher backdrop (`Procedural`, `Solid`, or `CustomImage`) inside `rect`.
 pub fn paint_launcher_background(
     ctx: &Context,
@@ -890,6 +1040,7 @@ pub fn paint_launcher_background(
     }
     let style = ThemeStyleParams::from_config(cfg);
     let deterministic = is_deterministic_backdrop(ctx);
+    let mut active_glass_tex: Option<ActiveBackdropTexture> = None;
 
     match cfg.background_style {
         BackgroundStyle::Solid => {
@@ -897,14 +1048,41 @@ pub fn paint_launcher_background(
         }
         BackgroundStyle::Procedural => match cfg.preset {
             ThemePreset::LiquidGlass => {
-                paint_liquid_glass_ambient_backdrop(
-                    ctx,
-                    painter,
-                    rect,
-                    &style,
-                    tokens,
-                    deterministic,
-                );
+                if let Some((tex, blur_tex, size)) = serpantinum_wallpaper_fallback_path()
+                    .as_deref()
+                    .and_then(|p| resolve_backdrop_texture(ctx, p))
+                {
+                    painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
+                    let uv =
+                        draw_aspect_fill_wallpaper(painter, rect, &tex, size, style.window_alpha);
+                    let dim = crate::state::safe_clamp_f32(cfg.backdrop_dim, 0.0, 0.92);
+                    if dim > 0.01 {
+                        painter.rect_filled(
+                            rect,
+                            CornerRadius::ZERO,
+                            Color32::from_rgba_unmultiplied(
+                                tokens.bg_app.r(),
+                                tokens.bg_app.g(),
+                                tokens.bg_app.b(),
+                                (dim * 255.0).round() as u8,
+                            ),
+                        );
+                    }
+                    active_glass_tex = Some(ActiveBackdropTexture {
+                        tex_id: blur_tex.id(),
+                        screen_rect: rect,
+                        uv_rect: uv,
+                    });
+                } else {
+                    paint_liquid_glass_ambient_backdrop(
+                        ctx,
+                        painter,
+                        rect,
+                        &style,
+                        tokens,
+                        deterministic,
+                    );
+                }
             }
             ThemePreset::Translucent => {
                 paint_translucent_clean_backdrop(painter, rect, &style, tokens);
@@ -916,23 +1094,21 @@ pub fn paint_launcher_background(
         },
         BackgroundStyle::CustomImage => {
             painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
-            if let Some((tex, size)) = cfg
+            let resolved = cfg
                 .backdrop_path
                 .as_deref()
                 .and_then(|p| resolve_backdrop_texture(ctx, p))
-            {
-                let tex_aspect = (size[0] as f32) / (size[1].max(1) as f32);
-                let rect_aspect = rect.width() / rect.height().max(1.0);
-                let uv = if rect_aspect > tex_aspect {
-                    let h = tex_aspect / rect_aspect;
-                    let pad = (1.0 - h) * 0.5;
-                    Rect::from_min_max(Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
-                } else {
-                    let w = rect_aspect / tex_aspect;
-                    let pad = (1.0 - w) * 0.5;
-                    Rect::from_min_max(Pos2::new(pad, 0.0), Pos2::new(1.0 - pad, 1.0))
-                };
-                painter.image(tex.id(), rect, uv, Color32::WHITE);
+                .or_else(|| {
+                    if cfg.preset == ThemePreset::LiquidGlass {
+                        serpantinum_wallpaper_fallback_path()
+                            .as_deref()
+                            .and_then(|p| resolve_backdrop_texture(ctx, p))
+                    } else {
+                        None
+                    }
+                });
+            if let Some((tex, blur_tex, size)) = resolved {
+                let uv = draw_aspect_fill_wallpaper(painter, rect, &tex, size, style.window_alpha);
 
                 let dim = crate::state::safe_clamp_f32(cfg.backdrop_dim, 0.0, 0.92);
                 if dim > 0.01 {
@@ -943,6 +1119,13 @@ pub fn paint_launcher_background(
                         (dim * 255.0).round() as u8,
                     );
                     painter.rect_filled(rect, CornerRadius::ZERO, scrim);
+                }
+                if cfg.preset == ThemePreset::LiquidGlass {
+                    active_glass_tex = Some(ActiveBackdropTexture {
+                        tex_id: blur_tex.id(),
+                        screen_rect: rect,
+                        uv_rect: uv,
+                    });
                 }
             } else {
                 match cfg.preset {
@@ -962,6 +1145,8 @@ pub fn paint_launcher_background(
             }
         }
     }
+
+    store_active_backdrop_texture(ctx, active_glass_tex);
 }
 
 // Aliases for legacy call sites

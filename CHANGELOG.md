@@ -5,6 +5,18 @@
 
 ---
 
+## [v2.6.10] — 2026-11-18 ("Serpantinum 1:1 Liquid Glass & Automatic CurseForge CDN Downloads")
+
+### Добавлено и улучшено
+- **Liquid Glass (Serpantinum 1:1) (`mq-ui/theme_styles`, `theme`, `app`, `settings_view`, `mq-core`):**
+  - Преломление размытых фоновых обоев по закону Снеллиуса на 10px скруглённых фасках (`LENS_ZOOM = 0.045`), тонкий 1px направленный серебристо-белый кант (`lightDir = normalize(-0.55, -0.83)`) и нейтральная тёмно-угольная матовая глазурь вместо мутной синей сетки и больших курсорных многоугольников.
+  - Полноэкранная отрисовка обоев (`CustomImage` и автоматический фолбэк `~/.cache/serpantinum/wallpaper/current_wallpaper.png`) сквозь сайдбар, нижний HUD и рабочую область.
+  - Раздельные компактные стеклянные карточки во вкладке «Кастомизация и Тема» и центрированный логотип с двухколоночными плитками во вкладке «О программе».
+- **Автоматическое скачивание модов и сборок CurseForge (`mq-mods/curseforge`, `cfpack`, `manager`, `resolver`):**
+  - Все моды и модпаки CurseForge теперь скачиваются автоматически напрямую через `edge.forgecdn.net` / `mediafilez.forgecdn.net` (с поддержкой кодирования спецсимволов и вариантов `+` -> `%2B`) даже при `downloadUrl: null` или `allowModDistribution: false` без диалога ручной загрузки.
+
+---
+
 ## [v2.6.9] — 2026-11-18 ("Apple iOS 26 Liquid Glass & Translucent Themes")
 
 ### Добавлено и улучшено

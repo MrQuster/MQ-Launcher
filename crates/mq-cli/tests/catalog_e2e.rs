@@ -195,7 +195,7 @@ async fn e2e_mock_429_retry_and_curseforge_blocked_download_and_malformed_json()
         .expect("search should succeed after 429 retry");
     assert!(!res.is_empty());
 
-    // 2. CurseForge blocked download (mod 900002) produces BlockedDownload, never edge.forgecdn.net
+    // 2. CurseForge mod 900002 with downloadUrl: null automatically synthesizes edge.forgecdn.net URL
     let cf = CurseForgeClient::from_config(&config).expect("cf client");
     let plan = resolve_dependency_plan(
         &cf,
@@ -205,20 +205,20 @@ async fn e2e_mock_429_retry_and_curseforge_blocked_download_and_malformed_json()
         &ResolveOptions::default(),
     )
     .await
-    .expect("resolve_dependency_plan for blocked cf mod");
+    .expect("resolve_dependency_plan for cf mod with null downloadUrl");
     assert!(
-        !plan.blocked_downloads.is_empty(),
-        "expected blocked_downloads for mod 900002, got: downloads={:?}, blocked={:?}",
-        plan.downloads,
+        plan.blocked_downloads.is_empty(),
+        "expected no blocked_downloads when CDN URL can be synthesized, got: {:?}",
         plan.blocked_downloads
     );
-    for b in &plan.blocked_downloads {
-        assert!(!b.webpage_url.contains("edge.forgecdn.net"));
-        assert!(b.webpage_url.contains("/download/"));
-    }
-    for d in &plan.downloads {
-        assert!(!d.url.contains("edge.forgecdn.net"));
-    }
+    assert_eq!(plan.downloads.len(), 1);
+    assert!(
+        plan.downloads[0]
+            .url
+            .starts_with("https://edge.forgecdn.net/files/"),
+        "expected synthesized edge.forgecdn.net URL, got: {}",
+        plan.downloads[0].url
+    );
 
     // 3. Malformed JSON / 500 error returns Err cleanly without panic
     let bad_listener = tokio::net::TcpListener::bind("127.0.0.1:0")

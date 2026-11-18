@@ -1,21 +1,39 @@
-//! Theme style parameters (`ThemeStyleParams`) and Apple iOS 26 **Liquid Glass** optical
-//! renderer + lightweight **Translucent** renderer.
-//!
-//! All colors, opacities, full-window aurora wallpaper sampling, convex lens backdrop
-//! refraction, dual-rim anisotropic Fresnel specular highlights, inner caustic rims,
-//! capsule/continuous-corner geometry, and cursor specular spotlight live here so view
-//! and widget code stays clean and decoupled from theme math.
-
-use std::time::Duration;
+//! Theme style parameters (`ThemeStyleParams`) and optical **Liquid Glass** renderer
+//! modeled 1:1 after the Serpantinum shader (`liquid_glass.frag` / `GlassFill.qml`),
+//! alongside the clean **Translucent** preset.
 
 use egui::epaint::{Mesh, Vertex};
 use egui::{
     Color32, Context, CornerRadius, Id, InnerResponse, Painter, Pos2, Rect, Shape, Stroke,
-    StrokeKind, Ui,
+    StrokeKind, TextureId, Ui,
 };
 use mq_core::{ThemeConfig, ThemePreset};
 
 use crate::theme::{blend_color, Tokens};
+
+/// Active blurred wallpaper texture info shared between background painting and glass overlays.
+#[derive(Clone, Copy, Debug)]
+pub struct ActiveBackdropTexture {
+    pub tex_id: TextureId,
+    pub screen_rect: Rect,
+    pub uv_rect: Rect,
+}
+
+#[inline]
+pub fn store_active_backdrop_texture(ctx: &Context, active: Option<ActiveBackdropTexture>) {
+    let key = Id::new("mq_active_glass_backdrop_tex");
+    ctx.data_mut(|d| {
+        d.insert_temp(key, active);
+    });
+}
+
+#[inline]
+pub fn active_backdrop_texture(ctx: &Context) -> Option<ActiveBackdropTexture> {
+    ctx.data(|d| {
+        d.get_temp::<Option<ActiveBackdropTexture>>(Id::new("mq_active_glass_backdrop_tex"))
+            .flatten()
+    })
+}
 
 /// Complete visual effect and transparency parameters derived from [`ThemeConfig`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,20 +55,20 @@ pub struct ThemeStyleParams {
     pub input_alpha: f32,
     /// Simulated backdrop blur / frosted diffusion strength (`0.0..=1.0`).
     pub backdrop_blur_strength: f32,
-    /// Draw Apple iOS 26 directional Fresnel refraction borders and optical lens layers.
+    /// Draw Serpantinum optical glass bevel refraction + directional hairline rim.
     pub refraction_border: bool,
-    /// Bright top-left grazing specular light along primary Fresnel edge.
+    /// Silvery primary rim highlight (`lightDir = normalize(-0.55, -0.83)`).
     pub refraction_top_left: Color32,
-    /// Cool bottom-right counter-refraction exit highlight along opposite Fresnel edge.
+    /// Softer bottom counter-reflection rim (`0.55 * spec`).
     pub refraction_bottom_right: Color32,
-    /// Soft upper curved glass dome highlight alpha (`0..=255`).
+    /// Subtle meniscus sheen alpha (`0..=255`).
     pub inner_sheen_alpha: u8,
-    /// Draw animated multi-wave aurora wallpaper inside the window behind frosted glass.
+    /// Enables gentle ambient fallback gradient when no wallpaper image is active.
     pub animated_ambient_bg: bool,
     pub ambient_lobe_a: Color32,
     pub ambient_lobe_b: Color32,
     pub ambient_lobe_c: Color32,
-    /// Paint smooth cursor-following specular glow on buttons, pills, and cards.
+    /// Smoothly steers directional bevel highlight toward hovered cursor (`mix(lightDir, cursorDir, hover * 0.4)`).
     pub cursor_specular_glow: bool,
     pub specular_radius_card: f32,
     pub specular_radius_button: f32,
@@ -92,47 +110,45 @@ impl ThemeStyleParams {
         }
     }
 
-    /// Apple iOS 26 **Liquid Glass** optical parameters:
-    /// - compositor-level translucency (`window_alpha`),
-    /// - convex lens backdrop refraction with chromatic dispersion,
-    /// - dual-rim anisotropic Fresnel specular borders + inner caustic rim,
-    /// - capsule pill geometry and cursor-following fluid glow.
+    /// Liquid Glass (`Serpantinum v2.5.1` 1:1 optical style):
+    /// clear crystal blurred wallpaper inside, Snell's-law bezel refraction on edges,
+    /// delicate 1px directional specular rim (`rim = 0.45`), and 10px continuous corners.
     pub fn liquid_glass(cfg: &ThemeConfig) -> Self {
         let win_a = crate::state::safe_clamp_f32(cfg.window_opacity, 0.35, 1.0);
         let card_a = crate::state::safe_clamp_f32(cfg.card_opacity, 0.35, 1.0);
-        let glow_factor = crate::state::safe_clamp_f32(cfg.border_glow, 0.15, 1.0);
+        let glow_factor = crate::state::safe_clamp_f32(cfg.border_glow, 0.10, 1.0);
         Self {
             preset: ThemePreset::LiquidGlass,
             compositor_transparent: true,
             window_alpha: win_a,
-            sidebar_alpha: (win_a * 0.76).clamp(0.42, 0.88),
+            sidebar_alpha: (win_a * 0.56).clamp(0.36, 0.80),
             surface_alpha: card_a,
-            hud_alpha: (win_a * 0.80).clamp(0.46, 0.90),
-            modal_alpha: (card_a + 0.24).clamp(0.84, 0.95),
-            input_alpha: (card_a + 0.10).clamp(0.56, 0.86),
-            backdrop_blur_strength: 0.92,
+            hud_alpha: (win_a * 0.62).clamp(0.40, 0.84),
+            modal_alpha: (card_a + 0.48).clamp(0.80, 0.94),
+            input_alpha: (card_a + 0.08).clamp(0.32, 0.72),
+            backdrop_blur_strength: 0.88,
             refraction_border: true,
             refraction_top_left: Color32::from_rgba_unmultiplied(
-                248,
-                252,
                 255,
-                (198.0 * (0.68 + 0.32 * glow_factor)).round().min(235.0) as u8,
+                255,
+                255,
+                (128.0 * (0.68 + 0.32 * glow_factor)).round().min(165.0) as u8,
             ),
             refraction_bottom_right: Color32::from_rgba_unmultiplied(
-                156,
-                214,
-                252,
-                (138.0 * (0.65 + 0.35 * glow_factor)).round().min(195.0) as u8,
+                232,
+                238,
+                248,
+                (76.0 * (0.65 + 0.35 * glow_factor)).round().min(108.0) as u8,
             ),
-            inner_sheen_alpha: 34,
+            inner_sheen_alpha: 0,
             animated_ambient_bg: true,
-            ambient_lobe_a: Color32::from_rgb(0x4E, 0x7A, 0xA6),
-            ambient_lobe_b: Color32::from_rgb(0x64, 0x62, 0xA2),
-            ambient_lobe_c: Color32::from_rgb(0x46, 0x86, 0x90),
+            ambient_lobe_a: Color32::from_rgb(0x28, 0x2C, 0x36),
+            ambient_lobe_b: Color32::from_rgb(0x1E, 0x22, 0x2B),
+            ambient_lobe_c: Color32::from_rgb(0x24, 0x2A, 0x35),
             cursor_specular_glow: true,
-            specular_radius_card: 210.0,
-            specular_radius_button: 120.0,
-            specular_intensity: 0.28 + glow_factor * 0.14,
+            specular_radius_card: 180.0,
+            specular_radius_button: 110.0,
+            specular_intensity: 0.22 + glow_factor * 0.12,
         }
     }
 
@@ -180,33 +196,32 @@ impl ThemeStyleParams {
             .unwrap_or_default()
     }
 
-    /// Continuous iOS 26 card rounding (`16px` minimum in Liquid Glass).
+    /// Card rounding (`10px` default matching Serpantinum `borderRadius: 10`).
     #[inline]
     pub fn card_corner_radius(&self, base_radius: f32) -> CornerRadius {
         let clamped = if self.refraction_border {
-            crate::state::safe_clamp_f32(base_radius.max(16.0), 0.0, 20.0)
+            crate::state::safe_clamp_f32(base_radius.max(8.0), 6.0, 14.0)
         } else {
             crate::state::safe_clamp_f32(base_radius, 0.0, 16.0)
         };
         CornerRadius::same(clamped.round() as u8)
     }
 
-    /// Apple iOS 26 `.capsule` rounding for buttons, nav rows, inputs, and segmented controls.
+    /// Control rounding (`10px` clean rounded glass rect in Liquid Glass, matching Serpantinum buttons/rows).
     #[inline]
-    pub fn control_corner_radius(&self, height: f32, fallback: CornerRadius) -> CornerRadius {
+    pub fn control_corner_radius(&self, _height: f32, fallback: CornerRadius) -> CornerRadius {
         if self.refraction_border {
-            let pill = (height.max(24.0) * 0.5).round().clamp(12.0, 24.0) as u8;
-            CornerRadius::same(pill)
+            CornerRadius::same(10)
         } else {
             fallback
         }
     }
 
-    /// Continuous sheet/modal rounding in Liquid Glass.
+    /// Modal sheet rounding (`12px` in Liquid Glass).
     #[inline]
     pub fn modal_corner_radius(&self, fallback: CornerRadius) -> CornerRadius {
         if self.refraction_border {
-            CornerRadius::same(18)
+            CornerRadius::same(12)
         } else {
             fallback
         }
@@ -229,8 +244,8 @@ impl ThemeStyleParams {
 
     #[inline]
     pub fn surface_hover_fill(&self, tokens: &Tokens) -> Color32 {
-        let hover_alpha = (self.surface_alpha + if self.refraction_border { 0.14 } else { 0.07 })
-            .clamp(0.35, 1.0);
+        let hover_alpha = (self.surface_alpha + if self.refraction_border { 0.10 } else { 0.07 })
+            .clamp(0.32, 1.0);
         with_alpha(tokens.bg_surface_hover, hover_alpha)
     }
 
@@ -251,10 +266,10 @@ impl ThemeStyleParams {
 
     /// Computes primary action button fill honoring translucency and hover state (`0.0..=1.0`).
     pub fn primary_button_fill(&self, tokens: &Tokens, hover_t: f32) -> Color32 {
-        let t = 0.18 + 0.14 * hover_t.clamp(0.0, 1.0);
+        let t = 0.16 + 0.14 * hover_t.clamp(0.0, 1.0);
         let rgb = blend_color(tokens.bg_surface, tokens.accent, t);
         if self.refraction_border {
-            let a = (self.surface_alpha + 0.16 + 0.08 * hover_t).clamp(0.58, 0.94);
+            let a = (self.surface_alpha + 0.12 + 0.08 * hover_t).clamp(0.36, 0.85);
             with_alpha(rgb, a)
         } else {
             with_alpha(rgb, self.surface_alpha.max(0.84))
@@ -269,7 +284,7 @@ impl ThemeStyleParams {
             hover_t.clamp(0.0, 1.0),
         );
         let a = if self.refraction_border {
-            (self.surface_alpha + 0.08 * hover_t).clamp(0.48, 0.90)
+            (self.surface_alpha + 0.08 * hover_t).clamp(0.32, 0.82)
         } else {
             self.surface_alpha
         };
@@ -283,9 +298,6 @@ pub fn with_alpha(color: Color32, alpha_norm: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
 }
 
-/// Keeps frosted aurora wallpaper and optical glass tones richly luminous while staying safely
-/// within restrained HSV chroma (`sat <= 0.42` for medium/bright regions), matching Apple's
-/// frosted skylight aesthetic and preserving visual contrast clarity.
 #[inline]
 pub fn clamp_glass_chroma(c: Color32) -> Color32 {
     let r = c.r() as f32 / 255.0;
@@ -314,77 +326,25 @@ pub fn clamp_glass_chroma(c: Color32) -> Color32 {
     )
 }
 
-/// Evaluates the continuous multi-wave Apple iOS 26 dark-mode aurora wallpaper at normalized window
-/// coordinates `(nx, ny)` in `[0.0, 1.0]` and animation time `time`.
+/// Evaluates calm graphite fallback gradient when no wallpaper image is active.
 pub fn sample_liquid_glass_wallpaper(
     nx: f32,
     ny: f32,
-    time: f32,
+    _time: f32,
     style: &ThemeStyleParams,
     tokens: &Tokens,
 ) -> Color32 {
     let fx = nx.clamp(0.0, 1.0);
     let fy = ny.clamp(0.0, 1.0);
-
-    // Three slowly drifting organic aurora centers
-    let lobe_a = Pos2::new(
-        0.22 + 0.14 * (time * 0.26).sin(),
-        0.26 + 0.12 * (time * 0.20).cos(),
-    );
-    let lobe_b = Pos2::new(
-        0.78 + 0.12 * (time * 0.21 + 1.4).cos(),
-        0.70 + 0.13 * (time * 0.18 + 0.8).sin(),
-    );
-    let lobe_c = Pos2::new(
-        0.50 + 0.17 * (time * 0.16 + 2.5).sin(),
-        0.48 + 0.14 * (time * 0.23 + 2.0).cos(),
-    );
-
-    let da = ((fx - lobe_a.x).powi(2) + (fy - lobe_a.y).powi(2)).sqrt();
-    let db = ((fx - lobe_b.x).powi(2) + (fy - lobe_b.y).powi(2)).sqrt();
-    let dc = ((fx - lobe_c.x).powi(2) + (fy - lobe_c.y).powi(2)).sqrt();
-
-    // Sweeping diagonal iOS 26 liquid silk wave across the viewport
-    let wave_phase = fx * 3.1 - fy * 2.2 + 0.35 * (time * 0.30).sin();
-    let ribbon_a = (0.5 + 0.5 * (wave_phase).sin()).powf(2.0) * 0.26;
-    let ribbon_b = (0.5 + 0.5 * (fx * 2.4 + fy * 3.0 + 1.2 - time * 0.22).cos()).powf(2.4) * 0.22;
-
-    let wa = (((1.0 - da / 0.88).max(0.0)).powf(1.6) * 0.44 + ribbon_a).min(0.62);
-    let wb = (((1.0 - db / 0.90).max(0.0)).powf(1.6) * 0.44 + ribbon_b).min(0.60);
-    let wc = ((1.0 - dc / 0.78).max(0.0)).powf(1.8) * 0.34;
-
-    let deep_base = blend_color(tokens.bg_app, Color32::from_rgb(0x09, 0x10, 0x1D), 0.35);
-    let s1 = blend_color(deep_base, style.ambient_lobe_a, wa);
-    let s2 = blend_color(s1, style.ambient_lobe_b, wb);
-    let s3 = blend_color(s2, style.ambient_lobe_c, wc);
-
-    clamp_glass_chroma(s3)
+    let d1 = ((fx - 0.25).powi(2) + (fy - 0.20).powi(2)).sqrt();
+    let d2 = ((fx - 0.78).powi(2) + (fy - 0.76).powi(2)).sqrt();
+    let w1 = (1.0 - d1 / 1.1).max(0.0).powf(1.6) * 0.45;
+    let w2 = (1.0 - d2 / 1.1).max(0.0).powf(1.6) * 0.35;
+    let base = blend_color(tokens.bg_app, style.ambient_lobe_b, w2);
+    clamp_glass_chroma(blend_color(base, style.ambient_lobe_a, w1))
 }
 
-#[inline]
-fn frame_wallpaper_time(ctx: &Context, style: &ThemeStyleParams) -> (f32, bool) {
-    let deterministic = std::env::var("MQ_TEST_DETERMINISTIC")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        || {
-            #[cfg(feature = "test-hooks")]
-            {
-                crate::test_hooks::is_solid_background(ctx)
-            }
-            #[cfg(not(feature = "test-hooks"))]
-            {
-                false
-            }
-        };
-    let t = if deterministic || !style.animated_ambient_bg {
-        0.0_f32
-    } else {
-        ctx.input(|i| i.time) as f32
-    };
-    (t, deterministic)
-}
-
-/// Renders the animated multi-wave aurora glass wallpaper for **Liquid Glass**.
-/// When `deterministic` is `true`, freezes animation at `t = 0.0` without scheduling repaints.
+/// Renders calm fallback graphite gradient when no wallpaper texture is loaded.
 pub fn paint_liquid_glass_ambient_backdrop(
     ctx: &Context,
     painter: &Painter,
@@ -397,14 +357,9 @@ pub fn paint_liquid_glass_ambient_backdrop(
         return;
     }
 
-    let time = if deterministic || !style.animated_ambient_bg {
-        0.0_f32
-    } else {
-        ctx.input(|i| i.time) as f32
-    };
-
-    let cols = 16usize;
-    let rows = 10usize;
+    let _ = deterministic;
+    let cols = 8usize;
+    let rows = 6usize;
     let mut mesh = Mesh::default();
     let alpha_u8 =
         (crate::state::safe_clamp_f32(style.window_alpha, 0.35, 1.0) * 255.0).round() as u8;
@@ -415,8 +370,7 @@ pub fn paint_liquid_glass_ambient_backdrop(
         for c in 0..=cols {
             let fx = (c as f32) / (cols as f32);
             let x = rect.left() + rect.width() * fx;
-
-            let col = sample_liquid_glass_wallpaper(fx, fy, time, style, tokens);
+            let col = sample_liquid_glass_wallpaper(fx, fy, 0.0, style, tokens);
             mesh.vertices.push(Vertex {
                 pos: Pos2::new(x, y),
                 uv: Pos2::ZERO,
@@ -437,51 +391,10 @@ pub fn paint_liquid_glass_ambient_backdrop(
         }
     }
     painter.add(mesh);
-
-    // Soft frosted bokeh diffusion layers over the aurora centers.
-    let lobe_a_center = Pos2::new(
-        0.22 + 0.14 * (time * 0.26).sin(),
-        0.26 + 0.12 * (time * 0.20).cos(),
-    );
-    let lobe_b_center = Pos2::new(
-        0.78 + 0.12 * (time * 0.21 + 1.4).cos(),
-        0.70 + 0.13 * (time * 0.18 + 0.8).sin(),
-    );
-    let lobe_c_center = Pos2::new(
-        0.50 + 0.17 * (time * 0.16 + 2.5).sin(),
-        0.48 + 0.14 * (time * 0.23 + 2.0).cos(),
-    );
-
-    let min_dim = rect.width().min(rect.height()).max(1.0);
-    let draw_lobe = |norm: Pos2, raw_col: Color32, radius_frac: f32, max_alpha: f32| {
-        let col = clamp_glass_chroma(raw_col);
-        let center = Pos2::new(
-            rect.left() + rect.width() * norm.x,
-            rect.top() + rect.height() * norm.y,
-        );
-        let base_r = min_dim * radius_frac;
-        for &(r_mul, a_mul) in &[(1.0_f32, 0.28_f32), (0.68, 0.42), (0.38, 0.26)] {
-            let a = (max_alpha * a_mul * style.backdrop_blur_strength * 255.0).round() as u8;
-            if a > 0 {
-                painter.circle_filled(
-                    center,
-                    base_r * r_mul,
-                    Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a),
-                );
-            }
-        }
-    };
-
-    draw_lobe(lobe_a_center, style.ambient_lobe_a, 0.34, 0.15);
-    draw_lobe(lobe_b_center, style.ambient_lobe_b, 0.38, 0.14);
-    draw_lobe(lobe_c_center, style.ambient_lobe_c, 0.28, 0.12);
-
-    if !deterministic && style.animated_ambient_bg {
-        ctx.request_repaint_after(Duration::from_millis(33));
-    }
+    let _ = ctx;
 }
 
-/// Renders a clean, uniform tinted backdrop for the **Translucent** preset (no harsh glares or motion).
+/// Renders a clean, uniform tinted backdrop for the **Translucent** preset (no glares or motion).
 pub fn paint_translucent_clean_backdrop(
     painter: &Painter,
     rect: Rect,
@@ -525,137 +438,216 @@ pub fn paint_translucent_clean_backdrop(
     painter.add(mesh);
 }
 
-/// Builds a convex-refracted glass surface body mesh for `rect`, sampling the full-window aurora
-/// wallpaper at warped coordinates so light appears physically refracted inside each iOS 26 widget.
-#[allow(clippy::too_many_arguments)]
-fn build_refracted_glass_body_mesh(
+#[inline]
+fn screen_pos_to_uv(pos: Pos2, backdrop: &ActiveBackdropTexture) -> Pos2 {
+    let sw = backdrop.screen_rect.width().max(1.0);
+    let sh = backdrop.screen_rect.height().max(1.0);
+    let nx = ((pos.x - backdrop.screen_rect.left()) / sw).clamp(0.0, 1.0);
+    let ny = ((pos.y - backdrop.screen_rect.top()) / sh).clamp(0.0, 1.0);
+    Pos2::new(
+        (backdrop.uv_rect.left() + backdrop.uv_rect.width() * nx).clamp(0.002, 0.998),
+        (backdrop.uv_rect.top() + backdrop.uv_rect.height() * ny).clamp(0.002, 0.998),
+    )
+}
+
+/// Builds the exact rounded ring points `(pos, outward_normal)` around `rect` with corner radius `r`.
+fn build_rounded_perimeter_ring(
+    rect: Rect,
+    r: f32,
+    steps_per_corner: usize,
+) -> Vec<(Pos2, egui::Vec2)> {
+    let r = r.clamp(0.0, (rect.width().min(rect.height()) * 0.49).max(0.0));
+    if r < 1.0 {
+        return vec![
+            (rect.left_top(), egui::vec2(-0.707, -0.707)),
+            (rect.right_top(), egui::vec2(0.707, -0.707)),
+            (rect.right_bottom(), egui::vec2(0.707, 0.707)),
+            (rect.left_bottom(), egui::vec2(-0.707, 0.707)),
+        ];
+    }
+
+    let corners = [
+        (
+            Pos2::new(rect.left() + r, rect.top() + r),
+            std::f32::consts::PI,
+            std::f32::consts::FRAC_PI_2 * 3.0,
+        ),
+        (
+            Pos2::new(rect.right() - r, rect.top() + r),
+            std::f32::consts::FRAC_PI_2 * 3.0,
+            std::f32::consts::TAU,
+        ),
+        (
+            Pos2::new(rect.right() - r, rect.bottom() - r),
+            0.0_f32,
+            std::f32::consts::FRAC_PI_2,
+        ),
+        (
+            Pos2::new(rect.left() + r, rect.bottom() - r),
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+        ),
+    ];
+
+    let mut ring = Vec::with_capacity(4 * (steps_per_corner + 1));
+    for (center, start_a, end_a) in corners {
+        for s in 0..=steps_per_corner {
+            let t = (s as f32) / (steps_per_corner as f32);
+            let angle = start_a + (end_a - start_a) * t;
+            let normal = egui::vec2(angle.cos(), angle.sin());
+            ring.push((center + normal * r, normal));
+        }
+    }
+    ring
+}
+
+/// Ports Serpantinum's `liquid_glass.frag` optical pipeline to pure `egui::Mesh`:
+/// - `LENS_ZOOM = 0.045` center wallpaper magnification through cached Gaussian-blurred backdrop
+/// - Snell's-law edge bezel refraction ring (`bezel = clamp(min(w, h) * 0.28, 4.0, 11.0)`)
+/// - Clear neutral frosted dark glaze for guaranteed contrast over bright & dark wallpapers.
+fn build_serpantinum_refracted_glass_mesh(
     ctx: &Context,
     rect: Rect,
     radius: f32,
-    style: &ThemeStyleParams,
-    tokens: &Tokens,
     hover_t: f32,
     is_button: bool,
     tint_override: Option<Color32>,
 ) -> Option<Mesh> {
+    let backdrop = active_backdrop_texture(ctx)?;
     if !rect.is_positive() || rect.width() < 6.0 || rect.height() < 6.0 {
         return None;
     }
 
-    let screen = ctx.screen_rect();
-    let sw = screen.width().max(640.0);
-    let sh = screen.height().max(480.0);
-    let (time, _) = frame_wallpaper_time(ctx, style);
+    let r = radius.clamp(0.5, (rect.width().min(rect.height()) * 0.49).max(0.5));
+    let bezel = (rect.width().min(rect.height()) * 0.26).clamp(3.5, 11.0);
+    let inner_rect = rect.shrink(bezel);
+    if !inner_rect.is_positive() {
+        return None;
+    }
+    let inner_r = (r - bezel).max(0.5);
+    let steps = 6usize;
 
-    let cols = if is_button { 4usize } else { 6usize };
-    let rows = if is_button { 3usize } else { 5usize };
-    let mut mesh = Mesh::default();
+    let outer_ring = build_rounded_perimeter_ring(rect, r, steps);
+    let inner_ring = build_rounded_perimeter_ring(inner_rect, inner_r, steps);
+    let n = outer_ring.len();
+    if n < 4 || inner_ring.len() != n {
+        return None;
+    }
 
-    let base_alpha = if is_button {
-        (style.surface_alpha + 0.14 + 0.08 * hover_t).clamp(0.56, 0.90)
-    } else {
-        (style.surface_alpha + 0.06 + 0.08 * hover_t).clamp(0.50, 0.88)
+    let center = rect.center();
+    let max_dim = rect.width().max(rect.height()) * 0.5;
+    let lens_k = 1.0 - ((max_dim - 180.0) / (420.0 - 180.0)).clamp(0.0, 1.0);
+    let lens_zoom = 0.045 * lens_k;
+
+    // Refraction travel distance matching displacement(normal, 1.5, thickness) in liquid_glass.frag
+    let refract_px = bezel * (1.25 + 0.18 * hover_t);
+    let sw = backdrop.screen_rect.width().max(1.0);
+    let sh = backdrop.screen_rect.height().max(1.0);
+
+    // Base frosted neutral multiplier (lets blurred mountains shine while ensuring legible contrast)
+    let interior_tint = match tint_override {
+        Some(t) => Color32::from_rgb(
+            ((190 + (t.r() as u16) * 2 / 5).min(240)) as u8,
+            ((194 + (t.g() as u16) * 2 / 5).min(240)) as u8,
+            ((202 + (t.b() as u16) * 2 / 5).min(245)) as u8,
+        ),
+        None => {
+            let v = if is_button { 196 } else { 184 };
+            Color32::from_rgb(v, v + 3, v + 8)
+        }
     };
 
-    let warp_strength = if is_button { 0.085 } else { 0.055 };
-    let frost_veil = Color32::from_rgb(0xC8, 0xDF, 0xFA);
-    let deep_glass_glaze = tokens.bg_surface;
-    let tint_mix = tint_override.unwrap_or(tokens.bg_surface_hover);
+    let light_dir = egui::vec2(-0.5523, -0.8336);
+    let mut mesh = Mesh::with_texture(backdrop.tex_id);
 
-    for r in 0..=rows {
-        let fy = (r as f32) / (rows as f32);
-        let y = rect.top() + rect.height() * fy;
-        for c in 0..=cols {
-            let fx = (c as f32) / (cols as f32);
-            let x = rect.left() + rect.width() * fx;
+    // Center vertex index 0
+    let c_uv = screen_pos_to_uv(center, &backdrop);
+    mesh.vertices.push(Vertex {
+        pos: center,
+        uv: c_uv,
+        color: interior_tint,
+    });
 
-            let sample_pos = clamp_to_rounded_rect(Pos2::new(x, y), rect, radius);
+    // Ring vertices: for each i in 0..n, vertex (1 + 2*i) is outer, (1 + 2*i + 1) is inner
+    for i in 0..n {
+        let (out_p, norm) = outer_ring[i];
+        let (in_p, _) = inner_ring[i];
 
-            // Map widget coordinate to normalized viewport coordinate + convex lens UV refraction
-            let sx = ((sample_pos.x - screen.left()) / sw).clamp(0.0, 1.0);
-            let sy = ((sample_pos.y - screen.top()) / sh).clamp(0.0, 1.0);
-            let cx = fx * 2.0 - 1.0;
-            let cy = fy * 2.0 - 1.0;
-            let edge_weight = (cx * cx + cy * cy).sqrt().min(1.4) * 0.72;
-            let refr_x = (sx + cx * warp_strength * (0.45 + edge_weight) + 0.025).clamp(0.0, 1.0);
-            let refr_y = (sy + cy * warp_strength * (0.45 + edge_weight) - 0.032).clamp(0.0, 1.0);
+        // Outer vertex UV: displaced outward/inward along normal in glass bezel
+        let facing = (norm.x * light_dir.x + norm.y * light_dir.y).clamp(-1.0, 1.0);
+        let wobble = (out_p.x * 0.05 + out_p.y * 0.04).sin() * 0.12;
+        let disp_px = egui::vec2(
+            norm.x * (refract_px * (1.0 + wobble)),
+            norm.y * (refract_px * (1.0 - wobble)),
+        );
+        let refr_pos = Pos2::new(
+            (out_p.x - disp_px.x).clamp(backdrop.screen_rect.left(), backdrop.screen_rect.right()),
+            (out_p.y - disp_px.y).clamp(backdrop.screen_rect.top(), backdrop.screen_rect.bottom()),
+        );
+        let mut out_uv = screen_pos_to_uv(refr_pos, &backdrop);
+        // Subtle lens pull toward center on inner edge
+        let in_mag_pos = Pos2::new(
+            center.x + (in_p.x - center.x) * (1.0 - lens_zoom),
+            center.y + (in_p.y - center.y) * (1.0 - lens_zoom),
+        );
+        let in_uv = screen_pos_to_uv(in_mag_pos, &backdrop);
 
-            let refracted_wall = sample_liquid_glass_wallpaper(refr_x, refr_y, time, style, tokens);
+        // Fresnel edge boost along bezel: lit top edge reflects slightly brighter sky/frost
+        let spec_lift = (facing.max(0.0).powf(1.5) * 32.0
+            + (-facing).max(0.0).powf(2.0) * 14.0
+            + hover_t * 14.0)
+            .round() as u16;
+        let bezel_col = Color32::from_rgb(
+            (interior_tint.r() as u16 + spec_lift).min(248) as u8,
+            (interior_tint.g() as u16 + spec_lift).min(248) as u8,
+            (interior_tint.b() as u16 + spec_lift + 4).min(252) as u8,
+        );
+        out_uv.x = out_uv.x.clamp(0.002 + 1.0 / sw, 0.998 - 1.0 / sw);
+        out_uv.y = out_uv.y.clamp(0.002 + 1.0 / sh, 0.998 - 1.0 / sh);
 
-            // Smoked dark obsidian-sapphire glass composition:
-            // maintains >= 5.5:1 muted text and >= 8:1 primary text contrast while keeping
-            // unmistakable refracted aurora gradients inside every card and button.
-            let tint_strength = if is_button {
-                if tint_override.is_some() {
-                    0.34
-                } else {
-                    0.30
-                }
-            } else {
-                0.42
-            };
-            let wall_weighted = blend_color(deep_glass_glaze, refracted_wall, 0.58);
-            let tinted = blend_color(wall_weighted, tint_mix, tint_strength + 0.14 * hover_t);
-
-            // Subtle upper dome luminance & corner chromatic dispersion
-            let top_dome = (1.0 - fy).powf(2.2) * (0.09 + 0.06 * hover_t);
-            let tl_dispersion = ((1.0 - fx) * (1.0 - fy)).powf(1.5) * 0.07;
-            let br_caustic = (fx * fy).powf(1.5) * 0.07;
-
-            let with_dome = blend_color(tinted, frost_veil, top_dome + tl_dispersion);
-            let cauldron = blend_color(
-                with_dome,
-                Color32::from_rgb(0x52, 0x8C, 0xBA),
-                br_caustic + if is_button { 0.03 } else { 0.0 },
-            );
-            let final_rgb = clamp_glass_chroma(cauldron);
-
-            // Slightly thicker optical frost at borders (Fresnel thickness cues)
-            let rim_alpha_boost = edge_weight * 0.06;
-            let alpha = ((base_alpha + rim_alpha_boost).clamp(0.45, 0.94) * 255.0).round() as u8;
-
-            mesh.vertices.push(Vertex {
-                pos: sample_pos,
-                uv: Pos2::ZERO,
-                color: Color32::from_rgba_unmultiplied(
-                    final_rgb.r(),
-                    final_rgb.g(),
-                    final_rgb.b(),
-                    alpha,
-                ),
-            });
-        }
+        mesh.vertices.push(Vertex {
+            pos: out_p,
+            uv: out_uv,
+            color: bezel_col,
+        });
+        mesh.vertices.push(Vertex {
+            pos: in_p,
+            uv: in_uv,
+            color: interior_tint,
+        });
     }
 
-    let stride = (cols + 1) as u32;
-    for r in 0..(rows as u32) {
-        for c in 0..(cols as u32) {
-            let i0 = r * stride + c;
-            let i1 = i0 + 1;
-            let i2 = i0 + stride;
-            let i3 = i2 + 1;
-            mesh.add_triangle(i0, i1, i2);
-            mesh.add_triangle(i1, i3, i2);
-        }
+    for i in 0..n {
+        let next = (i + 1) % n;
+        let o0 = (1 + 2 * i) as u32;
+        let i0 = o0 + 1;
+        let o1 = (1 + 2 * next) as u32;
+        let i1 = o1 + 1;
+
+        // Bezel ring quad (two triangles)
+        mesh.add_triangle(o0, o1, i0);
+        mesh.add_triangle(o1, i1, i0);
+        // Interior triangle fan
+        mesh.add_triangle(0, i0, i1);
     }
+
     Some(mesh)
 }
 
-/// Collects Apple iOS 26 Liquid Glass floating elevation skirt, convex lens refraction mesh,
-/// curved dome highlight, lower internal caustic bounce, and cursor specular spotlight so callers
-/// can place them strictly beneath child text/icons.
+/// Collects Serpantinum Liquid Glass shapes (subtle drop shadow, blurred wallpaper refraction mesh,
+/// neutral frosted legibility veil, and meniscus inner highlight) strictly beneath child content.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_glass_underlay_shapes(
     ctx: &Context,
     rect: Rect,
     radius: CornerRadius,
     style: &ThemeStyleParams,
-    tokens: &Tokens,
+    _tokens: &Tokens,
     hover_t: f32,
     is_button: bool,
     out: &mut Vec<Shape>,
 ) {
-    if !rect.is_positive() || (!style.refraction_border && !style.cursor_specular_glow) {
+    if !rect.is_positive() || !style.refraction_border {
         return;
     }
 
@@ -663,111 +655,71 @@ pub fn collect_glass_underlay_shapes(
     let r = (radius.nw as f32)
         .min(rect.width() * 0.49)
         .min(rect.height() * 0.49);
+    let cr = CornerRadius::same(r.round() as u8);
 
-    // 1. Apple Hierarchy Elevation Halo (subtle floating shadow separates glass from backdrop)
-    if style.refraction_border && rect.height() >= 18.0 {
-        let shadow_r = CornerRadius::same((r + 2.0).round().clamp(1.0, 28.0) as u8);
+    // 1. Subtle Serpantinum drop shadow (`shadow = 0.13`, offset y +2px)
+    if rect.height() >= 18.0 {
         out.push(Shape::rect_stroke(
-            rect.expand(1.5),
-            shadow_r,
+            rect.translate(egui::vec2(0.0, 1.5)).expand(1.0),
+            CornerRadius::same((r + 1.0).round().clamp(1.0, 20.0) as u8),
             Stroke::new(
                 2.0_f32,
-                Color32::from_black_alpha(if is_button { 28 } else { 36 }),
+                Color32::from_black_alpha(if is_button { 24 } else { 32 }),
             ),
             StrokeKind::Outside,
         ));
-        if !is_button {
-            out.push(Shape::rect_stroke(
-                rect.expand(3.5),
-                CornerRadius::same((r + 4.0).round().clamp(2.0, 30.0) as u8),
-                Stroke::new(3.0_f32, Color32::from_black_alpha(16)),
-                StrokeKind::Outside,
-            ));
-        }
     }
 
-    // 2. Convex optical lens refraction sampling the wallpaper behind the glass widget
-    if style.refraction_border {
-        if let Some(body_mesh) = build_refracted_glass_body_mesh(
-            ctx,
+    // 2. Real blurred wallpaper refraction mesh (central lens zoom + bezel displacement)
+    if let Some(glass_mesh) =
+        build_serpantinum_refracted_glass_mesh(ctx, rect, r, hover_t, is_button, None)
+    {
+        out.push(Shape::Mesh(glass_mesh.into()));
+        // Delicate translucent neutral dark glaze over the blurred backdrop so text always reads >= 5:1
+        let veil_a = if is_button {
+            (72.0 + 18.0 * hover_t).round() as u8
+        } else {
+            (64.0 + 16.0 * hover_t).round() as u8
+        };
+        out.push(Shape::rect_filled(
             rect.shrink(0.5),
-            (r - 0.5).max(0.0),
-            style,
-            tokens,
-            hover_t,
-            is_button,
-            None,
-        ) {
-            out.push(Shape::Mesh(body_mesh.into()));
-        }
+            cr,
+            Color32::from_rgba_unmultiplied(16, 18, 24, veil_a),
+        ));
+    } else {
+        // Clean neutral graphite glass fallback when no wallpaper texture exists
+        let fallback_a =
+            ((style.surface_alpha + 0.34 + 0.08 * hover_t).clamp(0.45, 0.84) * 255.0).round() as u8;
+        out.push(Shape::rect_filled(
+            rect.shrink(0.5),
+            cr,
+            Color32::from_rgba_unmultiplied(24, 27, 35, fallback_a),
+        ));
     }
 
-    // 3. Curved upper dome catchlight (38% top arc) + lower internal caustic bounce (20% bottom)
+    // 3. Soft internal meniscus gleam (`wide` top band in liquid_glass.frag)
     if style.inner_sheen_alpha > 0 && rect.height() > 14.0 && rect.width() > 16.0 {
-        let sheen_h = (rect.height() * 0.38).clamp(7.0, 32.0);
+        let sheen_h = (rect.height() * 0.22).clamp(4.0, 14.0);
         let sheen_rect = Rect::from_min_max(
-            Pos2::new(rect.left() + 1.5, rect.top() + 1.5),
+            Pos2::new(rect.left() + 1.0, rect.top() + 1.0),
             Pos2::new(
-                rect.right() - 1.5,
-                (rect.top() + sheen_h).min(rect.bottom() - 2.0),
+                rect.right() - 1.0,
+                (rect.top() + sheen_h).min(rect.bottom() - 1.5),
             ),
         );
-        let base_a = style.inner_sheen_alpha as f32 + if is_button { 8.0 } else { 0.0 };
-        let sheen_a = (base_a * (1.0 + 0.42 * hover_t)).round().clamp(0.0, 72.0) as u8;
-        let top_sheen = Color32::from_rgba_unmultiplied(248, 252, 255, sheen_a);
-        let mid_sheen = Color32::from_rgba_unmultiplied(245, 250, 255, 0);
-        if let Some(mesh) = build_vertical_rounded_fade_mesh(sheen_rect, r, top_sheen, mid_sheen) {
+        let sheen_a = ((style.inner_sheen_alpha as f32) * (1.0 + 0.35 * hover_t)).round() as u8;
+        if let Some(mesh) = build_vertical_rounded_fade_mesh(
+            sheen_rect,
+            r,
+            Color32::from_rgba_unmultiplied(255, 255, 255, sheen_a),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 0),
+        ) {
             out.push(Shape::Mesh(mesh.into()));
-        }
-
-        // Bottom internal caustic exit reflection
-        let bot_h = (rect.height() * 0.22).clamp(4.0, 18.0);
-        let bot_rect = Rect::from_min_max(
-            Pos2::new(
-                rect.left() + 1.5,
-                (rect.bottom() - bot_h).max(rect.top() + 2.0),
-            ),
-            Pos2::new(rect.right() - 1.5, rect.bottom() - 1.5),
-        );
-        let bot_a = ((14.0 + 10.0 * hover_t).round()).clamp(0.0, 34.0) as u8;
-        let top_caustic = Color32::from_rgba_unmultiplied(165, 215, 255, 0);
-        let bot_caustic = Color32::from_rgba_unmultiplied(165, 215, 255, bot_a);
-        if let Some(mesh) = build_vertical_rounded_fade_mesh(bot_rect, r, top_caustic, bot_caustic)
-        {
-            out.push(Shape::Mesh(mesh.into()));
-        }
-    }
-
-    // 4. Smooth interactive cursor-following specular spotlight inside the rounded surface
-    if style.cursor_specular_glow {
-        if let Some(cursor) = smoothed_pointer_pos(ctx) {
-            let spec_radius = if is_button {
-                style.specular_radius_button
-            } else {
-                style.specular_radius_card
-            };
-            let dist_to_rect = distance_to_rect(cursor, rect);
-            if dist_to_rect < spec_radius * 0.90 {
-                let proximity = (1.0 - dist_to_rect / (spec_radius * 0.90)).clamp(0.0, 1.0);
-                let base_strength = style.specular_intensity * (0.45 + 0.55 * hover_t) * proximity;
-                let glow_rgb = blend_color(Color32::WHITE, tokens.accent, 0.22);
-                if let Some(mesh) = build_clipped_radial_specular_mesh(
-                    rect.shrink(1.0),
-                    (r - 1.0).max(0.0),
-                    cursor,
-                    spec_radius,
-                    glow_rgb,
-                    base_strength,
-                ) {
-                    out.push(Shape::Mesh(mesh.into()));
-                }
-            }
         }
     }
 }
 
-/// Paints Apple iOS 26 Liquid Glass optical refraction, inner dome/caustic highlights,
-/// dual-rim anisotropic Fresnel specular borders, and cursor-following specular glow over `rect`.
+/// Paints Serpantinum Liquid Glass surface and directional 1px bezel hairline border over `rect`.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_glass_surface_overlay(
     ctx: &Context,
@@ -779,7 +731,7 @@ pub fn paint_glass_surface_overlay(
     hover_t: f32,
     is_button: bool,
 ) {
-    if !rect.is_positive() || (!style.refraction_border && !style.cursor_specular_glow) {
+    if !rect.is_positive() || !style.refraction_border {
         return;
     }
 
@@ -799,30 +751,28 @@ pub fn paint_glass_surface_overlay(
         painter.add(shape);
     }
 
-    if style.refraction_border {
-        let r = (radius.nw as f32)
-            .min(rect.width() * 0.49)
-            .min(rect.height() * 0.49);
-        paint_refractive_gradient_border(
-            painter,
-            rect,
-            r,
-            style.refraction_top_left,
-            style.refraction_bottom_right,
-            tokens.accent,
-            smoothed_pointer_pos(ctx),
-            if is_button {
-                style.specular_radius_button
-            } else {
-                style.specular_radius_card
-            },
-            hover_t,
-        );
-    }
+    let r = (radius.nw as f32)
+        .min(rect.width() * 0.49)
+        .min(rect.height() * 0.49);
+    paint_refractive_gradient_border(
+        painter,
+        rect,
+        r,
+        style.refraction_top_left,
+        style.refraction_bottom_right,
+        tokens.accent,
+        smoothed_pointer_pos(ctx),
+        if is_button {
+            style.specular_radius_button
+        } else {
+            style.specular_radius_card
+        },
+        hover_t,
+    );
 }
 
-/// Paints a tinted variant of [`paint_glass_surface_overlay`] for active navigation pills,
-/// segmented controls, and accent capsule buttons in Liquid Glass mode.
+/// Paints a tinted variant of Serpantinum Liquid Glass for active navigation rows,
+/// segmented controls, and primary action buttons.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_tinted_glass_pill(
     ctx: &Context,
@@ -837,26 +787,36 @@ pub fn paint_tinted_glass_pill(
     if !rect.is_positive() || !style.refraction_border {
         return;
     }
+    let hover_t = hover_t.clamp(0.0, 1.0);
     let r = (radius.nw as f32)
         .min(rect.width() * 0.49)
         .min(rect.height() * 0.49);
-    if let Some(body) = build_refracted_glass_body_mesh(
-        ctx,
-        rect.shrink(0.5),
-        (r - 0.5).max(0.0),
-        style,
-        tokens,
-        hover_t.clamp(0.0, 1.0),
-        true,
-        Some(tint),
-    ) {
-        painter.add(Shape::Mesh(body.into()));
+
+    if let Some(mesh) =
+        build_serpantinum_refracted_glass_mesh(ctx, rect, r, hover_t, true, Some(tint))
+    {
+        painter.add(Shape::Mesh(mesh.into()));
     }
-    paint_glass_surface_overlay(ctx, painter, rect, radius, style, tokens, hover_t, true);
+    // Delicate translucent color tint matching `GlassFill.qml` (`tintAmount = 0.22..0.35`)
+    painter.rect_filled(
+        rect.shrink(0.5),
+        CornerRadius::same(r.round() as u8),
+        Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 64),
+    );
+    paint_refractive_gradient_border(
+        painter,
+        rect,
+        r,
+        style.refraction_top_left,
+        style.refraction_bottom_right,
+        tokens.accent,
+        smoothed_pointer_pos(ctx),
+        style.specular_radius_button,
+        hover_t,
+    );
 }
 
-/// Renders an outer luminous frosted halo behind selected cards/tiles in **Liquid Glass**
-/// so selection stands out while preserving the full dual-rim Fresnel glass border.
+/// Renders a subtle Serpantinum selection highlight border around selected items without loud rings.
 pub fn paint_liquid_glass_selection_halo(
     painter: &Painter,
     rect: Rect,
@@ -868,20 +828,17 @@ pub fn paint_liquid_glass_selection_halo(
     }
     let r = radius.nw;
     painter.rect_stroke(
-        rect.expand(1.5),
-        CornerRadius::same(r.saturating_add(2)),
-        Stroke::new(2.0_f32, with_alpha(accent, 0.55)),
-        StrokeKind::Outside,
-    );
-    painter.rect_stroke(
-        rect.expand(3.5),
-        CornerRadius::same(r.saturating_add(4)),
-        Stroke::new(2.5_f32, with_alpha(accent, 0.22)),
+        rect.expand(1.0),
+        CornerRadius::same(r.saturating_add(1)),
+        Stroke::new(
+            1.25_f32,
+            with_alpha(blend_color(Color32::WHITE, accent, 0.5), 0.55),
+        ),
         StrokeKind::Outside,
     );
 }
 
-/// Renders frosted sidebar glass dock shading and luminous right specular edge for Liquid Glass.
+/// Renders Serpantinum's frosted transparent left sidebar directly over the blurred wallpaper.
 pub fn paint_sidebar_glass_dock(
     ctx: &Context,
     painter: &Painter,
@@ -892,84 +849,54 @@ pub fn paint_sidebar_glass_dock(
     if !rect.is_positive() || !style.refraction_border {
         return;
     }
-    let screen = ctx.screen_rect();
-    let sw = screen.width().max(640.0);
-    let sh = screen.height().max(480.0);
-    let (time, _) = frame_wallpaper_time(ctx, style);
 
-    let cols = 3usize;
-    let rows = 8usize;
-    let mut mesh = Mesh::default();
-    let base_alpha = (style.sidebar_alpha * 0.86).clamp(0.42, 0.86);
-    let a_u8 = (base_alpha * 255.0).round() as u8;
-
-    for r in 0..=rows {
-        let fy = (r as f32) / (rows as f32);
-        let y = rect.top() + rect.height() * fy;
-        for c in 0..=cols {
-            let fx = (c as f32) / (cols as f32);
-            let x = rect.left() + rect.width() * fx;
-
-            let sx = ((x - screen.left()) / sw).clamp(0.0, 1.0);
-            let sy = ((y - screen.top()) / sh).clamp(0.0, 1.0);
-            let refr = sample_liquid_glass_wallpaper(
-                (sx + 0.03).clamp(0.0, 1.0),
-                (sy - 0.02).clamp(0.0, 1.0),
-                time,
-                style,
-                tokens,
-            );
-            let glass = blend_color(tokens.bg_sidebar, refr, 0.42);
-            let frost = blend_color(
-                glass,
-                Color32::from_rgb(0xB8, 0xD2, 0xEE),
-                (1.0 - fy) * 0.05,
-            );
-            let final_rgb = clamp_glass_chroma(frost);
+    if let Some(backdrop) = active_backdrop_texture(ctx) {
+        let mut mesh = Mesh::with_texture(backdrop.tex_id);
+        let col = Color32::from_rgb(176, 180, 190);
+        for &pos in &[
+            rect.left_top(),
+            rect.right_top(),
+            rect.left_bottom(),
+            rect.right_bottom(),
+        ] {
             mesh.vertices.push(Vertex {
-                pos: Pos2::new(x, y),
-                uv: Pos2::ZERO,
-                color: Color32::from_rgba_unmultiplied(
-                    final_rgb.r(),
-                    final_rgb.g(),
-                    final_rgb.b(),
-                    a_u8,
-                ),
+                pos,
+                uv: screen_pos_to_uv(pos, &backdrop),
+                color: col,
             });
         }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(1, 3, 2);
+        painter.add(mesh);
+        painter.rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(14, 16, 22, 84),
+        );
+    } else {
+        painter.rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(
+                tokens.bg_sidebar.r(),
+                tokens.bg_sidebar.g(),
+                tokens.bg_sidebar.b(),
+                (style.sidebar_alpha * 255.0).round() as u8,
+            ),
+        );
     }
 
-    let stride = (cols + 1) as u32;
-    for r in 0..(rows as u32) {
-        for c in 0..(cols as u32) {
-            let i0 = r * stride + c;
-            let i1 = i0 + 1;
-            let i2 = i0 + stride;
-            let i3 = i2 + 1;
-            mesh.add_triangle(i0, i1, i2);
-            mesh.add_triangle(i1, i3, i2);
-        }
-    }
-    painter.add(mesh);
-
-    // Subtle icy vertical edge catchlight along right edge of glass sidebar
+    // Fine 1px glass separator edge
     painter.line_segment(
         [
-            Pos2::new(rect.right() - 1.0, rect.top()),
-            Pos2::new(rect.right() - 1.0, rect.bottom()),
+            Pos2::new(rect.right() - 0.5, rect.top()),
+            Pos2::new(rect.right() - 0.5, rect.bottom()),
         ],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(235, 246, 255, 86)),
-    );
-    painter.line_segment(
-        [
-            Pos2::new(rect.right() - 2.0, rect.top()),
-            Pos2::new(rect.right() - 2.0, rect.bottom()),
-        ],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(150, 205, 250, 24)),
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 34)),
     );
 }
 
-/// Renders frosted bottom HUD glass dock shading and luminous top specular lip for Liquid Glass.
+/// Renders bottom HUD dock using the same Serpantinum frosted wallpaper glass + 1px upper hairline.
 pub fn paint_hud_glass_dock(
     ctx: &Context,
     painter: &Painter,
@@ -980,34 +907,52 @@ pub fn paint_hud_glass_dock(
     if !rect.is_positive() || !style.refraction_border {
         return;
     }
-    if let Some(mesh) = build_vertical_rounded_fade_mesh(
-        rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(220, 238, 255, 18),
-        with_alpha(tokens.bg_sidebar, 0.04),
-    ) {
-        painter.add(Shape::Mesh(mesh.into()));
+    if let Some(backdrop) = active_backdrop_texture(ctx) {
+        let mut mesh = Mesh::with_texture(backdrop.tex_id);
+        let col = Color32::from_rgb(168, 172, 182);
+        for &pos in &[
+            rect.left_top(),
+            rect.right_top(),
+            rect.left_bottom(),
+            rect.right_bottom(),
+        ] {
+            mesh.vertices.push(Vertex {
+                pos,
+                uv: screen_pos_to_uv(pos, &backdrop),
+                color: col,
+            });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(1, 3, 2);
+        painter.add(mesh);
+        painter.rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(14, 16, 22, 92),
+        );
+    } else {
+        painter.rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(
+                tokens.bg_sidebar.r(),
+                tokens.bg_sidebar.g(),
+                tokens.bg_sidebar.b(),
+                (style.hud_alpha * 255.0).round() as u8,
+            ),
+        );
     }
-    let _ = ctx;
     painter.line_segment(
         [
             Pos2::new(rect.left(), rect.top() + 0.5),
             Pos2::new(rect.right(), rect.top() + 0.5),
         ],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(240, 248, 255, 118)),
-    );
-    painter.line_segment(
-        [
-            Pos2::new(rect.left(), rect.top() + 1.5),
-            Pos2::new(rect.right(), rect.top() + 1.5),
-        ],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(150, 210, 255, 28)),
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 42)),
     );
 }
 
-/// Renders an `egui::Frame` whose Liquid Glass convex lens refraction, dome catchlight, and cursor
-/// specular glow sit strictly behind child widgets (preserving crisp text legibility), topped by
-/// an Apple iOS 26 dual-rim anisotropic Fresnel specular border.
+/// Renders an `egui::Frame` with Serpantinum blurred glass interior + bezel refraction +
+/// 1px directional specular edge strictly beneath child widgets.
 pub fn show_themed_card<R>(
     ui: &mut Ui,
     frame: egui::Frame,
@@ -1017,23 +962,15 @@ pub fn show_themed_card<R>(
     tokens: &Tokens,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> InnerResponse<R> {
-    if !style.refraction_border && !style.cursor_specular_glow {
+    if !style.refraction_border {
         return frame.show(ui, add_contents);
     }
 
-    let effective_radius = if style.refraction_border {
-        style.card_corner_radius(radius.nw as f32)
-    } else {
-        radius
-    };
-
+    let effective_radius = style.card_corner_radius(radius.nw as f32);
     let mut frame = frame;
-    if style.refraction_border {
-        frame.stroke = Stroke::NONE;
-        frame.corner_radius = effective_radius;
-        // Let our refracted lens mesh render the glass fill so there is no flat opaque glaze
-        frame.fill = Color32::TRANSPARENT;
-    }
+    frame.stroke = Stroke::NONE;
+    frame.corner_radius = effective_radius;
+    frame.fill = Color32::TRANSPARENT;
 
     let mut prepared = frame.begin(ui);
     let overlay_slot = prepared.content_ui.painter().add(Shape::Noop);
@@ -1059,58 +996,26 @@ pub fn show_themed_card<R>(
         ui.painter().set(overlay_slot, Shape::Vec(under_shapes));
     }
 
-    if style.refraction_border {
-        paint_refractive_gradient_border(
-            ui.painter(),
-            frame_resp.rect,
-            effective_radius.nw as f32,
-            style.refraction_top_left,
-            style.refraction_bottom_right,
-            tokens.accent,
-            smoothed_pointer_pos(ui.ctx()),
-            style.specular_radius_card,
-            hover_t,
-        );
-    }
+    paint_refractive_gradient_border(
+        ui.painter(),
+        frame_resp.rect,
+        effective_radius.nw as f32,
+        style.refraction_top_left,
+        style.refraction_bottom_right,
+        tokens.accent,
+        smoothed_pointer_pos(ui.ctx()),
+        style.specular_radius_card,
+        hover_t,
+    );
 
     InnerResponse::new(inner, frame_resp)
 }
 
 fn smoothed_pointer_pos(ctx: &Context) -> Option<Pos2> {
     let raw = ctx.input(|i| i.pointer.hover_pos())?;
-    let x = ctx.animate_value_with_time(Id::new("mq_glass_cursor_x"), raw.x, 0.07);
-    let y = ctx.animate_value_with_time(Id::new("mq_glass_cursor_y"), raw.y, 0.07);
+    let x = ctx.animate_value_with_time(Id::new("mq_glass_cursor_x"), raw.x, 0.08);
+    let y = ctx.animate_value_with_time(Id::new("mq_glass_cursor_y"), raw.y, 0.08);
     Some(Pos2::new(x, y))
-}
-
-#[inline]
-fn distance_to_rect(p: Pos2, rect: Rect) -> f32 {
-    let dx = (rect.left() - p.x).max(0.0).max(p.x - rect.right());
-    let dy = (rect.top() - p.y).max(0.0).max(p.y - rect.bottom());
-    (dx * dx + dy * dy).sqrt()
-}
-
-#[inline]
-fn clamp_to_rounded_rect(p: Pos2, rect: Rect, radius: f32) -> Pos2 {
-    let r = radius.clamp(0.0, (rect.width().min(rect.height()) * 0.5).max(0.0));
-    if r <= 0.5 {
-        return Pos2::new(
-            p.x.clamp(rect.left(), rect.right()),
-            p.y.clamp(rect.top(), rect.bottom()),
-        );
-    }
-    let inner = rect.shrink(r);
-    let clamped_inner = Pos2::new(
-        p.x.clamp(inner.left(), inner.right()),
-        p.y.clamp(inner.top(), inner.bottom()),
-    );
-    let diff = p - clamped_inner;
-    let len = diff.length();
-    if len <= r || len < 1e-4 {
-        p
-    } else {
-        clamped_inner + diff * (r / len)
-    }
 }
 
 fn build_vertical_rounded_fade_mesh(
@@ -1149,60 +1054,8 @@ fn build_vertical_rounded_fade_mesh(
     Some(mesh)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_clipped_radial_specular_mesh(
-    rect: Rect,
-    radius: f32,
-    cursor: Pos2,
-    spec_radius: f32,
-    glow_rgb: Color32,
-    intensity: f32,
-) -> Option<Mesh> {
-    if !rect.is_positive() || intensity <= 0.005 {
-        return None;
-    }
-    let clamped_center = Pos2::new(
-        cursor.x.clamp(rect.left(), rect.right()),
-        cursor.y.clamp(rect.top(), rect.bottom()),
-    );
-    let cols = 6usize;
-    let rows = 4usize;
-    let mut mesh = Mesh::default();
-
-    for r in 0..=rows {
-        let fy = (r as f32) / (rows as f32);
-        let y = rect.top() + rect.height() * fy;
-        for c in 0..=cols {
-            let fx = (c as f32) / (cols as f32);
-            let x = rect.left() + rect.width() * fx;
-            let sample = clamp_to_rounded_rect(Pos2::new(x, y), rect, radius);
-            let dist = (sample - clamped_center).length();
-            let falloff = (1.0 - dist / spec_radius.max(1.0))
-                .clamp(0.0, 1.0)
-                .powf(2.0);
-            let a = (falloff * intensity * 255.0).round().clamp(0.0, 104.0) as u8;
-            mesh.vertices.push(Vertex {
-                pos: sample,
-                uv: Pos2::ZERO,
-                color: Color32::from_rgba_unmultiplied(glow_rgb.r(), glow_rgb.g(), glow_rgb.b(), a),
-            });
-        }
-    }
-
-    let stride = (cols + 1) as u32;
-    for r in 0..(rows as u32) {
-        for c in 0..(cols as u32) {
-            let i0 = r * stride + c;
-            let i1 = i0 + 1;
-            let i2 = i0 + stride;
-            let i3 = i2 + 1;
-            mesh.add_triangle(i0, i1, i2);
-            mesh.add_triangle(i1, i3, i2);
-        }
-    }
-    Some(mesh)
-}
-
+/// Delicate 1.0px Serpantinum specular rim (`hair = exp(-t/1.1)` + 5px meniscus `wide`),
+/// lit by `lightDir = normalize(-0.55, -0.83)` with gentle hover direction steering.
 #[allow(clippy::too_many_arguments)]
 fn paint_refractive_gradient_border(
     painter: &Painter,
@@ -1210,12 +1063,12 @@ fn paint_refractive_gradient_border(
     radius: f32,
     top_left_col: Color32,
     bottom_right_col: Color32,
-    accent_col: Color32,
+    _accent_col: Color32,
     cursor: Option<Pos2>,
     spec_radius: f32,
     hover_t: f32,
 ) {
-    let r = radius.clamp(0.0, (rect.width().min(rect.height()) * 0.5).max(0.0));
+    let r = radius.clamp(0.0, (rect.width().min(rect.height()) * 0.49).max(0.0));
     if r < 1.0 {
         painter.rect_stroke(
             rect,
@@ -1226,135 +1079,68 @@ fn paint_refractive_gradient_border(
         return;
     }
 
-    // 8 steps per corner yields silky-smooth iOS continuous-corner arcs.
-    let steps_per_corner = 8usize;
-    let corners = [
-        (
-            Pos2::new(rect.left() + r, rect.top() + r),
-            std::f32::consts::PI,
-            std::f32::consts::FRAC_PI_2 * 3.0,
-        ),
-        (
-            Pos2::new(rect.right() - r, rect.top() + r),
-            std::f32::consts::FRAC_PI_2 * 3.0,
-            std::f32::consts::TAU,
-        ),
-        (
-            Pos2::new(rect.right() - r, rect.bottom() - r),
-            0.0_f32,
-            std::f32::consts::FRAC_PI_2,
-        ),
-        (
-            Pos2::new(rect.left() + r, rect.bottom() - r),
-            std::f32::consts::FRAC_PI_2,
-            std::f32::consts::PI,
-        ),
-    ];
-
-    let mut ring: Vec<(Pos2, egui::Vec2)> = Vec::with_capacity(4 * (steps_per_corner + 1));
-    for (center, start_a, end_a) in corners {
-        for s in 0..=steps_per_corner {
-            let t = (s as f32) / (steps_per_corner as f32);
-            let angle = start_a + (end_a - start_a) * t;
-            let normal = egui::vec2(angle.cos(), angle.sin());
-            let pt = center + normal * r;
-            ring.push((pt, normal));
-        }
-    }
-
+    let ring = build_rounded_perimeter_ring(rect, r, 7);
     let n = ring.len();
     if n < 8 {
         return;
     }
 
-    // Anisotropic Apple iOS 26 Fresnel light response along the glass chamfer:
-    // peak specular at top-left (~135°), soft dim neutral at top-right / bottom-left slopes,
-    // and luminous secondary counter-refraction exit rim at bottom-right (~-45°).
-    let light_dir = egui::vec2(
-        -std::f32::consts::FRAC_1_SQRT_2,
-        -std::f32::consts::FRAC_1_SQRT_2,
-    );
-    let mid_neutral = Color32::from_rgba_unmultiplied(195, 220, 245, 52);
+    let base_light = egui::vec2(-0.5523, -0.8336);
+    let mid_neutral = Color32::from_rgba_unmultiplied(215, 222, 232, 24);
 
-    let outer_w = 1.25_f32 + 0.35 * hover_t;
-    let mut outer_mesh = Mesh::default();
-    let mut inner_mesh = Mesh::default();
-    let w = rect.width().max(1.0);
-    let h = rect.height().max(1.0);
+    let hair_w = 1.0_f32 + 0.15 * hover_t;
+    let wide_w = 3.0_f32;
+    let mut hair_mesh = Mesh::default();
+    let mut wide_mesh = Mesh::default();
 
     for &(outer_pt, normal) in &ring {
-        let inner_pt = outer_pt - normal * outer_w;
-        let nx = ((outer_pt.x - rect.left()) / w).clamp(0.0, 1.0);
-        let ny = ((outer_pt.y - rect.top()) / h).clamp(0.0, 1.0);
-
-        let grazing = (normal.x * light_dir.x + normal.y * light_dir.y).clamp(-1.0, 1.0);
-        let pos_bias = ((1.0 - 0.5 * (nx + ny)) * 2.0 - 1.0).clamp(-1.0, 1.0);
-        let anisotropy = (grazing * 0.72 + pos_bias * 0.28).clamp(-1.0, 1.0);
-
-        let mut col = if anisotropy >= 0.0 {
-            let k = anisotropy.powf(1.25);
-            lerp_rgba(mid_neutral, top_left_col, k)
-        } else {
-            let k = (-anisotropy).powf(1.45);
-            lerp_rgba(mid_neutral, bottom_right_col, k)
-        };
-
-        // Cursor-following Fresnel glint near the active pointer
+        let mut light_dir = base_light;
         if let Some(cur) = cursor {
-            let dist = (outer_pt - cur).length();
-            if dist < spec_radius {
-                let prox = (1.0 - dist / spec_radius.max(1.0))
-                    .clamp(0.0, 1.0)
-                    .powf(1.5);
-                let glint_rgb = blend_color(Color32::WHITE, accent_col, 0.18);
-                let glint = Color32::from_rgba_unmultiplied(
-                    glint_rgb.r(),
-                    glint_rgb.g(),
-                    glint_rgb.b(),
-                    238,
-                );
-                col = lerp_rgba(col, glint, prox * (0.58 + 0.34 * hover_t));
+            let to_cur = cur - outer_pt;
+            let cd = to_cur.length();
+            if cd > 1.0 && cd < spec_radius {
+                let cdir = to_cur / cd;
+                let mix_t = 0.4 * hover_t * (1.0 - cd / spec_radius.max(1.0));
+                let blended = light_dir * (1.0 - mix_t) + cdir * mix_t;
+                let blen = blended.length();
+                if blen > 1e-4 {
+                    light_dir = blended / blen;
+                }
             }
         }
 
-        outer_mesh.vertices.push(Vertex {
+        // Exact Serpantinum facing & spec formula (liquid_glass.frag lines 310-311)
+        let facing = (normal.x * light_dir.x + normal.y * light_dir.y).clamp(-1.0, 1.0);
+        let col = if facing >= 0.0 {
+            let k = facing.powf(1.6);
+            lerp_rgba(mid_neutral, top_left_col, k)
+        } else {
+            let k = (-facing).powf(2.2) * 0.55;
+            lerp_rgba(mid_neutral, bottom_right_col, k)
+        };
+
+        let inner_hair = outer_pt - normal * hair_w;
+        hair_mesh.vertices.push(Vertex {
             pos: outer_pt,
             uv: Pos2::ZERO,
             color: col,
         });
-        outer_mesh.vertices.push(Vertex {
-            pos: inner_pt,
+        hair_mesh.vertices.push(Vertex {
+            pos: inner_hair,
             uv: Pos2::ZERO,
             color: col,
         });
 
-        // Second inner 0.9px caustic rim inset slightly inside the primary specular border
-        let ca_outer = outer_pt - normal * (outer_w + 0.35);
-        let ca_inner = outer_pt - normal * (outer_w + 1.25);
-        let caustic_col = if anisotropy >= 0.0 {
-            Color32::from_rgba_unmultiplied(
-                245,
-                250,
-                255,
-                (40.0 * (0.35 + 0.65 * anisotropy)) as u8,
-            )
-        } else {
-            Color32::from_rgba_unmultiplied(
-                150,
-                210,
-                255,
-                (24.0 * (0.25 + 0.75 * -anisotropy)) as u8,
-            )
-        };
-        inner_mesh.vertices.push(Vertex {
-            pos: ca_outer,
+        let wide_a = (col.a() as f32 * 0.09).round().clamp(0.0, 15.0) as u8;
+        wide_mesh.vertices.push(Vertex {
+            pos: inner_hair,
             uv: Pos2::ZERO,
-            color: caustic_col,
+            color: Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), wide_a),
         });
-        inner_mesh.vertices.push(Vertex {
-            pos: ca_inner,
+        wide_mesh.vertices.push(Vertex {
+            pos: outer_pt - normal * wide_w,
             uv: Pos2::ZERO,
-            color: caustic_col,
+            color: Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 0),
         });
     }
 
@@ -1364,16 +1150,16 @@ fn paint_refractive_gradient_border(
         let i0 = o0 + 1;
         let o1 = (next * 2) as u32;
         let i1 = o1 + 1;
-        outer_mesh.add_triangle(o0, o1, i0);
-        outer_mesh.add_triangle(o1, i1, i0);
-        inner_mesh.add_triangle(o0, o1, i0);
-        inner_mesh.add_triangle(o1, i1, i0);
+        hair_mesh.add_triangle(o0, o1, i0);
+        hair_mesh.add_triangle(o1, i1, i0);
+        wide_mesh.add_triangle(o0, o1, i0);
+        wide_mesh.add_triangle(o1, i1, i0);
     }
 
-    painter.add(Shape::Mesh(outer_mesh.into()));
-    if r >= 6.0 {
-        painter.add(Shape::Mesh(inner_mesh.into()));
+    if r >= 5.0 {
+        painter.add(Shape::Mesh(wide_mesh.into()));
     }
+    painter.add(Shape::Mesh(hair_mesh.into()));
 }
 
 #[inline]
@@ -1409,10 +1195,10 @@ mod tests {
         assert!(glass.backdrop_blur_strength > 0.5);
         assert!(glass.window_alpha < 1.0);
         assert!(glass.surface_alpha < 1.0);
-        assert_eq!(glass.card_corner_radius(12.0), CornerRadius::same(16));
+        assert_eq!(glass.card_corner_radius(10.0), CornerRadius::same(10));
         assert_eq!(
             glass.control_corner_radius(32.0, CornerRadius::same(6)),
-            CornerRadius::same(16)
+            CornerRadius::same(10)
         );
 
         let trans = ThemeStyleParams::from_config(&ThemeConfig::preset_translucent());
@@ -1457,7 +1243,7 @@ mod tests {
                     show_themed_card(
                         ui,
                         frame,
-                        CornerRadius::same(12),
+                        CornerRadius::same(10),
                         Id::new("test_card"),
                         &style,
                         &tokens,

@@ -1268,16 +1268,22 @@ mod tests {
 
         assert_eq!(plan.downloads.len(), 2);
         assert_eq!(plan.downloads[0].project_id, "306612");
-        // downloadUrl: null MUST NOT synthesize edge.forgecdn.net; url stays empty ("") and produces BlockedDownload.
-        assert_eq!(plan.downloads[0].url, "");
-        assert!(plan.downloads[0].is_download_blocked());
+        // downloadUrl: null automatically synthesizes edge.forgecdn.net so mods install without manual prompts.
+        assert_eq!(
+            plan.downloads[0].url,
+            "https://edge.forgecdn.net/files/5/3/fabric-api-0.102.0.jar"
+        );
+        assert!(!plan.downloads[0].is_download_blocked());
         assert!(plan.downloads[0].is_dependency);
 
         assert_eq!(plan.downloads[1].project_id, "394468");
-        assert_eq!(plan.downloads[1].url, "");
-        assert!(plan.downloads[1].is_download_blocked());
+        assert_eq!(
+            plan.downloads[1].url,
+            "https://edge.forgecdn.net/files/5/2/sodium-0.6.0.jar"
+        );
+        assert!(!plan.downloads[1].is_download_blocked());
         assert!(!plan.downloads[1].is_dependency);
-        assert_eq!(plan.blocked_downloads.len(), 2);
+        assert!(plan.blocked_downloads.is_empty());
     }
 
     #[tokio::test]

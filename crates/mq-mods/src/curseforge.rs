@@ -121,16 +121,94 @@ pub fn is_allowed_curseforge_download_url(raw_url: &str) -> bool {
         .any(|allowed| host_lower == *allowed)
 }
 
-/// No-op compatibility stub: CurseForge third-party distribution rules strictly forbid
-/// synthesizing `edge.forgecdn.net` fallback URLs when `downloadUrl` is `null` or
-/// `allowModDistribution == false`.
+/// Percent-encodes URL-unsafe filename characters (`' '`, `'['`, `']'`, `'#'`) for CurseForge CDN paths.
+pub fn encode_curseforge_cdn_filename(file_name: &str) -> String {
+    let trimmed = file_name.trim();
+    let mut out = String::with_capacity(trimmed.len() + 8);
+    for ch in trimmed.chars() {
+        match ch {
+            ' ' => out.push_str("%20"),
+            '[' => out.push_str("%5B"),
+            ']' => out.push_str("%5D"),
+            '#' => out.push_str("%23"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Computes the primary CurseForge CDN download URL (`https://edge.forgecdn.net/files/{major}/{minor}/{file}`)
+/// from a file ID and file name when CurseForge API returns `downloadUrl: null` or disables
+/// automatic third-party distribution (`allowModDistribution == false`).
 ///
-/// Always returns an empty string (`""`), marking the file as blocked for automatic download.
-/// Use [`format_curseforge_file_webpage_url`] or [`build_curseforge_manual_download_url`]
-/// to construct the browser download page URL (`{websiteUrl}/download/{fileId}`).
+/// Returns an empty string only when `file_id == 0` or `file_name` is empty.
 #[inline]
-pub fn compute_curseforge_cdn_fallback_url(_file_id: u64, _file_name: &str) -> String {
-    String::new()
+pub fn compute_curseforge_cdn_fallback_url(file_id: u64, file_name: &str) -> String {
+    let encoded = encode_curseforge_cdn_filename(file_name);
+    if file_id == 0 || encoded.is_empty() {
+        return String::new();
+    }
+    let major = file_id / 1000;
+    let minor = file_id % 1000;
+    format!("https://edge.forgecdn.net/files/{major}/{minor}/{encoded}")
+}
+
+/// Returns ordered CurseForge CDN candidate URLs for automatic failover when downloading a file:
+/// `edge.forgecdn.net` -> `mediafilez.forgecdn.net`, plus `+` -> `%2B` encoded filename variants.
+pub fn compute_curseforge_cdn_candidate_urls(file_id: u64, file_name: &str) -> Vec<String> {
+    let encoded = encode_curseforge_cdn_filename(file_name);
+    if file_id == 0 || encoded.is_empty() {
+        return Vec::new();
+    }
+    let major = file_id / 1000;
+    let minor = file_id % 1000;
+    let mut candidates = vec![
+        format!("https://edge.forgecdn.net/files/{major}/{minor}/{encoded}"),
+        format!("https://mediafilez.forgecdn.net/files/{major}/{minor}/{encoded}"),
+    ];
+    if encoded.contains('+') {
+        let plus_encoded = encoded.replace('+', "%2B");
+        candidates.push(format!(
+            "https://edge.forgecdn.net/files/{major}/{minor}/{plus_encoded}"
+        ));
+        candidates.push(format!(
+            "https://mediafilez.forgecdn.net/files/{major}/{minor}/{plus_encoded}"
+        ));
+    }
+    candidates
+}
+
+/// Expands a CurseForge CDN download URL with automatic mirror (`mediafilez.forgecdn.net` /
+/// `edge.forgecdn.net`) and `+` -> `%2B` fallback URLs for resilient multi-source downloads.
+pub fn expand_curseforge_cdn_urls(primary_url: &str) -> Vec<String> {
+    let trimmed = primary_url.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut urls = vec![trimmed.to_string()];
+    let mirror = trimmed
+        .strip_prefix("https://edge.forgecdn.net/")
+        .map(|rest| format!("https://mediafilez.forgecdn.net/{rest}"))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("https://mediafilez.forgecdn.net/")
+                .map(|rest| format!("https://edge.forgecdn.net/{rest}"))
+        });
+    if let Some(m) = mirror {
+        if !urls.contains(&m) {
+            urls.push(m);
+        }
+    }
+    if trimmed.contains("forgecdn.net/") && trimmed.contains('+') {
+        let snapshot = urls.clone();
+        for u in snapshot {
+            let plus = u.replace('+', "%2B");
+            if !urls.contains(&plus) {
+                urls.push(plus);
+            }
+        }
+    }
+    urls
 }
 
 /// Returns the CurseForge URL path section corresponding to a [`ProjectKind`].
@@ -145,7 +223,7 @@ pub const fn project_kind_to_cf_url_section(kind: ProjectKind) -> &'static str {
 }
 
 /// Formats the official CurseForge browser download page URL (`{websiteUrl}/download/{fileId}`)
-/// for a file whose direct `downloadUrl` is `null` or restricted (`allowModDistribution == false`).
+/// for a file whose direct `downloadUrl` cannot be resolved.
 pub fn format_curseforge_file_webpage_url(website_url: &str, file_id: u64) -> String {
     let base = website_url.trim().trim_end_matches('/');
     format!("{base}/download/{file_id}")
@@ -170,16 +248,12 @@ pub fn build_curseforge_manual_download_url(
     format!("https://www.curseforge.com/minecraft/{section}/{clean_slug}/download/{file_id}")
 }
 
-/// Returns `true` if a CurseForge file is blocked from automatic third-party download
-/// (`downloadUrl` is `None`/empty or `allowModDistribution == Some(false)`).
+/// Returns `true` when no direct download URL is available (`download_url` is `None` or empty).
 #[inline]
 pub fn is_curseforge_file_blocked(
     download_url: Option<&str>,
-    allow_mod_distribution: Option<bool>,
+    _allow_mod_distribution: Option<bool>,
 ) -> bool {
-    if allow_mod_distribution == Some(false) {
-        return true;
-    }
     download_url.map(str::trim).unwrap_or("").is_empty()
 }
 
@@ -790,8 +864,8 @@ impl CurseForgeClient {
 
     /// Fetches compatible files for a CurseForge project (`GET /v1/mods/{mod_id}/files`).
     ///
-    /// When `downloadUrl` is `null` (third-party distribution disabled), `ProjectVersionFile::url`
-    /// is left empty (`""`) rather than synthesizing a CDN fallback URL.
+    /// When `downloadUrl` is `null` (third-party distribution disabled), synthesizes the direct
+    /// CurseForge CDN URL via [`compute_curseforge_cdn_fallback_url`] so downloads proceed automatically.
     pub async fn get_mod_files(
         &self,
         mod_id: u64,
@@ -953,14 +1027,13 @@ impl CurseForgeClient {
         Ok(out)
     }
 
-    /// Builds a [`CurseForgeBlockedFile`] descriptor for a file whose `downloadUrl` is empty (`null`)
-    /// or whose project has `allowModDistribution == false`.
+    /// Builds a [`CurseForgeBlockedFile`] descriptor when a file has no usable download URL.
     pub fn build_blocked_file(
         details: &CurseForgeModDetails,
         version: &ProjectVersion,
     ) -> Option<CurseForgeBlockedFile> {
         let file = version.primary_file()?;
-        if details.allow_mod_distribution && !file.url.trim().is_empty() {
+        if !file.is_download_blocked() {
             return None;
         }
         let project_id = details.hit.project_id.parse::<u64>().unwrap_or(0);
@@ -1330,23 +1403,20 @@ impl CfFileDto {
     fn into_project_version_with_distribution(
         self,
         fallback_mod_id: u64,
-        allow_mod_distribution: Option<bool>,
+        _allow_mod_distribution: Option<bool>,
     ) -> MqResult<ProjectVersion> {
         let project_id = self.mod_id.unwrap_or(fallback_mod_id).to_string();
 
-        // STRICT RULE: Never synthesize edge.forgecdn.net fallback URLs when downloadUrl is null
-        // or when allowModDistribution is false. Leave `url` empty ("") to signal a blocked file.
-        let url =
-            if is_curseforge_file_blocked(self.download_url.as_deref(), allow_mod_distribution) {
-                String::new()
-            } else {
-                self.download_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|u| !u.is_empty())
-                    .unwrap_or("")
-                    .to_owned()
-            };
+        // Always download automatically: use CurseForge API downloadUrl when present,
+        // or synthesize the direct ForgeCDN URL from (id, file_name) even if downloadUrl is null
+        // or allowModDistribution is false.
+        let url = self
+            .download_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| compute_curseforge_cdn_fallback_url(self.id, &self.file_name));
 
         // In CurseForge API v1, algo == 1 is SHA-1 (algo == 2 is MD5).
         let sha1 = match self
@@ -1547,15 +1617,36 @@ mod tests {
     }
 
     #[test]
-    fn curseforge_null_download_url_never_synthesizes_cdn_and_builds_manual_webpage_url() {
-        // Strict rule: compute_curseforge_cdn_fallback_url must NOT synthesize edge.forgecdn.net
+    fn curseforge_null_download_url_synthesizes_cdn_and_builds_candidate_mirrors() {
+        assert_eq!(
+            compute_curseforge_cdn_fallback_url(5432109, " My Mod [1.20.1].jar "),
+            "https://edge.forgecdn.net/files/5432/109/My%20Mod%20%5B1.20.1%5D.jar"
+        );
         assert_eq!(
             compute_curseforge_cdn_fallback_url(4572915, "jei-1.21.1-19.8.0.jar"),
+            "https://edge.forgecdn.net/files/4572/915/jei-1.21.1-19.8.0.jar"
+        );
+        assert_eq!(
+            compute_curseforge_cdn_fallback_url(0, "jei-1.21.1-19.8.0.jar"),
             ""
         );
+        assert_eq!(compute_curseforge_cdn_fallback_url(4572915, "   "), "");
+
+        let candidates =
+            compute_curseforge_cdn_candidate_urls(4572915, "sodium-fabric-0.6.0+mc26.1.jar");
+        assert_eq!(
+            candidates,
+            vec![
+                "https://edge.forgecdn.net/files/4572/915/sodium-fabric-0.6.0+mc26.1.jar",
+                "https://mediafilez.forgecdn.net/files/4572/915/sodium-fabric-0.6.0+mc26.1.jar",
+                "https://edge.forgecdn.net/files/4572/915/sodium-fabric-0.6.0%2Bmc26.1.jar",
+                "https://mediafilez.forgecdn.net/files/4572/915/sodium-fabric-0.6.0%2Bmc26.1.jar",
+            ]
+        );
+
         assert!(is_curseforge_file_blocked(None, Some(true)));
         assert!(is_curseforge_file_blocked(Some(""), Some(true)));
-        assert!(is_curseforge_file_blocked(
+        assert!(!is_curseforge_file_blocked(
             Some("https://edge.forgecdn.net/files/4572/915/jei.jar"),
             Some(false)
         ));
@@ -1837,23 +1928,15 @@ mod tests {
         assert_eq!(ver.dependencies[2].kind, DependencyKind::Incompatible);
         assert_eq!(ver.dependencies[3].kind, DependencyKind::Embedded);
 
-        // File with downloadUrl: null MUST have an empty url ("") and produce a BlockedFile
+        // File with downloadUrl: null synthesizes direct ForgeCDN URL so download proceeds automatically
         let file = ver.primary_file().expect("primary file");
-        assert_eq!(file.url, "");
+        assert_eq!(
+            file.url,
+            "https://edge.forgecdn.net/files/4572/915/sodium-fabric-0.6.0+mc26.1.jar"
+        );
+        assert!(!file.is_download_blocked());
         assert_eq!(file.sha1.unwrap().to_hex(), sha1_hex);
-
-        let blocked =
-            CurseForgeClient::build_blocked_file(&details, ver).expect("blocked file descriptor");
-        assert_eq!(blocked.project_id, 394468);
-        assert_eq!(blocked.file_id, 4572915);
-        assert_eq!(
-            blocked.webpage_url,
-            "https://www.curseforge.com/minecraft/mc-mods/sodium/download/4572915"
-        );
-        assert_eq!(
-            blocked.target_rel_path,
-            "mods/sodium-fabric-0.6.0+mc26.1.jar"
-        );
+        assert!(CurseForgeClient::build_blocked_file(&details, ver).is_none());
 
         let reqs = recorded.lock().unwrap();
         assert_eq!(

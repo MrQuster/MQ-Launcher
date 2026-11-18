@@ -322,20 +322,20 @@ impl SettingsView {
             resp.clicked()
         }
 
+        let mut style_dirty = false;
+        let mut should_save = false;
+
+        // Card 1: Theme Preset & Accent Palette
         show_themed_card(
             ui,
             card,
             card_r,
-            ui.make_persistent_id("settings_custom_studio_glass"),
+            ui.make_persistent_id("settings_custom_theme_card"),
             &style,
             &tokens,
             |ui| {
                 ui.set_width(ui.available_width());
 
-                let mut style_dirty = false;
-                let mut should_save = false;
-
-                // 1. Presets & Accent Palette
                 ui.label(
                     RichText::new("1. Тема и акцентный цвет")
                         .color(tokens.text)
@@ -390,14 +390,14 @@ impl SettingsView {
                 });
 
                 let preset_hint = match state.config.theme.preset {
-                ThemePreset::LiquidGlass => Some(
-                    "Режим Liquid Glass: многослойное жидкое стекло, живой ambient-фон, 1px градиентные грани и световой блик за курсором.",
-                ),
-                ThemePreset::Translucent => Some(
-                    "Режим Полупрозрачная: чистая тонировка и прозрачность окна на уровне композитора без лишних эффектов.",
-                ),
-                _ => None,
-            };
+                    ThemePreset::LiquidGlass => Some(
+                        "Режим Liquid Glass: прозрачное матовое стекло с преломлением размытых обоев на фасках и 1px серебристым кантом.",
+                    ),
+                    ThemePreset::Translucent => Some(
+                        "Режим Полупрозрачная: чистая тонировка и прозрачность окна на уровне композитора без лишних эффектов.",
+                    ),
+                    _ => None,
+                };
                 if let Some(hint) = preset_hint {
                     ui.add_space(4.0);
                     ui.label(RichText::new(hint).color(tokens.text_muted).small());
@@ -443,12 +443,22 @@ impl SettingsView {
                         should_save = true;
                     }
                 });
+            },
+        );
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(10.0);
+        ui.add_space(12.0);
 
-                // 2. Background Style & Custom Backdrop
+        // Card 2: Background Style & Custom Backdrop
+        show_themed_card(
+            ui,
+            card,
+            card_r,
+            ui.make_persistent_id("settings_custom_bg_card"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
+
                 ui.label(
                     RichText::new("2. Фон лаунчера")
                         .color(tokens.text)
@@ -507,59 +517,59 @@ impl SettingsView {
                         should_save = true;
                     }
                 }
+            },
+        );
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(10.0);
+        ui.add_space(12.0);
 
-                // 3. Live Preview Card
+        // Card 3: Live Preview
+        let live_tokens = Tokens::from_config(&state.config.theme);
+        let live_style = ThemeStyleParams::from_config(&state.config.theme);
+        let preview_r = live_style.card_corner_radius(state.config.theme.corner_radius);
+        let preview_card = solid_card_frame_with_config(&live_tokens, &state.config.theme)
+            .inner_margin(egui::Margin::same(14));
+
+        show_themed_card(
+            ui,
+            preview_card,
+            preview_r,
+            ui.make_persistent_id("settings_live_preview_glass"),
+            &live_style,
+            &live_tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
                 ui.label(
                     RichText::new("Живое превью")
-                        .color(tokens.text)
+                        .color(live_tokens.text)
                         .strong()
                         .size(13.0),
                 );
-                ui.add_space(4.0);
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    let pri_col = rgb_to_c32(state.config.theme.accent_primary);
+                    let sec_col = rgb_to_c32(state.config.theme.accent_secondary);
+                    let _ = accent_button(ui, Some(VectorIcon::Play), "Основная кнопка", pri_col);
+                    let _ = secondary_glass_button(ui, Some(VectorIcon::Folder), "Вторичная");
+                    tag_pill(ui, "Fabric", sec_col);
+                    let mut sample_toggle = true;
+                    let _ = smooth_toggle(ui, &mut sample_toggle);
+                });
+            },
+        );
 
-                let live_tokens = Tokens::from_config(&state.config.theme);
-                let live_style = ThemeStyleParams::from_config(&state.config.theme);
-                let preview_r =
-                    crate::state::safe_clamp_f32(state.config.theme.corner_radius, 0.0, 16.0)
-                        .round() as u8;
-                let preview_card = solid_card_frame_with_config(&live_tokens, &state.config.theme)
-                    .inner_margin(egui::Margin::same(12));
+        ui.add_space(12.0);
 
-                show_themed_card(
-                    ui,
-                    preview_card,
-                    CornerRadius::same(preview_r),
-                    ui.make_persistent_id("settings_live_preview_glass"),
-                    &live_style,
-                    &live_tokens,
-                    |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let pri_col = rgb_to_c32(state.config.theme.accent_primary);
-                            let sec_col = rgb_to_c32(state.config.theme.accent_secondary);
-                            let _ = accent_button(
-                                ui,
-                                Some(VectorIcon::Play),
-                                "Основная кнопка",
-                                pri_col,
-                            );
-                            let _ =
-                                secondary_glass_button(ui, Some(VectorIcon::Folder), "Вторичная");
-                            tag_pill(ui, "Fabric", sec_col);
-                            let mut sample_toggle = true;
-                            let _ = smooth_toggle(ui, &mut sample_toggle);
-                        });
-                    },
-                );
+        // Card 4: Surfaces, Radius, Density & Scale + Export
+        show_themed_card(
+            ui,
+            card,
+            card_r,
+            ui.make_persistent_id("settings_custom_sliders_card"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(10.0);
-
-                // 4. Surfaces, Radius, Density & Scale
                 ui.label(
                     RichText::new("3. Карточки, скругления и масштаб")
                         .color(tokens.text)
@@ -568,7 +578,6 @@ impl SettingsView {
                 );
                 ui.add_space(6.0);
 
-                ui.add_space(4.0);
                 egui::Grid::new("customization_sliders_grid")
                     .num_columns(2)
                     .spacing(Vec2::new(20.0, 8.0))
@@ -595,7 +604,7 @@ impl SettingsView {
                         );
                         slider_row(
                             "Прозрачность карточек:",
-                            egui::Slider::new(&mut state.config.theme.card_opacity, 0.35..=1.00)
+                            egui::Slider::new(&mut state.config.theme.card_opacity, 0.30..=1.00)
                                 .step_by(0.01),
                         );
                         slider_row(
@@ -752,15 +761,15 @@ impl SettingsView {
                         }
                     });
                 });
-
-                if style_dirty {
-                    apply_theme(ui.ctx(), &state.config.theme);
-                }
-                if should_save {
-                    let _ = state.config.save(&state.paths);
-                }
             },
         );
+
+        if style_dirty {
+            apply_theme(ui.ctx(), &state.config.theme);
+        }
+        if should_save {
+            let _ = state.config.save(&state.paths);
+        }
     }
 
     fn render_launch_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
@@ -1559,79 +1568,139 @@ impl SettingsView {
         let tokens = Tokens::from_config(&state.config.theme);
         let style = ThemeStyleParams::from_config(&state.config.theme);
         let card_r = style.card_corner_radius(state.config.theme.corner_radius);
-        let max_w = ui.available_width().min(640.0);
+        let max_w = ui.available_width().min(780.0);
         ui.allocate_ui_with_layout(
             Vec2::new(max_w, 0.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                let card = solid_card_frame_with_config(&tokens, &state.config.theme)
-                    .inner_margin(egui::Margin::same(16));
-
-                show_themed_card(
-                    ui,
-                    card,
-                    card_r,
-                    ui.make_persistent_id("settings_about_glass"),
-                    &style,
-                    &tokens,
-                    |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), egui::Sense::hover());
-                        crate::sidebar::paint_mq_emblem(ui.painter(), rect, &tokens);
-                        ui.add_space(8.0);
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("MQ Launcher").strong().size(18.0).color(tokens.text));
-                            ui.label(RichText::new(format!("Версия {} Solid Edition", env!("CARGO_PKG_VERSION"))).color(tokens.text_muted).small());
-                        });
-                    });
-
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    ui.label(RichText::new("Автор: MrQuster").strong().color(tokens.text));
-                    ui.label(RichText::new("Быстрый и модульный Minecraft-лаунчер нового поколения на Rust/egui.").color(tokens.text_muted));
-                    ui.label(RichText::new("Лицензия: MIT License (MrQuster)").color(tokens.text_muted).small());
-
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    ui.label(RichText::new("Ссылки и сообщество:").strong().color(tokens.text).small());
+                // Centered Serpantinum-style emblem + title + version header directly over the blurred canvas
+                ui.vertical_centered(|ui| {
                     ui.add_space(6.0);
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
+                    crate::sidebar::paint_mq_emblem(ui.painter(), rect, &tokens);
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("MQ Launcher")
+                            .strong()
+                            .size(21.0)
+                            .color(tokens.text),
+                    );
+                    ui.label(
+                        RichText::new(format!("v{}  •  от MrQuster", env!("CARGO_PKG_VERSION")))
+                            .color(tokens.text_muted)
+                            .size(12.5),
+                    );
+                });
 
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                ui.add_space(14.0);
 
-                        if secondary_glass_button(ui, Some(VectorIcon::User), "Профиль автора на GitHub").clicked() {
-                            let _ = crate::opener::open_that("https://github.com/MrQuster");
-                        }
-                        if secondary_glass_button(ui, Some(VectorIcon::Globe), "Репозиторий").clicked() {
-                            let _ = crate::opener::open_that("https://github.com/MrQuster/mq");
-                        }
-                        if secondary_glass_button(ui, Some(VectorIcon::Download), "Релизы").clicked() {
-                            let _ = crate::opener::open_that("https://github.com/MrQuster/mq/releases");
-                        }
-                        if secondary_glass_button(ui, Some(VectorIcon::Warning), "Сообщить об ошибке").clicked() {
-                            let _ = crate::opener::open_that("https://github.com/MrQuster/mq/issues");
-                        }
-                        if secondary_glass_button(ui, Some(VectorIcon::Copy), "Скопировать диагностику").clicked() {
-                            let diag = format!(
-                                "MQ Launcher v{}\nOS: {} ({})\nGUI Backend: {:?}\nPaths: Data={:?}, Instances={:?}",
-                                env!("CARGO_PKG_VERSION"),
-                                std::env::consts::OS,
-                                std::env::consts::ARCH,
-                                state.config.ui_backend,
-                                state.paths.data_dir,
-                                state.paths.instances_dir(),
-                            );
-                            ui.ctx().copy_text(diag);
-                            state.status_message = Some(("Диагностическая информация скопирована в буфер обмена".to_string(), false));
+                // Two-column compact Liquid Glass info tiles (Serpantinum AboutTab style)
+                let tiles: [(&str, String); 6] = [
+                    ("Версия", format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    ("Графический бэкенд", format!("{:?}", state.config.ui_backend)),
+                    (
+                        "ОС / Архитектура",
+                        format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH),
+                    ),
+                    ("Автор", "MrQuster".to_string()),
+                    ("Лицензия", "MIT License".to_string()),
+                    ("Каталог данных", state.paths.data_dir.display().to_string()),
+                ];
+
+                let render_tile = |ui: &mut Ui, idx: usize, label: &str, value: &str| {
+                    let tile_frame = solid_card_frame_with_config(&tokens, &state.config.theme)
+                        .inner_margin(egui::Margin::symmetric(12, 9));
+                    show_themed_card(
+                        ui,
+                        tile_frame,
+                        card_r,
+                        ui.make_persistent_id(("settings_about_tile", idx)),
+                        &style,
+                        &tokens,
+                        |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(label)
+                                        .color(tokens.text_muted)
+                                        .size(12.5),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(value)
+                                                    .color(tokens.text)
+                                                    .strong()
+                                                    .size(12.5),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                            });
+                        },
+                    );
+                };
+
+                for row_idx in (0..tiles.len()).step_by(2) {
+                    ui.columns(2, |cols| {
+                        let (l0, v0) = &tiles[row_idx];
+                        render_tile(&mut cols[0], row_idx, l0, v0);
+                        if let Some((l1, v1)) = tiles.get(row_idx + 1) {
+                            render_tile(&mut cols[1], row_idx + 1, l1, v1);
                         }
                     });
-                    },
-                );
+                    ui.add_space(8.0);
+                }
+
+                ui.add_space(6.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+
+                    if secondary_glass_button(ui, Some(VectorIcon::User), "MrQuster (GitHub)")
+                        .clicked()
+                    {
+                        let _ = crate::opener::open_that("https://github.com/MrQuster");
+                    }
+                    if secondary_glass_button(ui, Some(VectorIcon::Globe), "MrQuster/mq").clicked()
+                    {
+                        let _ = crate::opener::open_that("https://github.com/MrQuster/mq");
+                    }
+                    if secondary_glass_button(ui, Some(VectorIcon::Download), "Релизы").clicked()
+                    {
+                        let _ = crate::opener::open_that("https://github.com/MrQuster/mq/releases");
+                    }
+                    if secondary_glass_button(ui, Some(VectorIcon::Warning), "Сообщить об ошибке")
+                        .clicked()
+                    {
+                        let _ = crate::opener::open_that("https://github.com/MrQuster/mq/issues");
+                    }
+                    if secondary_glass_button(
+                        ui,
+                        Some(VectorIcon::Copy),
+                        "Скопировать диагностику",
+                    )
+                    .clicked()
+                    {
+                        let diag = format!(
+                            "MQ Launcher v{}\nOS: {} ({})\nGUI Backend: {:?}\nPaths: Data={:?}, Instances={:?}",
+                            env!("CARGO_PKG_VERSION"),
+                            std::env::consts::OS,
+                            std::env::consts::ARCH,
+                            state.config.ui_backend,
+                            state.paths.data_dir,
+                            state.paths.instances_dir(),
+                        );
+                        ui.ctx().copy_text(diag);
+                        state.status_message = Some((
+                            "Диагностическая информация скопирована в буфер обмена".to_string(),
+                            false,
+                        ));
+                    }
+                });
 
                 ui.add_space(12.0);
                 self.render_uninstall_card(ui, state, &tokens);

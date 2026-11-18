@@ -594,7 +594,7 @@ impl TestHooksController {
             HarnessCommand::SetTheme { preset } => match parse_theme_preset(&preset) {
                 Some(p) => {
                     app.state.config.theme.apply_preset(p);
-                    if self.is_solid_background() {
+                    if self.is_solid_background() && p != ThemePreset::LiquidGlass {
                         app.state.config.theme.background_style = BackgroundStyle::Solid;
                     }
                     apply_theme(ctx, &app.state.config.theme);
