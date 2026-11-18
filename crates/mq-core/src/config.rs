@@ -138,6 +138,8 @@ impl FromStr for GuiBackend {
 pub enum ThemePreset {
     #[default]
     MatteDark,
+    LiquidGlass,
+    Translucent,
     PrismClassicDark,
     ModrinthEmerald,
     CatppuccinMocha,
@@ -148,8 +150,10 @@ pub enum ThemePreset {
 }
 
 impl ThemePreset {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::MatteDark,
+        Self::LiquidGlass,
+        Self::Translucent,
         Self::PrismClassicDark,
         Self::ModrinthEmerald,
         Self::CatppuccinMocha,
@@ -160,6 +164,8 @@ impl ThemePreset {
     pub const fn label(&self) -> &'static str {
         match self {
             Self::MatteDark => "Matte Dark (По умолчанию)",
+            Self::LiquidGlass => "Liquid Glass",
+            Self::Translucent => "Полупрозрачная",
             Self::PrismClassicDark => "Prism Classic Dark",
             Self::ModrinthEmerald => "Modrinth Emerald",
             Self::CatppuccinMocha => "Catppuccin Mocha",
@@ -374,6 +380,56 @@ impl ThemeConfig {
         }
     }
 
+    pub fn preset_liquid_glass() -> Self {
+        Self {
+            preset: ThemePreset::LiquidGlass,
+            window_opacity: 0.88,
+            card_opacity: 0.62,
+            border_glow: 0.65,
+            bg_window: [0x0B, 0x11, 0x1E],
+            bg_card: [0x16, 0x22, 0x36],
+            accent_primary: [0x58, 0xB8, 0xF8],
+            accent_secondary: [0x3B, 0x93, 0xD8],
+            text_primary: [0xF4, 0xF8, 0xFF],
+            text_muted: [0xB0, 0xC2, 0xDA],
+            status_success: [0x4C, 0xC3, 0x8A],
+            status_error: [0xF0, 0x55, 0x60],
+            corner_radius: 12.0,
+            density: UiDensity::Comfortable,
+            ui_scale: 1.0,
+            font_size: 14.0,
+            background_style: BackgroundStyle::Procedural,
+            backdrop_path: None,
+            backdrop_dim: 0.0,
+            launch_action: LaunchAction::KeepOpen,
+        }
+    }
+
+    pub fn preset_translucent() -> Self {
+        Self {
+            preset: ThemePreset::Translucent,
+            window_opacity: 0.78,
+            card_opacity: 0.75,
+            border_glow: 0.0,
+            bg_window: [0x10, 0x13, 0x1A],
+            bg_card: [0x1A, 0x20, 0x2B],
+            accent_primary: [0x56, 0xA3, 0x96],
+            accent_secondary: [0x42, 0x88, 0x7C],
+            text_primary: [0xF0, 0xF3, 0xF8],
+            text_muted: [0xA8, 0xB3, 0xC5],
+            status_success: [0x4C, 0x9A, 0x82],
+            status_error: [0xE5, 0x48, 0x4D],
+            corner_radius: 8.0,
+            density: UiDensity::Comfortable,
+            ui_scale: 1.0,
+            font_size: 14.0,
+            background_style: BackgroundStyle::Procedural,
+            backdrop_path: None,
+            backdrop_dim: 0.0,
+            launch_action: LaunchAction::KeepOpen,
+        }
+    }
+
     pub fn preset_light_clean() -> Self {
         Self {
             preset: ThemePreset::LightClean,
@@ -402,6 +458,8 @@ impl ThemeConfig {
     pub fn apply_preset(&mut self, preset: ThemePreset) {
         let mut new_cfg = match preset {
             ThemePreset::MatteDark => Self::preset_matte_dark(),
+            ThemePreset::LiquidGlass => Self::preset_liquid_glass(),
+            ThemePreset::Translucent => Self::preset_translucent(),
             ThemePreset::PrismClassicDark => Self::preset_prism_classic_dark(),
             ThemePreset::ModrinthEmerald => Self::preset_modrinth_emerald(),
             ThemePreset::CatppuccinMocha => Self::preset_catppuccin_mocha(),
@@ -896,6 +954,30 @@ mod tests {
         let light = ThemeConfig::preset_light_clean();
         assert_eq!(light.preset, ThemePreset::LightClean);
         assert_eq!(light.accent_primary, [0x05, 0x96, 0x69]);
+
+        let glass = ThemeConfig::preset_liquid_glass();
+        assert_eq!(glass.preset, ThemePreset::LiquidGlass);
+        assert!((glass.window_opacity - 0.88).abs() < 1e-6);
+        assert!((glass.card_opacity - 0.62).abs() < 1e-6);
+        assert!((glass.border_glow - 0.65).abs() < 1e-6);
+        assert_eq!(glass.corner_radius, 12.0);
+        assert_eq!(glass.bg_window, [0x0B, 0x11, 0x1E]);
+
+        let trans = ThemeConfig::preset_translucent();
+        assert_eq!(trans.preset, ThemePreset::Translucent);
+        assert!((trans.window_opacity - 0.78).abs() < 1e-6);
+        assert!((trans.card_opacity - 0.75).abs() < 1e-6);
+        assert_eq!(trans.border_glow, 0.0);
+        assert_eq!(trans.bg_window, [0x10, 0x13, 0x1A]);
+
+        // Ensure TOML persistence round-trips both LiquidGlass and Translucent cleanly
+        for preset in [ThemePreset::LiquidGlass, ThemePreset::Translucent] {
+            let mut cfg = ThemeConfig::default();
+            cfg.apply_preset(preset);
+            let encoded = toml::to_string_pretty(&cfg).expect("serialize preset");
+            let decoded: ThemeConfig = toml::from_str(&encoded).expect("deserialize preset");
+            assert_eq!(decoded.preset, preset);
+        }
     }
 
     #[test]

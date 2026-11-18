@@ -15,8 +15,7 @@ use uuid::Uuid;
 use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::state::UiState;
 use crate::theme::{
-    ACCENT_COBALT, ACCENT_EMERALD, BORDER_SUBTLE, CARD_SURFACE, CARD_SURFACE_HOVER, RADIUS_CARD,
-    STATUS_WARN, TEXT_MUTED, TEXT_PRIMARY,
+    ACCENT_COBALT, ACCENT_EMERALD, CARD_SURFACE, STATUS_WARN, TEXT_MUTED, TEXT_PRIMARY,
 };
 use crate::widgets::{
     paint_skin_head_avatar, primary_emerald_button, secondary_glass_button, version_badge,
@@ -116,20 +115,28 @@ impl AccountsView {
         ui.add_space(8.0);
 
         // Tab form card
-        let form_card = egui::Frame::new()
-            .fill(CARD_SURFACE)
-            .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
-            .corner_radius(RADIUS_CARD)
+        let tokens = crate::theme::Tokens::from_config(&state.config.theme);
+        let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
+        let form_card = crate::theme::solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(12));
 
-        form_card.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            match self.current_tab {
-                AccountTab::Offline => self.render_offline_tab(ui, state),
-                AccountTab::ElyBy => self.render_elyby_tab(ui, state),
-                AccountTab::Microsoft => self.render_msa_tab(ui, state),
-            }
-        });
+        crate::theme_styles::show_themed_card(
+            ui,
+            form_card,
+            card_r,
+            ui.make_persistent_id("acc_form_card_glass"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
+                match self.current_tab {
+                    AccountTab::Offline => self.render_offline_tab(ui, state),
+                    AccountTab::ElyBy => self.render_elyby_tab(ui, state),
+                    AccountTab::Microsoft => self.render_msa_tab(ui, state),
+                }
+            },
+        );
 
         ui.add_space(12.0);
         ui.heading(
@@ -160,114 +167,140 @@ impl AccountsView {
 
                         let card = egui::Frame::new()
                             .fill(if is_active {
-                                CARD_SURFACE_HOVER
+                                style.surface_hover_fill(&tokens)
                             } else {
-                                CARD_SURFACE
+                                style.surface_fill(&tokens)
                             })
-                            .stroke(Stroke::new(
-                                1.0_f32,
-                                if is_active {
-                                    ACCENT_EMERALD
-                                } else {
-                                    BORDER_SUBTLE
-                                },
-                            ))
-                            .corner_radius(RADIUS_CARD)
+                            .stroke(if style.refraction_border {
+                                Stroke::NONE
+                            } else {
+                                Stroke::new(
+                                    1.0_f32,
+                                    if is_active {
+                                        tokens.accent
+                                    } else {
+                                        tokens.border
+                                    },
+                                )
+                            })
+                            .corner_radius(card_r)
                             .inner_margin(egui::Margin::same(10));
 
-                        card.show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                paint_skin_head_avatar(
-                                    ui,
-                                    36.0,
-                                    &acc.username,
-                                    acc.avatar_head.as_ref(),
-                                );
+                        let acc_resp = crate::theme_styles::show_themed_card(
+                            ui,
+                            card,
+                            card_r,
+                            ui.make_persistent_id(("acc_card_glass", acc.id.to_string())),
+                            &style,
+                            &tokens,
+                            |ui| {
+                                ui.horizontal(|ui| {
+                                    paint_skin_head_avatar(
+                                        ui,
+                                        36.0,
+                                        &acc.username,
+                                        acc.avatar_head.as_ref(),
+                                    );
 
-                                let right_w = if !is_active { 150.0 } else { 0.0 };
-                                let middle_w = (ui.available_width() - right_w - 12.0).max(60.0);
+                                    let right_w = if !is_active { 150.0 } else { 0.0 };
+                                    let middle_w =
+                                        (ui.available_width() - right_w - 12.0).max(60.0);
 
-                                ui.allocate_ui_with_layout(
-                                    Vec2::new(middle_w, 40.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                                            let name_w = (ui.available_width() - 110.0).max(50.0);
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(middle_w, 40.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                                                let name_w =
+                                                    (ui.available_width() - 110.0).max(50.0);
+                                                ui.add_sized(
+                                                    [name_w.min(160.0), 18.0],
+                                                    egui::Label::new(
+                                                        RichText::new(&acc.username)
+                                                            .color(TEXT_PRIMARY)
+                                                            .strong(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                let badge_col = match acc.kind {
+                                                    AccountKind::Offline => ACCENT_COBALT,
+                                                    AccountKind::ElyBy => ACCENT_EMERALD,
+                                                    AccountKind::Microsoft => {
+                                                        Color32::from_rgb(0xF5, 0x9E, 0x0B)
+                                                    }
+                                                };
+                                                version_badge(
+                                                    ui,
+                                                    acc.kind.badge_label(),
+                                                    badge_col,
+                                                );
+                                                if is_active {
+                                                    version_badge(
+                                                        ui,
+                                                        tr_acc(is_en, "АКТИВЕН", "ACTIVE"),
+                                                        ACCENT_EMERALD,
+                                                    );
+                                                }
+                                            });
+                                            let uuid_w = (ui.available_width() - 8.0).max(40.0);
                                             ui.add_sized(
-                                                [name_w.min(160.0), 18.0],
+                                                [uuid_w, 16.0],
                                                 egui::Label::new(
-                                                    RichText::new(&acc.username)
-                                                        .color(TEXT_PRIMARY)
-                                                        .strong(),
+                                                    RichText::new(format!(
+                                                        "UUID: {}",
+                                                        acc.uuid_hyphenated()
+                                                    ))
+                                                    .color(TEXT_MUTED)
+                                                    .small(),
                                                 )
                                                 .truncate(),
                                             );
-                                            let badge_col = match acc.kind {
-                                                AccountKind::Offline => ACCENT_COBALT,
-                                                AccountKind::ElyBy => ACCENT_EMERALD,
-                                                AccountKind::Microsoft => {
-                                                    Color32::from_rgb(0xF5, 0x9E, 0x0B)
-                                                }
-                                            };
-                                            version_badge(ui, acc.kind.badge_label(), badge_col);
-                                            if is_active {
-                                                version_badge(
-                                                    ui,
-                                                    tr_acc(is_en, "АКТИВЕН", "ACTIVE"),
-                                                    ACCENT_EMERALD,
-                                                );
-                                            }
-                                        });
-                                        let uuid_w = (ui.available_width() - 8.0).max(40.0);
-                                        ui.add_sized(
-                                            [uuid_w, 16.0],
-                                            egui::Label::new(
-                                                RichText::new(format!(
-                                                    "UUID: {}",
-                                                    acc.uuid_hyphenated()
-                                                ))
-                                                .color(TEXT_MUTED)
-                                                .small(),
-                                            )
-                                            .truncate(),
-                                        );
-                                    },
-                                );
-
-                                if !is_active {
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if secondary_glass_button(
-                                                ui,
-                                                Some(VectorIcon::Trash),
-                                                "",
-                                            )
-                                            .clicked()
-                                            {
-                                                let _ = state
-                                                    .accounts
-                                                    .remove_account(&acc.id.to_string());
-                                                let _ = state.accounts.save(&state.paths);
-                                            }
-                                            if primary_emerald_button(
-                                                ui,
-                                                Some(VectorIcon::Check),
-                                                tr_acc(is_en, "Выбрать", "Select"),
-                                            )
-                                            .clicked()
-                                            {
-                                                let _ = state
-                                                    .accounts
-                                                    .select_account(&acc.id.to_string());
-                                                let _ = state.accounts.save(&state.paths);
-                                            }
                                         },
                                     );
-                                }
-                            });
-                        });
+
+                                    if !is_active {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if secondary_glass_button(
+                                                    ui,
+                                                    Some(VectorIcon::Trash),
+                                                    "",
+                                                )
+                                                .clicked()
+                                                {
+                                                    let _ = state
+                                                        .accounts
+                                                        .remove_account(&acc.id.to_string());
+                                                    let _ = state.accounts.save(&state.paths);
+                                                }
+                                                if primary_emerald_button(
+                                                    ui,
+                                                    Some(VectorIcon::Check),
+                                                    tr_acc(is_en, "Выбрать", "Select"),
+                                                )
+                                                .clicked()
+                                                {
+                                                    let _ = state
+                                                        .accounts
+                                                        .select_account(&acc.id.to_string());
+                                                    let _ = state.accounts.save(&state.paths);
+                                                }
+                                            },
+                                        );
+                                    }
+                                });
+                            },
+                        );
+                        if style.refraction_border && is_active {
+                            crate::theme_styles::paint_liquid_glass_selection_halo(
+                                ui.painter(),
+                                acc_resp.response.rect,
+                                card_r,
+                                tokens.accent,
+                            );
+                        }
                         ui.add_space(4.0);
                     }
                 }

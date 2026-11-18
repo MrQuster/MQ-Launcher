@@ -9,11 +9,25 @@ pub fn card_panel<R>(
     tokens: &Tokens,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> egui::InnerResponse<R> {
+    let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+    let cr = style.card_corner_radius(RADIUS_CARD.nw as f32);
     let frame = Frame::new()
-        .fill(tokens.bg_surface)
-        .stroke(Stroke::new(1.0_f32, tokens.border))
-        .corner_radius(RADIUS_CARD)
+        .fill(style.surface_fill(tokens))
+        .stroke(if style.refraction_border {
+            Stroke::NONE
+        } else {
+            Stroke::new(1.0_f32, tokens.border)
+        })
+        .corner_radius(cr)
         .inner_margin(Margin::same(12));
 
-    frame.show(ui, add_contents)
+    crate::theme_styles::show_themed_card(
+        ui,
+        frame,
+        cr,
+        ui.id().with("mq_card_panel"),
+        &style,
+        tokens,
+        add_contents,
+    )
 }

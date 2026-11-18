@@ -17,6 +17,7 @@ use crate::theme::{
     blend_color, solid_card_frame_with_config, Tokens, ACCENT_COBALT, ACCENT_EMERALD,
     RADIUS_BUTTON, RADIUS_CARD, RADIUS_TAG,
 };
+use crate::theme_styles::{show_themed_card, ThemeStyleParams};
 use crate::widgets::{
     paint_vector_icon, primary_emerald_button, secondary_glass_button, version_badge, VectorIcon,
 };
@@ -319,13 +320,22 @@ impl CatalogView {
         let mut open_batch = false;
         let mut clear_all = false;
 
-        solid_card_frame_with_config(tokens, &state.config.theme)
+        let style = ThemeStyleParams::active(ui.ctx());
+        let batch_r = style.card_corner_radius(state.config.theme.corner_radius);
+        let batch_frame = solid_card_frame_with_config(tokens, &state.config.theme)
             .stroke(Stroke::new(
                 1.0_f32,
                 blend_color(tokens.border_strong, tokens.accent, 0.38),
             ))
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
+            .inner_margin(egui::Margin::symmetric(12, 8));
+        show_themed_card(
+            ui,
+            batch_frame,
+            batch_r,
+            ui.make_persistent_id("catalog_batch_queue_glass"),
+            &style,
+            tokens,
+            |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(
@@ -371,7 +381,8 @@ impl CatalogView {
                         }
                     }
                 });
-            });
+            },
+        );
         ui.add_space(8.0);
 
         if let Some((src, pid)) = remove_item {
@@ -634,22 +645,41 @@ impl CatalogView {
     }
 
     fn inline_notice(&self, ui: &mut Ui, state: &UiState, tokens: &Tokens, text: &str) {
-        solid_card_frame_with_config(tokens, &state.config.theme)
+        let style = ThemeStyleParams::active(ui.ctx());
+        let cr = style.card_corner_radius(state.config.theme.corner_radius);
+        let frame = solid_card_frame_with_config(tokens, &state.config.theme)
             .stroke(Stroke::new(1.0_f32, tokens.warning))
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, |ui| {
+            .inner_margin(egui::Margin::same(8));
+        show_themed_card(
+            ui,
+            frame,
+            cr,
+            ui.make_persistent_id("catalog_notice_glass"),
+            &style,
+            tokens,
+            |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(text).color(tokens.warning));
-            });
+            },
+        );
         ui.add_space(4.0);
     }
 
     /// Panel shown when CurseForge is selected without a key: instruction, link and input.
     fn key_panel(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
-        solid_card_frame_with_config(tokens, &state.config.theme)
+        let style = ThemeStyleParams::active(ui.ctx());
+        let cr = style.card_corner_radius(state.config.theme.corner_radius);
+        let frame = solid_card_frame_with_config(tokens, &state.config.theme)
             .stroke(Stroke::new(1.0_f32, tokens.warning))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
+            .inner_margin(egui::Margin::same(12));
+        show_themed_card(
+            ui,
+            frame,
+            cr,
+            ui.make_persistent_id("catalog_cf_key_glass"),
+            &style,
+            tokens,
+            |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
                     RichText::new("Для CurseForge нужен API-ключ")
@@ -692,7 +722,8 @@ impl CatalogView {
                         state.catalog.mark_page_changed(Instant::now(), false);
                     }
                 });
-            });
+            },
+        );
     }
 
     fn results(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
@@ -816,119 +847,145 @@ impl CatalogView {
             .as_deref()
             .and_then(|u| self.icon_texture(ui, &mut state.catalog, u));
 
+        let style = ThemeStyleParams::active(ui.ctx());
+        let card_radius = style.card_corner_radius(state.config.theme.corner_radius);
         let mut frame = solid_card_frame_with_config(tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(12));
-        if queued {
+        if style.refraction_border {
+            frame = frame.stroke(Stroke::NONE);
+        } else if queued {
             frame = frame.stroke(Stroke::new(1.2_f32, tokens.accent));
         }
-        frame.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(12.0, 4.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(ICON_SIZE), Sense::hover());
-                match &texture {
-                    Some(tex) => {
-                        egui::Image::new(tex)
-                            .corner_radius(RADIUS_BUTTON)
-                            .fit_to_exact_size(Vec2::splat(ICON_SIZE))
-                            .paint_at(ui, rect);
+        let card_resp = show_themed_card(
+            ui,
+            frame,
+            card_radius,
+            ui.make_persistent_id(("cat_hit_glass", &hit.project_id)),
+            &style,
+            tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(12.0, 4.0);
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(ICON_SIZE), Sense::hover());
+                    match &texture {
+                        Some(tex) => {
+                            egui::Image::new(tex)
+                                .corner_radius(RADIUS_BUTTON)
+                                .fit_to_exact_size(Vec2::splat(ICON_SIZE))
+                                .paint_at(ui, rect);
+                        }
+                        None => {
+                            ui.painter()
+                                .rect_filled(rect, RADIUS_BUTTON, tokens.bg_input);
+                            let icon = match hit.project_kind {
+                                ProjectKind::Mod => VectorIcon::Layers,
+                                ProjectKind::Modpack => VectorIcon::Catalog,
+                                ProjectKind::Shader => VectorIcon::Shield,
+                                ProjectKind::ResourcePack => VectorIcon::Folder,
+                            };
+                            paint_vector_icon(
+                                ui.painter(),
+                                rect.shrink(12.0),
+                                icon,
+                                tokens.text_muted,
+                            );
+                        }
                     }
-                    None => {
-                        ui.painter()
-                            .rect_filled(rect, RADIUS_BUTTON, tokens.bg_input);
-                        let icon = match hit.project_kind {
-                            ProjectKind::Mod => VectorIcon::Layers,
-                            ProjectKind::Modpack => VectorIcon::Catalog,
-                            ProjectKind::Shader => VectorIcon::Shield,
-                            ProjectKind::ResourcePack => VectorIcon::Folder,
-                        };
-                        paint_vector_icon(ui.painter(), rect.shrink(12.0), icon, tokens.text_muted);
-                    }
-                }
 
-                let avail = ui.available_width();
-                let stack_actions =
-                    !installed && hit.project_kind != ProjectKind::Modpack && avail < 560.0;
-                let right_w = if hit.project_kind == ProjectKind::Modpack {
-                    216.0
-                } else if installed {
-                    224.0
-                } else if stack_actions {
-                    196.0
-                } else {
-                    336.0
-                };
-                let mid_w = (avail - right_w - 12.0).max(100.0);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(mid_w, ICON_SIZE),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+                    let avail = ui.available_width();
+                    let stack_actions =
+                        !installed && hit.project_kind != ProjectKind::Modpack && avail < 560.0;
+                    let right_w = if hit.project_kind == ProjectKind::Modpack {
+                        216.0
+                    } else if installed {
+                        224.0
+                    } else if stack_actions {
+                        196.0
+                    } else {
+                        336.0
+                    };
+                    let mid_w = (avail - right_w - 12.0).max(100.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(mid_w, ICON_SIZE),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&hit.title).color(tokens.text).strong(),
+                                    )
+                                    .truncate(),
+                                );
+                            });
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&hit.title).color(tokens.text).strong(),
+                                    RichText::new(format!(
+                                        "{}  |  {} загрузок",
+                                        hit.author,
+                                        format_downloads(hit.downloads)
+                                    ))
+                                    .color(tokens.text_muted)
+                                    .small(),
                                 )
                                 .truncate(),
                             );
-                        });
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!(
-                                    "{}  |  {} загрузок",
-                                    hit.author,
-                                    format_downloads(hit.downloads)
-                                ))
-                                .color(tokens.text_muted)
-                                .small(),
-                            )
-                            .truncate(),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&hit.description)
-                                    .color(tokens.text_muted)
-                                    .small(),
-                            )
-                            .truncate(),
-                        );
-                    },
-                );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&hit.description)
+                                        .color(tokens.text_muted)
+                                        .small(),
+                                )
+                                .truncate(),
+                            );
+                        },
+                    );
 
-                if stack_actions {
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                        self.install_or_hint_button(ui, state, hit, tokens);
-                        ui.horizontal(|ui| {
+                    if stack_actions {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                            self.queue_toggle_button(ui, state, hit, queued, tokens);
-                            if secondary_glass_button(ui, None, "Подробнее").clicked() {
-                                state.open_project(hit.clone());
-                            }
+                            self.install_or_hint_button(ui, state, hit, tokens);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                                self.queue_toggle_button(ui, state, hit, queued, tokens);
+                                if secondary_glass_button(ui, None, "Подробнее").clicked()
+                                {
+                                    state.open_project(hit.clone());
+                                }
+                            });
                         });
-                    });
-                } else {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                        self.card_actions(ui, state, hit, installed, queued, tokens);
-                    });
-                }
-            });
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                version_badge(ui, source_name(hit.source), tokens.text_muted);
-                for l in hit.loaders.iter().take(4) {
-                    version_badge(ui, l, tokens.text_muted);
-                }
-                if installed {
-                    version_badge(ui, "Установлен", tokens.accent);
-                }
-                if queued {
-                    version_badge(ui, "В очереди", tokens.accent);
-                }
-            });
-        });
+                    } else {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                            self.card_actions(ui, state, hit, installed, queued, tokens);
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                    version_badge(ui, source_name(hit.source), tokens.text_muted);
+                    for l in hit.loaders.iter().take(4) {
+                        version_badge(ui, l, tokens.text_muted);
+                    }
+                    if installed {
+                        version_badge(ui, "Установлен", tokens.accent);
+                    }
+                    if queued {
+                        version_badge(ui, "В очереди", tokens.accent);
+                    }
+                });
+            },
+        );
+        if style.refraction_border && queued {
+            crate::theme_styles::paint_liquid_glass_selection_halo(
+                ui.painter(),
+                card_resp.response.rect,
+                card_radius,
+                tokens.accent,
+            );
+        }
     }
 
     fn install_or_hint_button(

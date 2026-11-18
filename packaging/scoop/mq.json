@@ -1,5 +1,5 @@
 {
-    "version": "2.6.8",
+    "version": "2.6.9",
     "description": "High-performance multi-threaded Minecraft launcher written in Rust",
     "homepage": "https://github.com/MrQuster/mq",
     "license": "MIT",
@@ -9,7 +9,7 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/MrQuster/mq/releases/download/v2.6.8/mq-windows-x86_64-portable.zip",
+            "url": "https://github.com/MrQuster/mq/releases/download/v2.6.9/mq-windows-x86_64-portable.zip",
             "hash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
     },

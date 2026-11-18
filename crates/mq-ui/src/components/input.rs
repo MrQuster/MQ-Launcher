@@ -51,13 +51,29 @@ impl<'a> SearchField<'a> {
         let (outer_rect, _) =
             ui.allocate_exact_size(Vec2::new(desired_width, 32.0), egui::Sense::hover());
 
-        ui.painter().rect(
-            outer_rect,
-            RADIUS_BUTTON,
-            tokens.bg_input,
-            Stroke::new(1.0_f32, tokens.border),
-            egui::StrokeKind::Inside,
-        );
+        let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+        let pill_r = style.control_corner_radius(32.0, RADIUS_BUTTON);
+
+        if style.refraction_border {
+            crate::theme_styles::paint_glass_surface_overlay(
+                ui.ctx(),
+                ui.painter(),
+                outer_rect,
+                pill_r,
+                &style,
+                tokens,
+                0.20,
+                true,
+            );
+        } else {
+            ui.painter().rect(
+                outer_rect,
+                pill_r,
+                tokens.bg_input,
+                Stroke::new(1.0_f32, tokens.border),
+                egui::StrokeKind::Inside,
+            );
+        }
 
         // Magnifying glass icon on left
         let icon_rect = egui::Rect::from_min_size(
@@ -137,7 +153,7 @@ impl<'a> SearchField<'a> {
         if resp.has_focus() {
             ui.painter().rect_stroke(
                 outer_rect.expand(1.0),
-                RADIUS_BUTTON,
+                pill_r,
                 Stroke::new(1.5_f32, tokens.accent),
                 egui::StrokeKind::Outside,
             );

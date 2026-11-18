@@ -68,15 +68,32 @@ pub fn segmented_switch<T: PartialEq + Clone>(
 
     let (outer_rect, mut main_resp) =
         ui.allocate_exact_size(Vec2::new(total_width, height), Sense::hover());
+    let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+    let outer_radius = style.control_corner_radius(height, RADIUS_BUTTON);
+    let inner_radius = style.control_corner_radius(height - 6.0, RADIUS_BUTTON - 1_u8);
+    let hover_radius = style.control_corner_radius(height - 6.0, RADIUS_BUTTON - 2_u8);
     let painter = ui.painter();
 
-    painter.rect(
-        outer_rect,
-        RADIUS_BUTTON,
-        tokens.bg_input,
-        Stroke::new(1.0_f32, tokens.border),
-        egui::StrokeKind::Inside,
-    );
+    if style.refraction_border {
+        crate::theme_styles::paint_glass_surface_overlay(
+            ui.ctx(),
+            painter,
+            outer_rect,
+            outer_radius,
+            &style,
+            tokens,
+            0.18,
+            true,
+        );
+    } else {
+        painter.rect(
+            outer_rect,
+            outer_radius,
+            tokens.bg_input,
+            Stroke::new(1.0_f32, tokens.border),
+            egui::StrokeKind::Inside,
+        );
+    }
 
     let mut current_x = outer_rect.left();
     for (i, opt) in options.iter().enumerate() {
@@ -102,21 +119,47 @@ pub fn segmented_switch<T: PartialEq + Clone>(
         }
 
         if is_selected {
-            painter.rect(
-                seg_rect.shrink(1.5),
-                RADIUS_BUTTON - 1_u8,
-                tokens.bg_surface_hover,
-                Stroke::new(1.0_f32, tokens.border_strong),
-                egui::StrokeKind::Inside,
-            );
+            if style.refraction_border {
+                crate::theme_styles::paint_tinted_glass_pill(
+                    ui.ctx(),
+                    painter,
+                    seg_rect.shrink(3.0),
+                    inner_radius,
+                    &style,
+                    tokens,
+                    crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.22),
+                    0.75,
+                );
+            } else {
+                painter.rect(
+                    seg_rect.shrink(1.5),
+                    inner_radius,
+                    tokens.bg_surface_hover,
+                    Stroke::new(1.0_f32, tokens.border_strong),
+                    egui::StrokeKind::Inside,
+                );
+            }
         } else if item_resp.hovered() {
-            painter.rect(
-                seg_rect.shrink(2.0),
-                RADIUS_BUTTON - 2_u8,
-                tokens.bg_surface.gamma_multiply(0.5),
-                Stroke::NONE,
-                egui::StrokeKind::Inside,
-            );
+            if style.refraction_border {
+                crate::theme_styles::paint_glass_surface_overlay(
+                    ui.ctx(),
+                    painter,
+                    seg_rect.shrink(2.0),
+                    hover_radius,
+                    &style,
+                    tokens,
+                    0.55,
+                    true,
+                );
+            } else {
+                painter.rect(
+                    seg_rect.shrink(2.0),
+                    hover_radius,
+                    tokens.bg_surface.gamma_multiply(0.5),
+                    Stroke::NONE,
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
 
         let fg = if is_selected || item_resp.hovered() {

@@ -14,6 +14,7 @@ use crate::theme::{
     blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BORDER_SUBTLE, BUTTON_PADDING,
     CARD_SURFACE, RADIUS_BUTTON, RADIUS_TAG, TEXT_PRIMARY,
 };
+use crate::theme_styles::{lerp_rgba, paint_glass_surface_overlay, ThemeStyleParams};
 
 /// Crisp vector icons drawn procedurally via [`egui::Painter`] (strict zero-emoji policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -476,23 +477,58 @@ fn render_styled_button(
         ui.allocate_exact_size(Vec2::new(desired_width, desired_height), Sense::click());
 
     if ui.is_rect_visible(rect) {
+        let style = ThemeStyleParams::active(ui.ctx());
+        let tokens = Tokens::active(ui.ctx());
         let hovered = response.hovered() && ui.is_enabled();
         let active = response.is_pointer_button_down_on() && ui.is_enabled();
-        let fill = if active || hovered { bg_hover } else { bg_idle };
-        let stroke_col = if hovered || active {
+        let hover_t = ui.ctx().animate_bool_with_time(
+            response.id.with("hover_anim"),
+            hovered || active,
+            0.14,
+        );
+        let fill = if active {
+            bg_hover
+        } else {
+            lerp_rgba(bg_idle, bg_hover, hover_t)
+        };
+        let stroke_col = if active {
             border_hover
         } else {
-            border_idle
+            lerp_rgba(border_idle, border_hover, hover_t)
         };
 
         let painter = ui.painter();
-        painter.rect_filled(rect, RADIUS_BUTTON, fill);
-        painter.rect_stroke(
-            rect,
-            RADIUS_BUTTON,
-            Stroke::new(1.0_f32, stroke_col),
-            StrokeKind::Inside,
-        );
+        let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+        if style.refraction_border {
+            crate::theme_styles::paint_tinted_glass_pill(
+                ui.ctx(),
+                painter,
+                rect,
+                btn_radius,
+                &style,
+                &tokens,
+                fill,
+                hover_t,
+            );
+        } else {
+            painter.rect_filled(rect, btn_radius, fill);
+            painter.rect_stroke(
+                rect,
+                btn_radius,
+                Stroke::new(1.0_f32, stroke_col),
+                StrokeKind::Inside,
+            );
+            paint_glass_surface_overlay(
+                ui.ctx(),
+                painter,
+                rect,
+                btn_radius,
+                &style,
+                &tokens,
+                hover_t,
+                true,
+            );
+        }
 
         let mut cursor_x = rect.left() + BUTTON_PADDING.x;
         if let Some(ic) = icon {
@@ -528,9 +564,11 @@ fn render_styled_button(
 /// Primary accent action button (tinted surface with `tokens.accent` border, `6px` rounding).
 pub fn primary_emerald_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str) -> Response {
     let tokens = Tokens::active(ui.ctx());
-    let bg = blend_color(tokens.bg_surface, tokens.accent, 0.16);
-    let bg_hover = blend_color(tokens.bg_surface, tokens.accent, 0.28);
-    let fg_color = crate::components::button::contrast_fg_for_bg(tokens.text, bg);
+    let style = ThemeStyleParams::active(ui.ctx());
+    let bg = style.primary_button_fill(&tokens, 0.0);
+    let bg_hover = style.primary_button_fill(&tokens, 1.0);
+    let contrast_ref = blend_color(tokens.bg_surface, tokens.accent, 0.22);
+    let fg_color = crate::components::button::contrast_fg_for_bg(tokens.text, contrast_ref);
     render_styled_button(
         ui,
         icon,
@@ -546,12 +584,13 @@ pub fn primary_emerald_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str
 /// Secondary surface button matching active theme tokens (`6px` rounding).
 pub fn secondary_glass_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str) -> Response {
     let tokens = Tokens::active(ui.ctx());
+    let style = ThemeStyleParams::active(ui.ctx());
     render_styled_button(
         ui,
         icon,
         label,
-        tokens.bg_surface,
-        tokens.bg_surface_hover,
+        style.surface_fill(&tokens),
+        style.surface_hover_fill(&tokens),
         tokens.border,
         tokens.border_strong,
         tokens.text,
@@ -561,13 +600,15 @@ pub fn secondary_glass_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str
 /// Danger / destructive action button (`tokens.danger` border/accent, `6px` rounding).
 pub fn danger_button(ui: &mut Ui, icon: Option<VectorIcon>, label: &str) -> Response {
     let tokens = Tokens::active(ui.ctx());
+    let style = ThemeStyleParams::active(ui.ctx());
     let fg = crate::components::button::contrast_fg_for_bg(tokens.danger, tokens.bg_surface);
+    let hover_rgb = blend_color(tokens.bg_surface, tokens.danger, 0.20);
     render_styled_button(
         ui,
         icon,
         label,
-        tokens.bg_surface,
-        blend_color(tokens.bg_surface, tokens.danger, 0.18),
+        style.surface_fill(&tokens),
+        crate::theme_styles::with_alpha(hover_rgb, style.surface_alpha.max(0.82)),
         tokens.danger.gamma_multiply(0.65),
         tokens.danger,
         fg,
@@ -594,11 +635,37 @@ pub fn accent_button(
         .animate_bool_with_time(response.id, response.hovered(), 0.15);
 
     if ui.is_rect_visible(rect) {
+        let style = ThemeStyleParams::active(ui.ctx());
+        let tokens = Tokens::active(ui.ctx());
         let painter = ui.painter();
+        let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
         let bg_fill = blend_color(accent_color, fg, 0.12 * t);
         let border_stroke = Stroke::new(1.0_f32, blend_color(accent_color, fg, 0.25 + 0.2 * t));
-        painter.rect_filled(rect, RADIUS_BUTTON, bg_fill);
-        painter.rect_stroke(rect, RADIUS_BUTTON, border_stroke, StrokeKind::Inside);
+        if style.refraction_border {
+            crate::theme_styles::paint_tinted_glass_pill(
+                ui.ctx(),
+                painter,
+                rect,
+                btn_radius,
+                &style,
+                &tokens,
+                bg_fill,
+                t,
+            );
+        } else {
+            painter.rect_filled(rect, btn_radius, bg_fill);
+            painter.rect_stroke(rect, btn_radius, border_stroke, StrokeKind::Inside);
+            paint_glass_surface_overlay(
+                ui.ctx(),
+                painter,
+                rect,
+                btn_radius,
+                &style,
+                &tokens,
+                t,
+                true,
+            );
+        }
 
         let content_w = galley.size().x + icon_w;
         let mut cursor_x = rect.left() + (rect.width() - content_w) * 0.5;
@@ -643,16 +710,26 @@ pub fn smooth_toggle(ui: &mut Ui, on: &mut bool) -> Response {
     let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.18);
 
     if ui.is_rect_visible(pill_rect) {
+        let style = ThemeStyleParams::active(ui.ctx());
         let painter = ui.painter();
         let bg = blend_color(tokens.bg_input, tokens.accent, t);
 
         painter.rect_filled(pill_rect, CornerRadius::same(11), bg);
-        painter.rect_stroke(
-            pill_rect,
-            CornerRadius::same(11),
-            Stroke::new(1.0_f32, tokens.border_strong),
-            StrokeKind::Inside,
-        );
+        if style.refraction_border {
+            painter.rect_stroke(
+                pill_rect,
+                CornerRadius::same(11),
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(245, 250, 255, 130)),
+                StrokeKind::Inside,
+            );
+        } else {
+            painter.rect_stroke(
+                pill_rect,
+                CornerRadius::same(11),
+                Stroke::new(1.0_f32, tokens.border_strong),
+                StrokeKind::Inside,
+            );
+        }
 
         let knob_x = pill_rect.left() + 11.0 + t * (pill_rect.width() - 22.0);
         let knob_center = Pos2::new(knob_x, pill_rect.center().y);
@@ -664,6 +741,13 @@ pub fn smooth_toggle(ui: &mut Ui, on: &mut bool) -> Response {
             Color32::from_rgb(0xE6, 0xE8, 0xEE)
         };
         painter.circle_filled(knob_center, 7.5, knob_col);
+        if style.refraction_border {
+            painter.circle_stroke(
+                knob_center,
+                7.5,
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 195)),
+            );
+        }
     }
 
     let knob_col = if *on {
@@ -730,21 +814,27 @@ pub fn version_badge(ui: &mut Ui, text: &str, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
 
     if ui.is_rect_visible(rect) {
+        let style = ThemeStyleParams::active(ui.ctx());
+        let tag_r = if style.refraction_border {
+            CornerRadius::same(10)
+        } else {
+            RADIUS_TAG
+        };
         let painter = ui.painter();
         let bg = if tokens.is_light() {
             blend_color(tokens.bg_surface, color, 0.12)
         } else {
-            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24)
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 28)
         };
         let border = if tokens.is_light() {
             blend_color(tokens.border, color, 0.35)
         } else {
-            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 72)
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 88)
         };
-        painter.rect_filled(rect, RADIUS_TAG, bg);
+        painter.rect_filled(rect, tag_r, bg);
         painter.rect_stroke(
             rect,
-            RADIUS_TAG,
+            tag_r,
             Stroke::new(1.0_f32, border),
             StrokeKind::Inside,
         );
@@ -866,28 +956,59 @@ pub fn hero_action_button(
         ui.allocate_exact_size(Vec2::new(desired_width, desired_height), Sense::click());
 
     if ui.is_rect_visible(rect) {
+        let style = ThemeStyleParams::active(ui.ctx());
         let time = ui.input(|i| i.time);
         let pulse = ((time * 3.2).sin() * 0.5 + 0.5) as f32;
         let hovered = response.hovered() && ui.is_enabled();
         let active = response.is_pointer_button_down_on() && ui.is_enabled();
-        let fill = if active || hovered { bg_hover } else { bg };
+        let hover_t = ui.ctx().animate_bool_with_time(
+            response.id.with("hero_hover"),
+            hovered || active,
+            0.14,
+        );
+        let fill = lerp_rgba(bg, bg_hover, hover_t);
+        let fill = crate::theme_styles::with_alpha(fill, style.surface_alpha.max(0.72));
 
         let painter = ui.painter();
+        let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
         let glow_expand = if hovered { 2.0 } else { 1.0 + pulse * 1.5 };
         let glow_alpha = if hovered { 0.35 } else { 0.12 + pulse * 0.12 };
         painter.rect_filled(
             rect.expand(glow_expand),
-            RADIUS_BUTTON,
+            btn_radius,
             accent_color.gamma_multiply(glow_alpha),
         );
 
-        painter.rect_filled(rect, RADIUS_BUTTON, fill);
-        painter.rect_stroke(
-            rect,
-            RADIUS_BUTTON,
-            Stroke::new(1.5_f32, accent_color),
-            StrokeKind::Inside,
-        );
+        if style.refraction_border {
+            crate::theme_styles::paint_tinted_glass_pill(
+                ui.ctx(),
+                painter,
+                rect,
+                btn_radius,
+                &style,
+                &tokens,
+                fill,
+                hover_t,
+            );
+        } else {
+            painter.rect_filled(rect, btn_radius, fill);
+            painter.rect_stroke(
+                rect,
+                btn_radius,
+                Stroke::new(1.5_f32, accent_color),
+                StrokeKind::Inside,
+            );
+            paint_glass_surface_overlay(
+                ui.ctx(),
+                painter,
+                rect,
+                btn_radius,
+                &style,
+                &tokens,
+                hover_t,
+                true,
+            );
+        }
 
         let mut cursor_x =
             rect.left() + (rect.width() - (icon_side + icon_gap + galley.size().x)) * 0.5;
@@ -1464,13 +1585,19 @@ pub fn status_pill(ui: &mut Ui, label: &str, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
 
     if ui.is_rect_visible(rect) {
+        let style = ThemeStyleParams::active(ui.ctx());
+        let tag_r = if style.refraction_border {
+            CornerRadius::same(10)
+        } else {
+            RADIUS_TAG
+        };
         let painter = ui.painter();
         let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 26);
         let border = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 90);
-        painter.rect_filled(rect, RADIUS_TAG, bg);
+        painter.rect_filled(rect, tag_r, bg);
         painter.rect_stroke(
             rect,
-            RADIUS_TAG,
+            tag_r,
             Stroke::new(1.0_f32, border),
             StrokeKind::Inside,
         );

@@ -13,6 +13,10 @@ use egui::{
 };
 use mq_core::{BackgroundStyle, ThemeConfig, ThemePreset, UiDensity};
 
+use crate::theme_styles::{
+    paint_liquid_glass_ambient_backdrop, paint_translucent_clean_backdrop, ThemeStyleParams,
+};
+
 /// Curated calm accent swatch preset for customization controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccentPreset {
@@ -245,6 +249,50 @@ impl Tokens {
         }
     }
 
+    /// Liquid Glass — deep oceanic slate base tuned for Apple-style frosted translucency & icy refraction.
+    pub const fn liquid_glass() -> Self {
+        Self {
+            bg_app: Color32::from_rgb(0x0B, 0x11, 0x1E),
+            bg_sidebar: Color32::from_rgb(0x10, 0x18, 0x28),
+            bg_surface: Color32::from_rgb(0x16, 0x22, 0x36),
+            bg_surface_hover: Color32::from_rgb(0x20, 0x30, 0x4B),
+            bg_input: Color32::from_rgb(0x0E, 0x15, 0x23),
+            border: Color32::from_rgb(0x32, 0x46, 0x66),
+            border_strong: Color32::from_rgb(0x52, 0x6F, 0x99),
+            text: Color32::from_rgb(0xF4, 0xF8, 0xFF),
+            text_muted: Color32::from_rgb(0xB0, 0xC2, 0xDA),
+            text_disabled: Color32::from_rgb(0x64, 0x77, 0x93),
+            accent: Color32::from_rgb(0x58, 0xB8, 0xF8),
+            accent_hover: Color32::from_rgb(0x3B, 0x93, 0xD8),
+            accent_text: Color32::from_rgb(0x07, 0x12, 0x1E),
+            danger: Color32::from_rgb(0xF0, 0x55, 0x60),
+            warning: Color32::from_rgb(0xF5, 0xAD, 0x36),
+            success: Color32::from_rgb(0x4C, 0xC3, 0x8A),
+        }
+    }
+
+    /// Translucent — neutral dark tint for clean compositor-level window transparency without glares.
+    pub const fn translucent() -> Self {
+        Self {
+            bg_app: Color32::from_rgb(0x10, 0x13, 0x1A),
+            bg_sidebar: Color32::from_rgb(0x14, 0x18, 0x21),
+            bg_surface: Color32::from_rgb(0x1A, 0x20, 0x2B),
+            bg_surface_hover: Color32::from_rgb(0x23, 0x2A, 0x38),
+            bg_input: Color32::from_rgb(0x12, 0x16, 0x1E),
+            border: Color32::from_rgb(0x2E, 0x36, 0x46),
+            border_strong: Color32::from_rgb(0x45, 0x50, 0x66),
+            text: Color32::from_rgb(0xF0, 0xF3, 0xF8),
+            text_muted: Color32::from_rgb(0xA8, 0xB3, 0xC5),
+            text_disabled: Color32::from_rgb(0x66, 0x70, 0x84),
+            accent: Color32::from_rgb(0x56, 0xA3, 0x96),
+            accent_hover: Color32::from_rgb(0x42, 0x88, 0x7C),
+            accent_text: Color32::from_rgb(0x07, 0x14, 0x12),
+            danger: Color32::from_rgb(0xE5, 0x48, 0x4D),
+            warning: Color32::from_rgb(0xF5, 0xA5, 0x24),
+            success: Color32::from_rgb(0x4C, 0x9A, 0x82),
+        }
+    }
+
     /// Light Clean — high-contrast clean daylight theme.
     pub const fn light_clean() -> Self {
         Self {
@@ -271,6 +319,8 @@ impl Tokens {
     pub fn from_preset(preset: ThemePreset) -> Self {
         match preset {
             ThemePreset::MatteDark => Self::matte_dark(),
+            ThemePreset::LiquidGlass => Self::liquid_glass(),
+            ThemePreset::Translucent => Self::translucent(),
             ThemePreset::PrismClassicDark => Self::prism_classic_dark(),
             ThemePreset::ModrinthEmerald => Self::modrinth_emerald(),
             ThemePreset::CatppuccinMocha => Self::catppuccin_mocha(),
@@ -404,6 +454,7 @@ pub const BUTTON_PADDING: Vec2 = egui::vec2(12.0, 6.0);
 /// Builds dynamic [`Visuals`] for the active theme configuration.
 pub fn build_visuals_from_config(cfg: &ThemeConfig) -> Visuals {
     let tokens = Tokens::from_config(cfg);
+    let style = ThemeStyleParams::from_config(cfg);
     let is_light = tokens.is_light();
     let mut visuals = if is_light {
         Visuals::light()
@@ -414,20 +465,30 @@ pub fn build_visuals_from_config(cfg: &ThemeConfig) -> Visuals {
     let card_r_u8 = crate::state::safe_clamp_f32(cfg.corner_radius, 0.0, 16.0).round() as u8;
     let btn_r_u8 =
         (crate::state::safe_clamp_f32(cfg.corner_radius, 0.0, 16.0) * 0.75).round() as u8;
-    let card_radius = CornerRadius::same(card_r_u8);
-    let btn_radius = CornerRadius::same(btn_r_u8.min(12));
+    let card_radius = style.card_corner_radius(card_r_u8 as f32);
+    let btn_radius = style.control_corner_radius(32.0, CornerRadius::same(btn_r_u8.min(12)));
+
+    let win_fill = style.window_fill(&tokens);
+    let surf_fill = style.surface_fill(&tokens);
+    let surf_hover = style.surface_hover_fill(&tokens);
+    let inp_fill = style.input_fill(&tokens);
+    let border_col = if style.refraction_border {
+        blend_color(tokens.border, Color32::WHITE, 0.22)
+    } else {
+        tokens.border
+    };
 
     visuals.dark_mode = !is_light;
     visuals.override_text_color = Some(tokens.text);
-    visuals.panel_fill = tokens.bg_app;
-    visuals.window_fill = tokens.bg_surface;
-    visuals.faint_bg_color = tokens.bg_surface;
-    visuals.extreme_bg_color = tokens.bg_input;
-    visuals.code_bg_color = tokens.bg_input;
+    visuals.panel_fill = win_fill;
+    visuals.window_fill = style.modal_fill(&tokens);
+    visuals.faint_bg_color = surf_fill;
+    visuals.extreme_bg_color = inp_fill;
+    visuals.code_bg_color = inp_fill;
 
     visuals.window_corner_radius = card_radius;
     visuals.menu_corner_radius = card_radius;
-    visuals.window_stroke = Stroke::new(1.0_f32, tokens.border);
+    visuals.window_stroke = Stroke::new(1.0_f32, border_col);
 
     visuals.hyperlink_color = tokens.accent;
     visuals.warn_fg_color = tokens.warning;
@@ -441,44 +502,47 @@ pub fn build_visuals_from_config(cfg: &ThemeConfig) -> Visuals {
 
     visuals.widgets = Widgets {
         noninteractive: WidgetVisuals {
-            weak_bg_fill: tokens.bg_surface,
-            bg_fill: tokens.bg_surface,
-            bg_stroke: Stroke::new(1.0_f32, tokens.border),
+            weak_bg_fill: surf_fill,
+            bg_fill: surf_fill,
+            bg_stroke: Stroke::new(1.0_f32, border_col),
             fg_stroke: Stroke::new(1.0_f32, tokens.text),
             corner_radius: card_radius,
             expansion: 0.0,
         },
         inactive: WidgetVisuals {
-            weak_bg_fill: tokens.bg_surface,
-            bg_fill: blend_color(
-                tokens.bg_input,
-                tokens.border_strong,
-                if is_light { 0.50 } else { 0.40 },
+            weak_bg_fill: surf_fill,
+            bg_fill: crate::theme_styles::with_alpha(
+                blend_color(
+                    tokens.bg_input,
+                    tokens.border_strong,
+                    if is_light { 0.50 } else { 0.40 },
+                ),
+                style.surface_alpha.max(0.68),
             ),
-            bg_stroke: Stroke::new(1.0_f32, tokens.border),
+            bg_stroke: Stroke::new(1.0_f32, border_col),
             fg_stroke: Stroke::new(1.0_f32, tokens.text),
             corner_radius: btn_radius,
             expansion: 0.0,
         },
         hovered: WidgetVisuals {
-            weak_bg_fill: tokens.bg_surface_hover,
-            bg_fill: tokens.bg_surface_hover,
+            weak_bg_fill: surf_hover,
+            bg_fill: surf_hover,
             bg_stroke: Stroke::new(1.0_f32, tokens.border_strong),
             fg_stroke: Stroke::new(1.5_f32, tokens.text),
             corner_radius: btn_radius,
             expansion: 0.0,
         },
         active: WidgetVisuals {
-            weak_bg_fill: tokens.bg_surface_hover,
-            bg_fill: tokens.bg_surface_hover,
+            weak_bg_fill: surf_hover,
+            bg_fill: surf_hover,
             bg_stroke: Stroke::new(1.5_f32, tokens.accent),
             fg_stroke: Stroke::new(1.5_f32, tokens.text),
             corner_radius: btn_radius,
             expansion: 0.0,
         },
         open: WidgetVisuals {
-            weak_bg_fill: tokens.bg_surface_hover,
-            bg_fill: tokens.bg_surface_hover,
+            weak_bg_fill: surf_hover,
+            bg_fill: surf_hover,
             bg_stroke: Stroke::new(1.0_f32, tokens.border_strong),
             fg_stroke: Stroke::new(1.0_f32, tokens.text_muted),
             corner_radius: btn_radius,
@@ -533,11 +597,15 @@ pub fn build_style_from_config(cfg: &ThemeConfig) -> Style {
 /// Applies dynamic theme configuration to [`egui::Context`].
 pub fn apply_theme(ctx: &Context, cfg: &ThemeConfig) {
     let tokens = Tokens::from_config(cfg);
+    let style_params = ThemeStyleParams::from_config(cfg);
     let style = build_style_from_config(cfg);
     ctx.set_visuals(style.visuals.clone());
     ctx.set_style(style);
     ctx.set_zoom_factor(crate::state::safe_clamp_f32(cfg.ui_scale, 0.8, 1.5));
-    ctx.data_mut(|d| d.insert_temp(Id::new("mq_active_tokens"), tokens));
+    ctx.data_mut(|d| {
+        d.insert_temp(Id::new("mq_active_tokens"), tokens);
+        d.insert_temp(Id::new("mq_active_theme_style"), style_params);
+    });
 }
 
 /// Solid opaque card frame (8px radius, 1px border, surface background).
@@ -550,32 +618,49 @@ pub fn solid_card_frame(tokens: &Tokens) -> Frame {
 }
 
 /// Configured card frame honoring [`ThemeConfig::card_opacity`], [`ThemeConfig::corner_radius`],
-/// and [`ThemeConfig::border_glow`].
+/// [`ThemeConfig::border_glow`], and active [`ThemeStyleParams`].
 pub fn solid_card_frame_with_config(tokens: &Tokens, cfg: &ThemeConfig) -> Frame {
-    let alpha = (crate::state::safe_clamp_f32(cfg.card_opacity, 0.45, 1.0) * 255.0).round() as u8;
-    let fill = Color32::from_rgba_unmultiplied(
-        tokens.bg_surface.r(),
-        tokens.bg_surface.g(),
-        tokens.bg_surface.b(),
-        alpha,
-    );
+    let style = ThemeStyleParams::from_config(cfg);
+    let fill = style.surface_fill(tokens);
     let glow = crate::state::safe_clamp_f32(cfg.border_glow, 0.0, 1.0);
-    let border_col = if glow > 0.01 {
+    let border_col = if style.refraction_border {
+        Color32::TRANSPARENT
+    } else if glow > 0.01 {
         blend_color(tokens.border, tokens.accent, glow * 0.45)
     } else {
         tokens.border
     };
-    let r = crate::state::safe_clamp_f32(cfg.corner_radius, 0.0, 16.0).round() as u8;
+    let cr = style.card_corner_radius(cfg.corner_radius);
+    let stroke = if style.refraction_border {
+        Stroke::NONE
+    } else {
+        Stroke::new(1.0_f32, border_col)
+    };
     Frame::new()
         .fill(fill)
-        .stroke(Stroke::new(1.0_f32, border_col))
-        .corner_radius(CornerRadius::same(r))
+        .stroke(stroke)
+        .corner_radius(cr)
         .inner_margin(Margin::same(12))
 }
 
 #[inline]
 pub fn rgb_to_c32(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
+
+/// Sidebar frame honoring active [`ThemeStyleParams`] translucency and refractive tint.
+pub fn solid_sidebar_frame_with_config(tokens: &Tokens, cfg: &ThemeConfig) -> Frame {
+    let style = ThemeStyleParams::from_config(cfg);
+    if style.refraction_border {
+        return Frame::new()
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .inner_margin(Margin::same(12));
+    }
+    Frame::new()
+        .fill(style.sidebar_fill(tokens))
+        .stroke(Stroke::new(1.0_f32, tokens.border))
+        .inner_margin(Margin::same(12))
 }
 
 /// Solid opaque sidebar frame (surface background, 1px border).
@@ -593,6 +678,24 @@ pub fn solid_modal_frame(tokens: &Tokens) -> Frame {
         .stroke(Stroke::new(1.0_f32, tokens.border_strong))
         .corner_radius(RADIUS_CARD)
         .inner_margin(Margin::same(20))
+}
+
+/// Bottom HUD bar frame honoring active [`ThemeStyleParams`] translucency.
+pub fn solid_hud_frame_with_config(tokens: &Tokens, cfg: &ThemeConfig) -> Frame {
+    let style = ThemeStyleParams::from_config(cfg);
+    if style.refraction_border {
+        return Frame::new()
+            .fill(crate::theme_styles::with_alpha(
+                tokens.bg_sidebar,
+                style.hud_alpha * 0.78,
+            ))
+            .stroke(Stroke::NONE)
+            .inner_margin(Margin::symmetric(12, 4));
+    }
+    Frame::new()
+        .fill(style.hud_fill(tokens))
+        .stroke(Stroke::new(1.0_f32, tokens.border))
+        .inner_margin(Margin::symmetric(12, 4))
 }
 
 /// HUD bottom bar frame matching the active theme tokens.
@@ -759,6 +862,21 @@ fn paint_procedural_backdrop(painter: &Painter, rect: Rect, tokens: &Tokens) {
     }
 }
 
+fn is_deterministic_backdrop(ctx: &Context) -> bool {
+    let env_det = std::env::var("MQ_TEST_DETERMINISTIC")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    #[cfg(feature = "test-hooks")]
+    {
+        let _ = ctx;
+        env_det || crate::test_hooks::is_solid_background(ctx)
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        let _ = ctx;
+        env_det
+    }
+}
+
 /// Paints the configured launcher backdrop (`Procedural`, `Solid`, or `CustomImage`) inside `rect`.
 pub fn paint_launcher_background(
     ctx: &Context,
@@ -770,12 +888,34 @@ pub fn paint_launcher_background(
     if !rect.is_positive() {
         return;
     }
-    painter.rect_filled(rect, CornerRadius::ZERO, tokens.bg_app);
+    let style = ThemeStyleParams::from_config(cfg);
+    let deterministic = is_deterministic_backdrop(ctx);
 
     match cfg.background_style {
-        BackgroundStyle::Solid => {}
-        BackgroundStyle::Procedural => paint_procedural_backdrop(painter, rect, tokens),
+        BackgroundStyle::Solid => {
+            painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
+        }
+        BackgroundStyle::Procedural => match cfg.preset {
+            ThemePreset::LiquidGlass => {
+                paint_liquid_glass_ambient_backdrop(
+                    ctx,
+                    painter,
+                    rect,
+                    &style,
+                    tokens,
+                    deterministic,
+                );
+            }
+            ThemePreset::Translucent => {
+                paint_translucent_clean_backdrop(painter, rect, &style, tokens);
+            }
+            _ => {
+                painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
+                paint_procedural_backdrop(painter, rect, tokens);
+            }
+        },
         BackgroundStyle::CustomImage => {
+            painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
             if let Some((tex, size)) = cfg
                 .backdrop_path
                 .as_deref()
@@ -805,7 +945,20 @@ pub fn paint_launcher_background(
                     painter.rect_filled(rect, CornerRadius::ZERO, scrim);
                 }
             } else {
-                paint_procedural_backdrop(painter, rect, tokens);
+                match cfg.preset {
+                    ThemePreset::LiquidGlass => paint_liquid_glass_ambient_backdrop(
+                        ctx,
+                        painter,
+                        rect,
+                        &style,
+                        tokens,
+                        deterministic,
+                    ),
+                    ThemePreset::Translucent => {
+                        paint_translucent_clean_backdrop(painter, rect, &style, tokens)
+                    }
+                    _ => paint_procedural_backdrop(painter, rect, tokens),
+                }
             }
         }
     }
@@ -819,7 +972,7 @@ pub fn custom_glass_card_frame(cfg: &ThemeConfig) -> Frame {
 
 #[inline]
 pub fn custom_sidebar_frame(cfg: &ThemeConfig) -> Frame {
-    solid_sidebar_frame(&Tokens::from_config(cfg))
+    solid_sidebar_frame_with_config(&Tokens::from_config(cfg), cfg)
 }
 
 #[inline]

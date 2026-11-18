@@ -502,10 +502,38 @@ fn render_nav_row(
     let hovered = response.hovered();
 
     if ui.is_rect_visible(rect) {
+        let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
         let painter = ui.painter();
-        let cr = CornerRadius::same(NAV_ROW_RADIUS);
+        let cr = style.control_corner_radius(rect.height(), CornerRadius::same(NAV_ROW_RADIUS));
+        let hover_t =
+            ui.ctx()
+                .animate_bool_with_time(id.with("glass_nav_hover"), hovered || is_active, 0.14);
 
-        if is_active {
+        if style.refraction_border {
+            if is_active {
+                crate::theme_styles::paint_tinted_glass_pill(
+                    ui.ctx(),
+                    painter,
+                    rect,
+                    cr,
+                    &style,
+                    tokens,
+                    crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.28),
+                    hover_t.max(0.55),
+                );
+            } else if hovered || hover_t > 0.02 {
+                crate::theme_styles::paint_glass_surface_overlay(
+                    ui.ctx(),
+                    painter,
+                    rect,
+                    cr,
+                    &style,
+                    tokens,
+                    hover_t * 0.85,
+                    true,
+                );
+            }
+        } else if is_active {
             painter.rect_filled(rect, cr, tokens.bg_surface);
             let bar_rect = Rect::from_min_max(
                 Pos2::new(rect.left(), rect.top() + 6.0),
@@ -869,7 +897,22 @@ fn render_bottom_account_profile(
         let painter = ui.painter();
 
         if hovered {
-            painter.rect_filled(rect, RADIUS_BUTTON, tokens.bg_surface_hover);
+            let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+            let r = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+            if style.refraction_border {
+                crate::theme_styles::paint_glass_surface_overlay(
+                    ui.ctx(),
+                    painter,
+                    rect,
+                    r,
+                    &style,
+                    tokens,
+                    0.85,
+                    true,
+                );
+            } else {
+                painter.rect_filled(rect, r, tokens.bg_surface_hover);
+            }
         }
 
         let fallback;
@@ -1019,6 +1062,18 @@ pub fn render_sidebar_with_state(
     tokens: &Tokens,
     state: SidebarState,
 ) -> Option<SidebarAction> {
+    let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+    if style.refraction_border {
+        let dock_rect = ui.max_rect().expand(12.0);
+        crate::theme_styles::paint_sidebar_glass_dock(
+            ui.ctx(),
+            ui.painter(),
+            dock_rect,
+            &style,
+            tokens,
+        );
+    }
+
     let mut action = handle_keyboard_navigation(ui).map(SidebarAction::SelectTab);
     let is_compact = ui.available_width() < 120.0;
 

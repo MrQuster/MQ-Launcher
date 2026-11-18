@@ -50,6 +50,20 @@ steps:
       frames: 2
   - dump_ui: {}
   - screenshot: {}
+  - set_theme:
+      preset: LiquidGlass
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
+  - set_theme:
+      preset: Translucent
+  - wait_idle:
+      timeout_ms: 5000
+      frames: 2
+  - dump_ui: {}
+  - screenshot: {}
   - goto:
       tab: Settings
       section: Customization

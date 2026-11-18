@@ -5,6 +5,7 @@ use egui::{CursorIcon, Response, Stroke, Ui, Vec2};
 
 use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_BUTTON};
+use crate::theme_styles::{lerp_rgba, paint_glass_surface_overlay, ThemeStyleParams};
 use crate::widgets::{paint_vector_icon, VectorIcon};
 
 fn srgb_channel_to_linear(c: u8) -> f32 {
@@ -51,10 +52,11 @@ pub fn button_primary(
     icon: Option<VectorIcon>,
     text: &str,
 ) -> Response {
-    let base_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.26);
-    let hover_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.38);
-    let active_bg = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.44);
-    let fg_color = contrast_fg_for_bg(tokens.text, base_bg);
+    let style = ThemeStyleParams::active(ui.ctx());
+    let base_rgb = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.26);
+    let hover_rgb = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.38);
+    let active_rgb = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.44);
+    let fg_color = contrast_fg_for_bg(tokens.text, base_rgb);
     let text_w = ui
         .painter()
         .layout_no_wrap(text.to_owned(), egui::FontId::proportional(13.5), fg_color)
@@ -67,28 +69,61 @@ pub fn button_primary(
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
 
-    let bg_color = if response.is_pointer_button_down_on() {
-        active_bg
-    } else if response.hovered() {
-        hover_bg
+    let hover_t = ui.ctx().animate_bool_with_time(
+        response.id.with("hover_anim"),
+        response.hovered() || response.is_pointer_button_down_on(),
+        0.14,
+    );
+    let bg_rgb = if response.is_pointer_button_down_on() {
+        active_rgb
     } else {
-        base_bg
+        crate::theme::blend_color(base_rgb, hover_rgb, hover_t)
     };
-    let fg_color = contrast_fg_for_bg(tokens.text, bg_color);
+    let bg_alpha = if style.refraction_border {
+        (style.surface_alpha + 0.16 + 0.08 * hover_t).clamp(0.55, 0.94)
+    } else {
+        style.surface_alpha.max(0.84)
+    };
+    let bg_color = crate::theme_styles::with_alpha(bg_rgb, bg_alpha);
+    let fg_color = contrast_fg_for_bg(tokens.text, bg_rgb);
 
     let painter = ui.painter();
-    painter.rect_filled(rect, RADIUS_BUTTON, bg_color);
-    painter.rect_stroke(
-        rect,
-        RADIUS_BUTTON,
-        Stroke::new(1.5_f32, tokens.accent),
-        egui::StrokeKind::Inside,
-    );
+    let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+    if style.refraction_border {
+        crate::theme_styles::paint_tinted_glass_pill(
+            ui.ctx(),
+            painter,
+            rect,
+            btn_radius,
+            &style,
+            tokens,
+            bg_color,
+            hover_t,
+        );
+    } else {
+        painter.rect_filled(rect, btn_radius, bg_color);
+        painter.rect_stroke(
+            rect,
+            btn_radius,
+            Stroke::new(1.5_f32, tokens.accent),
+            egui::StrokeKind::Inside,
+        );
+        paint_glass_surface_overlay(
+            ui.ctx(),
+            painter,
+            rect,
+            btn_radius,
+            &style,
+            tokens,
+            hover_t,
+            true,
+        );
+    }
 
     if response.has_focus() {
         painter.rect_stroke(
             rect.expand(2.0),
-            RADIUS_BUTTON,
+            btn_radius,
             Stroke::new(2.0_f32, tokens.accent_hover),
             egui::StrokeKind::Outside,
         );
@@ -151,27 +186,58 @@ pub fn button_secondary(
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
 
-    let (bg_color, stroke_color) = if response.is_pointer_button_down_on() {
-        (tokens.bg_surface_hover, tokens.accent)
-    } else if response.hovered() {
-        (tokens.bg_surface_hover, tokens.border_strong)
+    let style = ThemeStyleParams::active(ui.ctx());
+    let hover_t = ui.ctx().animate_bool_with_time(
+        response.id.with("hover_anim"),
+        response.hovered() || response.is_pointer_button_down_on(),
+        0.14,
+    );
+    let idle_fill = style.surface_fill(tokens);
+    let hover_fill = style.surface_hover_fill(tokens);
+    let bg_color = lerp_rgba(idle_fill, hover_fill, hover_t);
+    let stroke_color = if response.is_pointer_button_down_on() {
+        tokens.accent
     } else {
-        (tokens.bg_surface, tokens.border)
+        lerp_rgba(tokens.border, tokens.border_strong, hover_t)
     };
 
     let painter = ui.painter();
-    painter.rect(
-        rect,
-        RADIUS_BUTTON,
-        bg_color,
-        Stroke::new(1.0_f32, stroke_color),
-        egui::StrokeKind::Inside,
-    );
+    let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+    if style.refraction_border {
+        paint_glass_surface_overlay(
+            ui.ctx(),
+            painter,
+            rect,
+            btn_radius,
+            &style,
+            tokens,
+            hover_t,
+            true,
+        );
+    } else {
+        painter.rect_filled(rect, btn_radius, bg_color);
+        painter.rect_stroke(
+            rect,
+            btn_radius,
+            Stroke::new(1.0_f32, stroke_color),
+            egui::StrokeKind::Inside,
+        );
+        paint_glass_surface_overlay(
+            ui.ctx(),
+            painter,
+            rect,
+            btn_radius,
+            &style,
+            tokens,
+            hover_t,
+            true,
+        );
+    }
 
     if response.has_focus() {
         painter.rect_stroke(
             rect.expand(2.0),
-            RADIUS_BUTTON,
+            btn_radius,
             Stroke::new(2.0_f32, tokens.accent),
             egui::StrokeKind::Outside,
         );
@@ -219,22 +285,55 @@ pub fn icon_button(ui: &mut Ui, tokens: &Tokens, icon: VectorIcon, tooltip: &str
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
 
-    let (bg, border) = if response.is_pointer_button_down_on() {
-        (tokens.bg_surface_hover, tokens.accent)
-    } else if response.hovered() {
-        (tokens.bg_surface_hover, tokens.border_strong)
+    let style = ThemeStyleParams::active(ui.ctx());
+    let hover_t = ui.ctx().animate_bool_with_time(
+        response.id.with("hover_anim"),
+        response.hovered() || response.is_pointer_button_down_on(),
+        0.14,
+    );
+    let bg = lerp_rgba(
+        style.surface_fill(tokens),
+        style.surface_hover_fill(tokens),
+        hover_t,
+    );
+    let border = if response.is_pointer_button_down_on() {
+        tokens.accent
     } else {
-        (tokens.bg_surface, tokens.border)
+        lerp_rgba(tokens.border, tokens.border_strong, hover_t)
     };
 
     let painter = ui.painter();
-    painter.rect(
-        rect,
-        RADIUS_BUTTON,
-        bg,
-        Stroke::new(1.0_f32, border),
-        egui::StrokeKind::Inside,
-    );
+    let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+    if style.refraction_border {
+        paint_glass_surface_overlay(
+            ui.ctx(),
+            painter,
+            rect,
+            btn_radius,
+            &style,
+            tokens,
+            hover_t,
+            true,
+        );
+    } else {
+        painter.rect_filled(rect, btn_radius, bg);
+        painter.rect_stroke(
+            rect,
+            btn_radius,
+            Stroke::new(1.0_f32, border),
+            egui::StrokeKind::Inside,
+        );
+        paint_glass_surface_overlay(
+            ui.ctx(),
+            painter,
+            rect,
+            btn_radius,
+            &style,
+            tokens,
+            hover_t,
+            true,
+        );
+    }
 
     let icon_rect = rect.shrink(8.0);
     let icon_col = if response.hovered() {

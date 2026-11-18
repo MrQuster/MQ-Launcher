@@ -71,6 +71,8 @@ impl<'a, T: Clone + PartialEq> Select<'a, T> {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
 
+        let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+        let pill_r = style.control_corner_radius(32.0, RADIUS_BUTTON);
         let painter = ui.painter();
         let bg = if resp.hovered() {
             tokens.bg_surface_hover
@@ -83,13 +85,26 @@ impl<'a, T: Clone + PartialEq> Select<'a, T> {
             tokens.border
         };
 
-        painter.rect(
-            rect,
-            RADIUS_BUTTON,
-            bg,
-            Stroke::new(1.0_f32, border),
-            egui::StrokeKind::Inside,
-        );
+        if style.refraction_border {
+            crate::theme_styles::paint_glass_surface_overlay(
+                ui.ctx(),
+                painter,
+                rect,
+                pill_r,
+                &style,
+                tokens,
+                if resp.hovered() { 0.85 } else { 0.22 },
+                true,
+            );
+        } else {
+            painter.rect(
+                rect,
+                pill_r,
+                bg,
+                Stroke::new(1.0_f32, border),
+                egui::StrokeKind::Inside,
+            );
+        }
 
         // Draw label
         let text_pos = egui::pos2(rect.left() + 10.0, rect.center().y - 7.0);

@@ -1271,6 +1271,8 @@ fn parse_theme_preset(raw: &str) -> Option<ThemePreset> {
     let norm = raw.trim().to_ascii_lowercase().replace(['-', '_', ' '], "");
     match norm.as_str() {
         "mattedark" | "dark" | "default" => Some(ThemePreset::MatteDark),
+        "liquidglass" | "glass" => Some(ThemePreset::LiquidGlass),
+        "translucent" | "semi" | "полупрозрачная" => Some(ThemePreset::Translucent),
         "prismclassicdark" | "classicdark" | "prism" => Some(ThemePreset::PrismClassicDark),
         "modrinthemerald" | "emerald" | "modrinth" => Some(ThemePreset::ModrinthEmerald),
         "catppuccinmocha" | "catppuccin" | "mocha" => Some(ThemePreset::CatppuccinMocha),

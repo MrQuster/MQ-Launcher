@@ -27,10 +27,12 @@ pub fn render_modal_container<R>(
         (screen_rect.height() * 0.20).max(32.0),
     );
 
+    let style = crate::theme_styles::ThemeStyleParams::active(ctx);
+    let modal_r = style.modal_corner_radius(RADIUS_CARD);
     let frame = Frame::new()
-        .fill(tokens.bg_surface)
+        .fill(style.modal_fill(tokens))
         .stroke(Stroke::new(1.0_f32, tokens.border_strong))
-        .corner_radius(RADIUS_CARD)
+        .corner_radius(modal_r)
         .inner_margin(Margin::same(20));
 
     let area = egui::Area::new(egui::Id::new("modal_window"))
@@ -39,16 +41,24 @@ pub fn render_modal_container<R>(
 
     let inner = area.show(ctx, |ui| {
         ui.set_width(modal_width);
-        let resp = frame.show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(title)
-                    .size(17.0)
-                    .strong()
-                    .color(tokens.text),
-            );
-            ui.add_space(16.0);
-            add_contents(ui)
-        });
+        let resp = crate::theme_styles::show_themed_card(
+            ui,
+            frame,
+            modal_r,
+            egui::Id::new("mq_modal_glass_card"),
+            &style,
+            tokens,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(17.0)
+                        .strong()
+                        .color(tokens.text),
+                );
+                ui.add_space(16.0);
+                add_contents(ui)
+            },
+        );
         register_rect(
             ui,
             resp.response.id,

@@ -164,6 +164,17 @@ fn render_smooth_progress_bar(ui: &mut Ui, fraction: f32, tokens: &Tokens) {
 /// Renders the bottom status bar and per-core CPU telemetry HUD inside `ui`.
 pub fn render_bottom_hud(ui: &mut Ui, data: &BottomHudData) {
     let tokens = Tokens::active(ui.ctx());
+    let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+    if style.refraction_border {
+        let dock_rect = ui.max_rect().expand2(Vec2::new(12.0, 4.0));
+        crate::theme_styles::paint_hud_glass_dock(
+            ui.ctx(),
+            ui.painter(),
+            dock_rect,
+            &style,
+            &tokens,
+        );
+    }
     let avail_w = ui.available_width();
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;

@@ -29,6 +29,7 @@ pub mod state;
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks;
 pub mod theme;
+pub mod theme_styles;
 pub mod widgets;
 
 #[allow(unused_imports)]
@@ -65,5 +66,7 @@ pub use snapshot::*;
 pub use state::*;
 #[allow(unused_imports)]
 pub use theme::*;
+#[allow(unused_imports)]
+pub use theme_styles::*;
 #[allow(unused_imports)]
 pub use widgets::*;

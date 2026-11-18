@@ -22,7 +22,7 @@ winget install --manifest packaging/winget/MrQuster.MQ.yaml
 To validate the manifest format with `winget`:
 
 ```powershell
-winget validate packaging/winget/manifests/m/MrQuster/MQ/2.6.8/
+winget validate packaging/winget/manifests/m/MrQuster/MQ/2.6.9/
 ```
 
 ## Submitting a New Release Upstream

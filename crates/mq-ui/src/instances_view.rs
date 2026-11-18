@@ -20,10 +20,10 @@ use crate::components::{
 };
 use crate::state::{UiState, UiWorkerCommand};
 use crate::theme::{
-    blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BORDER_SUBTLE, CARD_SURFACE,
-    CARD_SURFACE_HOVER, RADIUS_CARD, RADIUS_TAG, STATUS_DANGER, STATUS_WARN, TEXT_MUTED,
-    TEXT_PRIMARY,
+    blend_color, Tokens, ACCENT_COBALT, ACCENT_EMERALD, BORDER_SUBTLE, CARD_SURFACE, RADIUS_CARD,
+    RADIUS_TAG, STATUS_DANGER, STATUS_WARN, TEXT_MUTED, TEXT_PRIMARY,
 };
+use crate::theme_styles::{show_themed_card, ThemeStyleParams};
 use crate::widgets::{
     danger_button, hero_action_button, loader_badge, paint_vector_icon, primary_emerald_button,
     secondary_glass_button, status_pill, version_badge, VectorIcon,
@@ -902,25 +902,38 @@ impl InstancesView {
                                 state.installing_instance.as_ref() == Some(&inst.id);
                             let is_running = state.running_instances.contains_key(&inst.id);
 
+                            let list_style = ThemeStyleParams::active(ui.ctx());
+                            let list_radius = list_style.card_corner_radius(state.config.theme.corner_radius);
                             let stroke_color = if is_downloading {
                                 ACCENT_COBALT
                             } else if is_running || is_selected {
-                                ACCENT_EMERALD
+                                tokens.accent
                             } else {
-                                BORDER_SUBTLE
+                                tokens.border
                             };
 
                             let frame = egui::Frame::new()
                                 .fill(if is_selected {
-                                    CARD_SURFACE_HOVER
+                                    list_style.surface_hover_fill(&tokens)
                                 } else {
-                                    CARD_SURFACE
+                                    list_style.surface_fill(&tokens)
                                 })
-                                .stroke(Stroke::new(1.0_f32, stroke_color))
-                                .corner_radius(RADIUS_CARD)
+                                .stroke(if list_style.refraction_border {
+                                    Stroke::NONE
+                                } else {
+                                    Stroke::new(1.0_f32, stroke_color)
+                                })
+                                .corner_radius(list_radius)
                                 .inner_margin(egui::Margin::same(8));
 
-                            let resp = frame.show(ui, |ui| {
+                            let resp = show_themed_card(
+                                ui,
+                                frame,
+                                list_radius,
+                                ui.make_persistent_id(("inst_list_glass", inst.id.as_str())),
+                                &list_style,
+                                &tokens,
+                                |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     let (rect, _) = ui.allocate_exact_size(
@@ -982,7 +995,16 @@ impl InstancesView {
                                         });
                                     });
                                 });
-                            });
+                            },
+                            );
+                            if list_style.refraction_border && (is_selected || is_running || is_downloading) {
+                                crate::theme_styles::paint_liquid_glass_selection_halo(
+                                    ui.painter(),
+                                    resp.response.rect,
+                                    list_radius,
+                                    if is_downloading { ACCENT_COBALT } else { tokens.accent },
+                                );
+                            }
 
                             let click_resp = resp.response.interact(egui::Sense::click());
                             if click_resp.clicked() {
@@ -1183,12 +1205,19 @@ impl InstancesView {
 
                     // 3. Detail hero header card (compact single row when browsing the embedded catalog)
                     if in_embedded_catalog {
-                        let compact_frame = egui::Frame::new()
-                            .fill(CARD_SURFACE)
-                            .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
-                            .corner_radius(RADIUS_CARD)
-                            .inner_margin(egui::Margin::symmetric(12, 6));
-                        compact_frame.show(ui, |ui| {
+                        let det_style = ThemeStyleParams::active(ui.ctx());
+                        let det_r = det_style.card_corner_radius(state.config.theme.corner_radius);
+                        let compact_frame =
+                            crate::theme::solid_card_frame_with_config(&tokens, &state.config.theme)
+                                .inner_margin(egui::Margin::symmetric(12, 6));
+                        show_themed_card(
+                            ui,
+                            compact_frame,
+                            det_r,
+                            ui.make_persistent_id(("inst_compact_hdr_glass", inst_id.as_str())),
+                            &det_style,
+                            &tokens,
+                            |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
                                 ui.label(
@@ -1283,16 +1312,24 @@ impl InstancesView {
                                     },
                                 );
                             });
-                        });
+                        },
+                        );
                         ui.add_space(4.0);
                     } else {
-                        let header_frame = egui::Frame::new()
-                            .fill(CARD_SURFACE)
-                            .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
-                            .corner_radius(RADIUS_CARD)
-                            .inner_margin(egui::Margin::same(8));
+                        let det_style = ThemeStyleParams::active(ui.ctx());
+                        let det_r = det_style.card_corner_radius(state.config.theme.corner_radius);
+                        let header_frame =
+                            crate::theme::solid_card_frame_with_config(&tokens, &state.config.theme)
+                                .inner_margin(egui::Margin::same(8));
 
-                        header_frame.show(ui, |ui| {
+                        show_themed_card(
+                            ui,
+                            header_frame,
+                            det_r,
+                            ui.make_persistent_id(("inst_full_hdr_glass", inst_id.as_str())),
+                            &det_style,
+                            &tokens,
+                            |ui| {
                             let render_hero_button = |ui: &mut egui::Ui, state: &mut UiState| {
                                 if is_running {
                                     if hero_action_button(
@@ -1595,7 +1632,8 @@ impl InstancesView {
                                         Some((inst_id.clone(), inst_name.clone()));
                                 }
                             });
-                        });
+                        },
+                        );
 
                         ui.add_space(4.0);
                     }
@@ -1749,7 +1787,10 @@ impl InstancesView {
         let is_downloading = state.installing_instance.as_ref() == Some(&inst.id);
         let is_running = state.running_instances.contains_key(&inst.id);
 
-        let border_stroke = if is_running || is_selected {
+        let style = ThemeStyleParams::active(ui.ctx());
+        let border_stroke = if style.refraction_border {
+            Stroke::NONE
+        } else if is_running || is_selected {
             Stroke::new(1.5_f32, tokens.accent)
         } else if is_downloading {
             Stroke::new(1.5_f32, ACCENT_COBALT)
@@ -1758,139 +1799,165 @@ impl InstancesView {
         };
 
         let bg_color = if is_selected {
-            tokens.bg_surface_hover
+            style.surface_hover_fill(tokens)
         } else {
-            tokens.bg_surface
+            style.surface_fill(tokens)
         };
+
+        let card_radius = style.card_corner_radius(state.config.theme.corner_radius);
 
         let card_frame = egui::Frame::new()
             .fill(bg_color)
             .stroke(border_stroke)
-            .corner_radius(RADIUS_CARD)
+            .corner_radius(card_radius)
             .inner_margin(egui::Margin::same(14));
 
-        card_frame.show(ui, |ui| {
-            ui.set_width(card_w);
-            ui.vertical(|ui| {
-                // Clickable top region (above the separator) so card clicks/double-clicks
-                // never overlay or intercept clicks on the action buttons below.
-                let header_resp = ui.vertical(|ui| {
-                    ui.set_width(card_w);
-                    // Top row: Vector Icon + Name & Version/Loader Badges
-                    ui.horizontal(|ui| {
-                        let (icon_rect, _) =
-                            ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
-                        let (icon, icon_col) = match inst.loader {
-                            ModLoaderKind::Vanilla => (VectorIcon::Cube, tokens.text),
-                            ModLoaderKind::Fabric | ModLoaderKind::Quilt => {
-                                (VectorIcon::Layers, tokens.accent)
-                            }
-                            ModLoaderKind::Forge | ModLoaderKind::NeoForge => {
-                                (VectorIcon::Shield, ACCENT_COBALT)
-                            }
-                        };
-                        paint_vector_icon(ui.painter(), icon_rect, icon, icon_col);
+        let card_resp = show_themed_card(
+            ui,
+            card_frame,
+            card_radius,
+            ui.make_persistent_id(("inst_grid_card_glass", inst.id.as_str())),
+            &style,
+            tokens,
+            |ui| {
+                ui.set_width(card_w);
+                ui.vertical(|ui| {
+                    // Clickable top region (above the separator) so card clicks/double-clicks
+                    // never overlay or intercept clicks on the action buttons below.
+                    let header_resp = ui.vertical(|ui| {
+                        ui.set_width(card_w);
+                        // Top row: Vector Icon + Name & Version/Loader Badges
+                        ui.horizontal(|ui| {
+                            let (icon_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+                            let (icon, icon_col) = match inst.loader {
+                                ModLoaderKind::Vanilla => (VectorIcon::Cube, tokens.text),
+                                ModLoaderKind::Fabric | ModLoaderKind::Quilt => {
+                                    (VectorIcon::Layers, tokens.accent)
+                                }
+                                ModLoaderKind::Forge | ModLoaderKind::NeoForge => {
+                                    (VectorIcon::Shield, ACCENT_COBALT)
+                                }
+                            };
+                            paint_vector_icon(ui.painter(), icon_rect, icon, icon_col);
 
-                        ui.vertical(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&inst.name)
-                                        .color(tokens.text)
-                                        .size(15.0)
-                                        .strong(),
-                                )
-                                .truncate(),
-                            );
-                            ui.add_space(2.0);
-                            ui.horizontal(|ui| {
-                                version_badge(ui, &inst.mc_version, ACCENT_COBALT);
-                                loader_badge(ui, inst.loader);
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&inst.name)
+                                            .color(tokens.text)
+                                            .size(15.0)
+                                            .strong(),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.add_space(2.0);
+                                ui.horizontal(|ui| {
+                                    version_badge(ui, &inst.mc_version, ACCENT_COBALT);
+                                    loader_badge(ui, inst.loader);
+                                });
                             });
                         });
+
+                        ui.add_space(10.0);
+
+                        // Status row: status dot + status label + playtime on right
+                        let (status_text, status_col) = if is_running {
+                            ("Запущен", tokens.accent)
+                        } else if is_downloading {
+                            ("Загрузка...", ACCENT_COBALT)
+                        } else if is_installed {
+                            ("Готов", tokens.accent)
+                        } else {
+                            ("Не скачан", tokens.warning)
+                        };
+
+                        ui.horizontal(|ui| {
+                            let (dot_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            ui.painter()
+                                .circle_filled(dot_rect.center(), 3.5, status_col);
+                            ui.label(
+                                RichText::new(status_text)
+                                    .color(status_col)
+                                    .small()
+                                    .strong(),
+                            );
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let hours = (inst.playtime_secs as f32) / 3600.0;
+                                    if hours >= 0.1 {
+                                        ui.label(
+                                            RichText::new(format!("Время: {:.1} ч", hours))
+                                                .color(tokens.text_muted)
+                                                .small(),
+                                        );
+                                    } else {
+                                        ui.label(
+                                            RichText::new("Новый").color(tokens.text_muted).small(),
+                                        );
+                                    }
+                                },
+                            );
+                        });
                     });
+
+                    let card_resp = header_resp.response.interact(Sense::click());
+                    if card_resp.double_clicked() {
+                        state.selected_instance_id = Some(inst.id.clone());
+                        self.view_mode = InstanceViewMode::List;
+                        self.content_sub_mode = ContentSubMode::Installed;
+                        self.synced_catalog_context = None;
+                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                            instance_id: inst.id.clone(),
+                        });
+                    } else if card_resp.clicked() {
+                        state.selected_instance_id = Some(inst.id.clone());
+                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                            instance_id: inst.id.clone(),
+                        });
+                    }
 
                     ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
 
-                    // Status row: status dot + status label + playtime on right
-                    let (status_text, status_col) = if is_running {
-                        ("Запущен", tokens.accent)
-                    } else if is_downloading {
-                        ("Загрузка...", ACCENT_COBALT)
-                    } else if is_installed {
-                        ("Готов", tokens.accent)
-                    } else {
-                        ("Не скачан", tokens.warning)
-                    };
-
-                    ui.horizontal(|ui| {
-                        let (dot_rect, _) =
-                            ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                        ui.painter()
-                            .circle_filled(dot_rect.center(), 3.5, status_col);
-                        ui.label(
-                            RichText::new(status_text)
-                                .color(status_col)
-                                .small()
-                                .strong(),
-                        );
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let hours = (inst.playtime_secs as f32) / 3600.0;
-                            if hours >= 0.1 {
-                                ui.label(
-                                    RichText::new(format!("Время: {:.1} ч", hours))
-                                        .color(tokens.text_muted)
-                                        .small(),
-                                );
-                            } else {
-                                ui.label(RichText::new("Новый").color(tokens.text_muted).small());
+                    // Bottom row: Actions
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                        if is_running {
+                            if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
+                            {
+                                let _ = state.cmd_sender.send(UiWorkerCommand::StopGame {
+                                    instance_id: inst.id.clone(),
+                                });
                             }
-                        });
-                    });
-                });
-
-                let card_resp = header_resp.response.interact(Sense::click());
-                if card_resp.double_clicked() {
-                    state.selected_instance_id = Some(inst.id.clone());
-                    self.view_mode = InstanceViewMode::List;
-                    self.content_sub_mode = ContentSubMode::Installed;
-                    self.synced_catalog_context = None;
-                    let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
-                        instance_id: inst.id.clone(),
-                    });
-                } else if card_resp.clicked() {
-                    state.selected_instance_id = Some(inst.id.clone());
-                    let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
-                        instance_id: inst.id.clone(),
-                    });
-                }
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
-
-                // Bottom row: Actions
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                    if is_running {
-                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
-                        {
-                            let _ = state.cmd_sender.send(UiWorkerCommand::StopGame {
-                                instance_id: inst.id.clone(),
-                            });
-                        }
-                    } else if is_downloading {
-                        if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
-                        {
-                            let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
-                        }
-                    } else if is_installed {
-                        let play_label = if state.is_launching && is_selected {
-                            "Запуск..."
-                        } else {
-                            "Играть"
-                        };
-                        if primary_emerald_button(ui, Some(VectorIcon::Play), play_label).clicked()
+                        } else if is_downloading {
+                            if primary_emerald_button(ui, Some(VectorIcon::Stop), "Стоп").clicked()
+                            {
+                                let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
+                            }
+                        } else if is_installed {
+                            let play_label = if state.is_launching && is_selected {
+                                "Запуск..."
+                            } else {
+                                "Играть"
+                            };
+                            if primary_emerald_button(ui, Some(VectorIcon::Play), play_label)
+                                .clicked()
+                                && !state.is_launching
+                            {
+                                state.selected_instance_id = Some(inst.id.clone());
+                                state.is_launching = true;
+                                let _ = state.cmd_sender.send(UiWorkerCommand::LaunchInstance {
+                                    instance_id: inst.id.clone(),
+                                    dry_run: false,
+                                });
+                            }
+                        } else if primary_emerald_button(ui, Some(VectorIcon::Download), "Скачать")
+                            .clicked()
                             && !state.is_launching
                         {
                             state.selected_instance_id = Some(inst.id.clone());
@@ -1900,55 +1967,60 @@ impl InstancesView {
                                 dry_run: false,
                             });
                         }
-                    } else if primary_emerald_button(ui, Some(VectorIcon::Download), "Скачать")
+
+                        if secondary_glass_button(ui, Some(VectorIcon::Layers), "Моды").clicked()
+                        {
+                            state.selected_instance_id = Some(inst.id.clone());
+                            self.view_mode = InstanceViewMode::List;
+                            self.current_tab = InstanceDetailTab::Mods;
+                            self.content_sub_mode = ContentSubMode::Installed;
+                            self.synced_catalog_context = None;
+                            let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                                instance_id: inst.id.clone(),
+                            });
+                        }
+
+                        if secondary_glass_button(ui, Some(VectorIcon::Settings), "Детали")
+                            .clicked()
+                        {
+                            state.selected_instance_id = Some(inst.id.clone());
+                            self.view_mode = InstanceViewMode::List;
+                            self.current_tab = InstanceDetailTab::Console;
+                            self.content_sub_mode = ContentSubMode::Installed;
+                            self.synced_catalog_context = None;
+                            let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                                instance_id: inst.id.clone(),
+                            });
+                        }
+
+                        if crate::components::icon_button(
+                            ui,
+                            tokens,
+                            VectorIcon::Folder,
+                            "Открыть папку инстанса",
+                        )
                         .clicked()
-                        && !state.is_launching
-                    {
-                        state.selected_instance_id = Some(inst.id.clone());
-                        state.is_launching = true;
-                        let _ = state.cmd_sender.send(UiWorkerCommand::LaunchInstance {
-                            instance_id: inst.id.clone(),
-                            dry_run: false,
-                        });
-                    }
-
-                    if secondary_glass_button(ui, Some(VectorIcon::Layers), "Моды").clicked() {
-                        state.selected_instance_id = Some(inst.id.clone());
-                        self.view_mode = InstanceViewMode::List;
-                        self.current_tab = InstanceDetailTab::Mods;
-                        self.content_sub_mode = ContentSubMode::Installed;
-                        self.synced_catalog_context = None;
-                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
-                            instance_id: inst.id.clone(),
-                        });
-                    }
-
-                    if secondary_glass_button(ui, Some(VectorIcon::Settings), "Детали").clicked()
-                    {
-                        state.selected_instance_id = Some(inst.id.clone());
-                        self.view_mode = InstanceViewMode::List;
-                        self.current_tab = InstanceDetailTab::Console;
-                        self.content_sub_mode = ContentSubMode::Installed;
-                        self.synced_catalog_context = None;
-                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
-                            instance_id: inst.id.clone(),
-                        });
-                    }
-
-                    if crate::components::icon_button(
-                        ui,
-                        tokens,
-                        VectorIcon::Folder,
-                        "Открыть папку инстанса",
-                    )
-                    .clicked()
-                    {
-                        let inst_dir = state.paths.instance_dir(inst.id.as_str());
-                        let _ = crate::opener::open_that(inst_dir);
-                    }
+                        {
+                            let inst_dir = state.paths.instance_dir(inst.id.as_str());
+                            let _ = crate::opener::open_that(inst_dir);
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
+        if style.refraction_border && (is_running || is_selected || is_downloading) {
+            let halo_col = if is_downloading {
+                ACCENT_COBALT
+            } else {
+                tokens.accent
+            };
+            crate::theme_styles::paint_liquid_glass_selection_halo(
+                ui.painter(),
+                card_resp.response.rect,
+                card_radius,
+                halo_col,
+            );
+        }
     }
 
     fn render_create_instance_modal(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {

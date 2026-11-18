@@ -16,8 +16,10 @@ use crate::sidebar::{
 };
 use crate::state::{UiState, UiWorkerCommand, UiWorkerResponse};
 use crate::theme::{
-    apply_theme, paint_launcher_background, solid_hud_frame, solid_sidebar_frame, Tokens,
+    apply_theme, paint_launcher_background, solid_hud_frame_with_config,
+    solid_sidebar_frame_with_config, Tokens,
 };
+use crate::theme_styles::ThemeStyleParams;
 
 #[cfg(any(feature = "test-hooks", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1273,6 +1275,27 @@ impl MqApp {
         }
     }
 
+    /// Paints seamless full-window aurora/translucent backdrop behind sidebar, HUD, and central
+    /// area when running in `LiquidGlass` or `Translucent` with `Procedural` background.
+    fn paint_full_window_glass_backdrop(
+        ctx: &egui::Context,
+        effective_theme: &mq_core::ThemeConfig,
+        tokens: &Tokens,
+    ) -> bool {
+        let full_window = matches!(
+            effective_theme.background_style,
+            mq_core::BackgroundStyle::Procedural | mq_core::BackgroundStyle::Solid
+        ) && matches!(
+            effective_theme.preset,
+            mq_core::ThemePreset::LiquidGlass | mq_core::ThemePreset::Translucent
+        );
+        if full_window {
+            let bg_painter = ctx.layer_painter(egui::LayerId::background());
+            paint_launcher_background(ctx, &bg_painter, ctx.screen_rect(), effective_theme, tokens);
+        }
+        full_window
+    }
+
     /// Headless/offscreen frame rendering for visual QA and snapshots.
     pub fn render_frame_for_snapshot(&mut self, ctx: &egui::Context) {
         let accounts_list = self.state.accounts.list_accounts().to_vec();
@@ -1284,6 +1307,18 @@ impl MqApp {
 
         let launcher_locale = self.state.config.launcher_locale.clone();
         let tokens = Tokens::from_config(&self.state.config.theme);
+
+        #[allow(unused_mut)]
+        let mut effective_theme = self.state.config.theme.clone();
+        #[cfg(feature = "test-hooks")]
+        if crate::test_hooks::is_solid_background(ctx)
+            && effective_theme.preset != mq_core::ThemePreset::LiquidGlass
+        {
+            effective_theme.background_style = mq_core::BackgroundStyle::Solid;
+        }
+
+        let full_window_glass =
+            Self::paint_full_window_glass_backdrop(ctx, &effective_theme, &tokens);
 
         let sidebar_state = SidebarState {
             active_downloads: self
@@ -1298,7 +1333,10 @@ impl MqApp {
         SidePanel::left("mq_sidebar")
             .resizable(false)
             .exact_width(sidebar_width(ctx))
-            .frame(solid_sidebar_frame(&tokens))
+            .frame(solid_sidebar_frame_with_config(
+                &tokens,
+                &self.state.config.theme,
+            ))
             .show(ctx, |ui| {
                 let _ = render_sidebar_with_state(
                     ui,
@@ -1341,7 +1379,10 @@ impl MqApp {
         };
 
         TopBottomPanel::bottom("mq_hud")
-            .frame(solid_hud_frame(&tokens))
+            .frame(solid_hud_frame_with_config(
+                &tokens,
+                &self.state.config.theme,
+            ))
             .show(ctx, |ui| {
                 render_bottom_hud(ui, &hud_data);
             });
@@ -1350,21 +1391,11 @@ impl MqApp {
             .fill(egui::Color32::TRANSPARENT)
             .inner_margin(egui::Margin::same(16));
         CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            let bg_rect = ui.max_rect().expand(16.0);
-            let bg_painter = ui.painter().with_clip_rect(bg_rect);
-            #[cfg(feature = "test-hooks")]
-            let owned_theme = if crate::test_hooks::is_solid_background(ctx) {
-                let mut cfg = self.state.config.theme.clone();
-                cfg.background_style = mq_core::BackgroundStyle::Solid;
-                Some(cfg)
-            } else {
-                None
-            };
-            #[cfg(feature = "test-hooks")]
-            let effective_theme = owned_theme.as_ref().unwrap_or(&self.state.config.theme);
-            #[cfg(not(feature = "test-hooks"))]
-            let effective_theme = &self.state.config.theme;
-            paint_launcher_background(ctx, &bg_painter, bg_rect, effective_theme, &tokens);
+            if !full_window_glass {
+                let bg_rect = ui.max_rect().expand(16.0);
+                let bg_painter = ui.painter().with_clip_rect(bg_rect);
+                paint_launcher_background(ctx, &bg_painter, bg_rect, &effective_theme, &tokens);
+            }
             match self.current_tab {
                 NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
                 NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
@@ -1688,6 +1719,19 @@ impl MqApp {
         let mut sidebar_action = None;
         let launcher_locale = self.state.config.launcher_locale.clone();
         let tokens = Tokens::from_config(&self.state.config.theme);
+
+        #[allow(unused_mut)]
+        let mut effective_theme = self.state.config.theme.clone();
+        #[cfg(feature = "test-hooks")]
+        if crate::test_hooks::is_solid_background(ctx)
+            && effective_theme.preset != mq_core::ThemePreset::LiquidGlass
+        {
+            effective_theme.background_style = mq_core::BackgroundStyle::Solid;
+        }
+
+        let full_window_glass =
+            Self::paint_full_window_glass_backdrop(ctx, &effective_theme, &tokens);
+
         let sidebar_state = SidebarState {
             active_downloads: self
                 .state
@@ -1700,7 +1744,10 @@ impl MqApp {
         SidePanel::left("mq_sidebar")
             .resizable(false)
             .exact_width(sidebar_width(ctx))
-            .frame(solid_sidebar_frame(&tokens))
+            .frame(solid_sidebar_frame_with_config(
+                &tokens,
+                &self.state.config.theme,
+            ))
             .show(ctx, |ui| {
                 sidebar_action = render_sidebar_with_state(
                     ui,
@@ -1759,7 +1806,10 @@ impl MqApp {
         };
 
         TopBottomPanel::bottom("mq_hud")
-            .frame(solid_hud_frame(&tokens))
+            .frame(solid_hud_frame_with_config(
+                &tokens,
+                &self.state.config.theme,
+            ))
             .show(ctx, |ui| {
                 render_bottom_hud(ui, &hud_data);
             });
@@ -1769,21 +1819,11 @@ impl MqApp {
             .fill(egui::Color32::TRANSPARENT)
             .inner_margin(egui::Margin::same(16));
         CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            let bg_rect = ui.max_rect().expand(16.0);
-            let bg_painter = ui.painter().with_clip_rect(bg_rect);
-            #[cfg(feature = "test-hooks")]
-            let owned_theme = if crate::test_hooks::is_solid_background(ctx) {
-                let mut cfg = self.state.config.theme.clone();
-                cfg.background_style = mq_core::BackgroundStyle::Solid;
-                Some(cfg)
-            } else {
-                None
-            };
-            #[cfg(feature = "test-hooks")]
-            let effective_theme = owned_theme.as_ref().unwrap_or(&self.state.config.theme);
-            #[cfg(not(feature = "test-hooks"))]
-            let effective_theme = &self.state.config.theme;
-            paint_launcher_background(ctx, &bg_painter, bg_rect, effective_theme, &tokens);
+            if !full_window_glass {
+                let bg_rect = ui.max_rect().expand(16.0);
+                let bg_painter = ui.painter().with_clip_rect(bg_rect);
+                paint_launcher_background(ctx, &bg_painter, bg_rect, &effective_theme, &tokens);
+            }
             match self.current_tab {
                 NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
                 NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
@@ -1922,6 +1962,17 @@ impl MqApp {
 }
 
 impl eframe::App for MqApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let style = ThemeStyleParams::from_config(&self.state.config.theme);
+        if style.compositor_transparent {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            Tokens::from_config(&self.state.config.theme)
+                .bg_app
+                .to_normalized_gamma_f32()
+        }
+    }
+
     #[cfg(feature = "test-hooks")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::test_hooks::on_raw_input(ctx, raw_input);
@@ -1939,7 +1990,7 @@ pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error>
             .with_title("MQ Launcher")
             .with_inner_size([1180.0, 740.0])
             .with_min_inner_size([960.0, 600.0])
-            .with_transparent(false)
+            .with_transparent(true)
             .with_decorations(true)
             .with_icon(build_app_icon()),
         renderer: match backend {

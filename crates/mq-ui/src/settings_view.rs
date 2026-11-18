@@ -12,6 +12,7 @@ use crate::theme::{
     apply_theme, blend_color, rgb_to_c32, solid_card_frame_with_config, Tokens, ACCENT_COBALT,
     CALM_ACCENT_PRESETS, RADIUS_TAG,
 };
+use crate::theme_styles::{show_themed_card, ThemeStyleParams};
 use crate::widgets::{
     accent_button, primary_emerald_button, secondary_glass_button, smooth_toggle, tag_pill,
     version_badge, VectorIcon,
@@ -137,10 +138,14 @@ impl SettingsView {
 
     fn render_customization_studio(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
+        let style = ThemeStyleParams::from_config(&state.config.theme);
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let card = solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(16));
 
         fn choice_chip(ui: &mut Ui, tokens: &Tokens, selected: bool, label: &str) -> bool {
+            let style = ThemeStyleParams::active(ui.ctx());
+            let chip_r = style.control_corner_radius(26.0, RADIUS_TAG);
             let fill = if selected {
                 blend_color(
                     tokens.bg_surface,
@@ -160,13 +165,68 @@ impl SettingsView {
             } else {
                 tokens.text_muted
             };
-            ui.add(
-                egui::Button::new(RichText::new(label).color(fg).size(12.5))
-                    .fill(fill)
-                    .stroke(Stroke::new(1.0_f32, stroke))
-                    .corner_radius(RADIUS_TAG),
-            )
-            .clicked()
+            let font_id = egui::FontId::proportional(12.5);
+            let galley = ui.painter().layout_no_wrap(label.to_owned(), font_id, fg);
+            let desired = Vec2::new(galley.size().x + 20.0, 26.0);
+            let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if ui.is_rect_visible(rect) {
+                let p = ui.painter();
+                if style.refraction_border {
+                    if selected {
+                        crate::theme_styles::paint_tinted_glass_pill(
+                            ui.ctx(),
+                            p,
+                            rect,
+                            chip_r,
+                            &style,
+                            tokens,
+                            fill,
+                            0.85,
+                        );
+                    } else {
+                        crate::theme_styles::paint_glass_surface_overlay(
+                            ui.ctx(),
+                            p,
+                            rect,
+                            chip_r,
+                            &style,
+                            tokens,
+                            if resp.hovered() { 0.72 } else { 0.20 },
+                            true,
+                        );
+                    }
+                } else {
+                    p.rect_filled(rect, chip_r, fill);
+                    p.rect_stroke(
+                        rect,
+                        chip_r,
+                        Stroke::new(1.0_f32, stroke),
+                        StrokeKind::Inside,
+                    );
+                }
+                p.galley(
+                    Pos2::new(
+                        rect.center().x - galley.size().x * 0.5,
+                        rect.center().y - galley.size().y * 0.5,
+                    ),
+                    galley,
+                    fg,
+                );
+            }
+            register_widget(
+                ui,
+                &resp,
+                ElementMeta::new(ElementKind::Chip)
+                    .label(label)
+                    .text(label)
+                    .active(selected)
+                    .fg(fg)
+                    .bg(fill),
+            );
+            resp.clicked()
         }
 
         fn accent_swatch_chip(
@@ -176,6 +236,8 @@ impl SettingsView {
             primary: [u8; 3],
             selected: bool,
         ) -> bool {
+            let style = ThemeStyleParams::active(ui.ctx());
+            let chip_r = style.control_corner_radius(28.0, RADIUS_TAG);
             let swatch = rgb_to_c32(primary);
             let font_id = egui::FontId::proportional(12.5);
             let fg = if selected {
@@ -205,18 +267,49 @@ impl SettingsView {
                 } else {
                     tokens.border
                 };
-                p.rect_filled(rect, RADIUS_TAG, fill);
-                p.rect_stroke(
-                    rect,
-                    RADIUS_TAG,
-                    Stroke::new(if selected { 1.5_f32 } else { 1.0_f32 }, stroke_col),
-                    StrokeKind::Inside,
-                );
+                if style.refraction_border {
+                    if selected {
+                        crate::theme_styles::paint_tinted_glass_pill(
+                            ui.ctx(),
+                            p,
+                            rect,
+                            chip_r,
+                            &style,
+                            tokens,
+                            fill,
+                            0.85,
+                        );
+                    } else {
+                        crate::theme_styles::paint_glass_surface_overlay(
+                            ui.ctx(),
+                            p,
+                            rect,
+                            chip_r,
+                            &style,
+                            tokens,
+                            if resp.hovered() { 0.72 } else { 0.20 },
+                            true,
+                        );
+                    }
+                } else {
+                    p.rect_filled(rect, chip_r, fill);
+                    p.rect_stroke(
+                        rect,
+                        chip_r,
+                        Stroke::new(if selected { 1.5_f32 } else { 1.0_f32 }, stroke_col),
+                        StrokeKind::Inside,
+                    );
+                }
                 let dot_rect = egui::Rect::from_center_size(
                     Pos2::new(rect.left() + 14.0, rect.center().y),
                     Vec2::splat(12.0),
                 );
-                p.rect_filled(dot_rect, CornerRadius::same(3), swatch);
+                let dot_r = if style.refraction_border {
+                    CornerRadius::same(6)
+                } else {
+                    CornerRadius::same(3)
+                };
+                p.rect_filled(dot_rect, dot_r, swatch);
                 p.galley(
                     Pos2::new(
                         dot_rect.right() + 6.0,
@@ -229,683 +322,805 @@ impl SettingsView {
             resp.clicked()
         }
 
-        card.show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        show_themed_card(
+            ui,
+            card,
+            card_r,
+            ui.make_persistent_id("settings_custom_studio_glass"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
 
-            let mut style_dirty = false;
-            let mut should_save = false;
+                let mut style_dirty = false;
+                let mut should_save = false;
 
-            // 1. Presets & Accent Palette
-            ui.label(
-                RichText::new("1. Тема и акцентный цвет")
-                    .color(tokens.text)
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(6.0);
-
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                for preset in ThemePreset::ALL {
-                    let is_active = state.config.theme.preset == preset;
-                    if choice_chip(ui, &tokens, is_active, preset.label()) {
-                        state.config.theme.apply_preset(preset);
-                        style_dirty = true;
-                        should_save = true;
-                    }
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("Спокойные акценты:")
-                    .color(tokens.text_muted)
-                    .small(),
-            );
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                for swatch in CALM_ACCENT_PRESETS {
-                    let is_sel = state.config.theme.accent_primary == swatch.primary;
-                    if accent_swatch_chip(ui, &tokens, swatch.name, swatch.primary, is_sel) {
-                        state.config.theme.accent_primary = swatch.primary;
-                        state.config.theme.accent_secondary = swatch.secondary;
-                        state.config.theme.status_success = swatch.primary;
-                        style_dirty = true;
-                        should_save = true;
-                    }
-                }
-            });
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Свой цвет акцента:").color(tokens.text));
-                if ui
-                    .color_edit_button_srgb(&mut state.config.theme.accent_primary)
-                    .changed()
-                {
-                    let pri = state.config.theme.accent_primary;
-                    let sec = blend_color(
-                        rgb_to_c32(pri),
-                        Color32::BLACK,
-                        if tokens.is_light() { 0.18 } else { 0.14 },
-                    );
-                    state.config.theme.accent_secondary = [sec.r(), sec.g(), sec.b()];
-                    state.config.theme.status_success = pri;
-                    style_dirty = true;
-                    should_save = true;
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // 2. Background Style & Custom Backdrop
-            ui.label(
-                RichText::new("2. Фон лаунчера")
-                    .color(tokens.text)
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(6.0);
-
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                for mode in BackgroundStyle::ALL {
-                    let is_sel = state.config.theme.background_style == mode;
-                    if choice_chip(ui, &tokens, is_sel, mode.label()) {
-                        state.config.theme.background_style = mode;
-                        should_save = true;
-                    }
-                }
-            });
-
-            if state.config.theme.background_style == BackgroundStyle::CustomImage {
+                // 1. Presets & Accent Palette
+                ui.label(
+                    RichText::new("1. Тема и акцентный цвет")
+                        .color(tokens.text)
+                        .strong()
+                        .size(14.0),
+                );
                 ui.add_space(6.0);
-                let mut bg_path = state.config.theme.backdrop_path.clone().unwrap_or_default();
+
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Изображение:").color(tokens.text));
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut bg_path)
-                                .hint_text("Путь к .png / .jpg / .webp")
-                                .desired_width((ui.available_width() - 100.0).max(160.0)),
-                        )
-                        .changed()
-                    {
-                        state.config.theme.backdrop_path = if bg_path.trim().is_empty() {
-                            None
-                        } else {
-                            Some(bg_path.trim().to_string())
-                        };
-                        should_save = true;
-                    }
-                    if state.config.theme.backdrop_path.is_some()
-                        && secondary_glass_button(ui, None, "Очистить").clicked()
-                    {
-                        state.config.theme.backdrop_path = None;
-                        should_save = true;
-                    }
-                });
-
-                let dim_resp = ui.horizontal(|ui| {
-                    ui.label(RichText::new("Затемнение подложки:").color(tokens.text));
-                    ui.add(
-                        egui::Slider::new(&mut state.config.theme.backdrop_dim, 0.0..=0.90)
-                            .step_by(0.05),
-                    )
-                });
-                if dim_resp.inner.drag_stopped() {
-                    should_save = true;
-                }
-            }
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // 3. Live Preview Card
-            ui.label(
-                RichText::new("Живое превью")
-                    .color(tokens.text)
-                    .strong()
-                    .size(13.0),
-            );
-            ui.add_space(4.0);
-
-            let live_tokens = Tokens::from_config(&state.config.theme);
-            let preview_card = solid_card_frame_with_config(&live_tokens, &state.config.theme)
-                .inner_margin(egui::Margin::same(12));
-
-            preview_card.show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    let pri_col = rgb_to_c32(state.config.theme.accent_primary);
-                    let sec_col = rgb_to_c32(state.config.theme.accent_secondary);
-                    let _ = accent_button(ui, Some(VectorIcon::Play), "Основная кнопка", pri_col);
-                    let _ = secondary_glass_button(ui, Some(VectorIcon::Folder), "Вторичная");
-                    tag_pill(ui, "Fabric", sec_col);
-                    let mut sample_toggle = true;
-                    let _ = smooth_toggle(ui, &mut sample_toggle);
-                });
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // 4. Surfaces, Radius, Density & Scale
-            ui.label(
-                RichText::new("3. Карточки, скругления и масштаб")
-                    .color(tokens.text)
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(6.0);
-
-            ui.add_space(4.0);
-            egui::Grid::new("customization_sliders_grid")
-                .num_columns(2)
-                .spacing(Vec2::new(20.0, 8.0))
-                .show(ui, |ui| {
-                    let mut slider_row = |label: &str, slider: egui::Slider<'_>| {
-                        ui.label(RichText::new(label).color(tokens.text));
-                        ui.scope(|ui| {
-                            ui.spacing_mut().slider_width = 210.0;
-                            let r = ui.add(slider);
-                            if r.changed() {
-                                style_dirty = true;
+                    ui.label(RichText::new("Тема оформления:").color(tokens.text));
+                    let combo_resp = egui::ComboBox::from_id_salt("settings_theme_preset_combo")
+                        .selected_text(state.config.theme.preset.label())
+                        .width(260.0)
+                        .show_ui(ui, |ui| {
+                            for preset in ThemePreset::ALL {
+                                if ui
+                                    .selectable_label(
+                                        state.config.theme.preset == preset,
+                                        preset.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    state.config.theme.apply_preset(preset);
+                                    style_dirty = true;
+                                    should_save = true;
+                                }
                             }
-                            if r.drag_stopped() {
-                                should_save = true;
-                            }
-                        });
-                        ui.end_row();
-                    };
-
-                    slider_row(
-                        "Прозрачность карточек:",
-                        egui::Slider::new(&mut state.config.theme.card_opacity, 0.45..=1.00)
-                            .step_by(0.01),
-                    );
-                    slider_row(
-                        "Акцентная обводка карточек:",
-                        egui::Slider::new(&mut state.config.theme.border_glow, 0.00..=1.00)
-                            .step_by(0.05),
-                    );
-                    slider_row(
-                        "Скругление углов:",
-                        egui::Slider::new(&mut state.config.theme.corner_radius, 0.0..=16.0)
-                            .step_by(1.0)
-                            .suffix(" px"),
-                    );
-                    slider_row(
-                        "Масштаб интерфейса:",
-                        egui::Slider::new(&mut state.config.theme.ui_scale, 0.80..=1.50)
-                            .step_by(0.05),
-                    );
-                    slider_row(
-                        "Размер шрифта:",
-                        egui::Slider::new(&mut state.config.theme.font_size, 12.0..=18.0)
-                            .step_by(0.5)
-                            .suffix(" px"),
+                        })
+                        .response;
+                    register_widget(
+                        ui,
+                        &combo_resp,
+                        ElementMeta::new(ElementKind::Select)
+                            .label("Тема оформления")
+                            .text(state.config.theme.preset.label())
+                            .fg(tokens.text)
+                            .bg(tokens.bg_input),
                     );
                 });
+                ui.add_space(6.0);
 
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                ui.label(RichText::new("Плотность:").color(tokens.text));
-                for (density, label) in [
-                    (UiDensity::Compact, "Компактная"),
-                    (UiDensity::Comfortable, "Комфортная"),
-                    (UiDensity::Spacious, "Просторная"),
-                ] {
-                    if choice_chip(ui, &tokens, state.config.theme.density == density, label) {
-                        state.config.theme.density = density;
-                        style_dirty = true;
-                        should_save = true;
-                    }
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(8.0);
-
-            egui::CollapsingHeader::new(
-                RichText::new("Тонкая настройка цветов и экспорт").color(tokens.text),
-            )
-            .default_open(false)
-            .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Фон окна:").color(tokens.text));
-                    if ui
-                        .color_edit_button_srgb(&mut state.config.theme.bg_window)
-                        .changed()
-                    {
-                        state.config.theme.preset = ThemePreset::Custom;
-                        style_dirty = true;
-                        should_save = true;
-                    }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Фон карточек:").color(tokens.text));
-                    if ui
-                        .color_edit_button_srgb(&mut state.config.theme.bg_card)
-                        .changed()
-                    {
-                        state.config.theme.preset = ThemePreset::Custom;
-                        style_dirty = true;
-                        should_save = true;
-                    }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Текст:").color(tokens.text));
-                    if ui
-                        .color_edit_button_srgb(&mut state.config.theme.text_primary)
-                        .changed()
-                    {
-                        state.config.theme.preset = ThemePreset::Custom;
-                        style_dirty = true;
-                        should_save = true;
-                    }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Приглушённый:").color(tokens.text));
-                    if ui
-                        .color_edit_button_srgb(&mut state.config.theme.text_muted)
-                        .changed()
-                    {
-                        state.config.theme.preset = ThemePreset::Custom;
-                        style_dirty = true;
-                        should_save = true;
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                    for preset in ThemePreset::ALL {
+                        let is_active = state.config.theme.preset == preset;
+                        if choice_chip(ui, &tokens, is_active, preset.label()) {
+                            state.config.theme.apply_preset(preset);
+                            style_dirty = true;
+                            should_save = true;
+                        }
                     }
                 });
+
+                let preset_hint = match state.config.theme.preset {
+                ThemePreset::LiquidGlass => Some(
+                    "Режим Liquid Glass: многослойное жидкое стекло, живой ambient-фон, 1px градиентные грани и световой блик за курсором.",
+                ),
+                ThemePreset::Translucent => Some(
+                    "Режим Полупрозрачная: чистая тонировка и прозрачность окна на уровне композитора без лишних эффектов.",
+                ),
+                _ => None,
+            };
+                if let Some(hint) = preset_hint {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(hint).color(tokens.text_muted).small());
+                }
 
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Файл темы:").color(tokens.text));
-                    ui.text_edit_singleline(&mut self.theme_export_path);
-                });
+                ui.label(
+                    RichText::new("Спокойные акценты:")
+                        .color(tokens.text_muted)
+                        .small(),
+                );
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if secondary_glass_button(
-                        ui,
-                        Some(VectorIcon::Download),
-                        "Экспортировать тему в файл",
-                    )
-                    .clicked()
-                    {
-                        let target_path = if self.theme_export_path.trim().is_empty() {
-                            state.paths.theme_file()
-                        } else {
-                            std::path::PathBuf::from(self.theme_export_path.trim())
-                        };
-                        if state.config.theme.save_to_file(&target_path).is_ok() {
-                            state.status_message = Some((
-                                format!("Тема успешно экспортирована в {}", target_path.display()),
-                                false,
-                            ));
-                        }
-                    }
-
-                    if secondary_glass_button(
-                        ui,
-                        Some(VectorIcon::Folder),
-                        "Импортировать тему из файла",
-                    )
-                    .clicked()
-                    {
-                        let target_path = if self.theme_export_path.trim().is_empty() {
-                            state.paths.theme_file()
-                        } else {
-                            std::path::PathBuf::from(self.theme_export_path.trim())
-                        };
-                        if let Ok(loaded) = ThemeConfig::load_from_file(&target_path) {
-                            state.config.theme = loaded;
-                            apply_theme(ui.ctx(), &state.config.theme);
-                            let _ = state.config.save(&state.paths);
-                            state.status_message = Some((
-                                format!("Тема успешно загружена из {}", target_path.display()),
-                                false,
-                            ));
-                        } else {
-                            state.status_message = Some((
-                                format!("Не удалось прочитать файл темы {}", target_path.display()),
-                                true,
-                            ));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                    for swatch in CALM_ACCENT_PRESETS {
+                        let is_sel = state.config.theme.accent_primary == swatch.primary;
+                        if accent_swatch_chip(ui, &tokens, swatch.name, swatch.primary, is_sel) {
+                            state.config.theme.accent_primary = swatch.primary;
+                            state.config.theme.accent_secondary = swatch.secondary;
+                            state.config.theme.status_success = swatch.primary;
+                            style_dirty = true;
+                            should_save = true;
                         }
                     }
                 });
-            });
 
-            if style_dirty {
-                apply_theme(ui.ctx(), &state.config.theme);
-            }
-            if should_save {
-                let _ = state.config.save(&state.paths);
-            }
-        });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Свой цвет акцента:").color(tokens.text));
+                    if ui
+                        .color_edit_button_srgb(&mut state.config.theme.accent_primary)
+                        .changed()
+                    {
+                        let pri = state.config.theme.accent_primary;
+                        let sec = blend_color(
+                            rgb_to_c32(pri),
+                            Color32::BLACK,
+                            if tokens.is_light() { 0.18 } else { 0.14 },
+                        );
+                        state.config.theme.accent_secondary = [sec.r(), sec.g(), sec.b()];
+                        state.config.theme.status_success = pri;
+                        style_dirty = true;
+                        should_save = true;
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // 2. Background Style & Custom Backdrop
+                ui.label(
+                    RichText::new("2. Фон лаунчера")
+                        .color(tokens.text)
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(6.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                    for mode in BackgroundStyle::ALL {
+                        let is_sel = state.config.theme.background_style == mode;
+                        if choice_chip(ui, &tokens, is_sel, mode.label()) {
+                            state.config.theme.background_style = mode;
+                            should_save = true;
+                        }
+                    }
+                });
+
+                if state.config.theme.background_style == BackgroundStyle::CustomImage {
+                    ui.add_space(6.0);
+                    let mut bg_path = state.config.theme.backdrop_path.clone().unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Изображение:").color(tokens.text));
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut bg_path)
+                                    .hint_text("Путь к .png / .jpg / .webp")
+                                    .desired_width((ui.available_width() - 100.0).max(160.0)),
+                            )
+                            .changed()
+                        {
+                            state.config.theme.backdrop_path = if bg_path.trim().is_empty() {
+                                None
+                            } else {
+                                Some(bg_path.trim().to_string())
+                            };
+                            should_save = true;
+                        }
+                        if state.config.theme.backdrop_path.is_some()
+                            && secondary_glass_button(ui, None, "Очистить").clicked()
+                        {
+                            state.config.theme.backdrop_path = None;
+                            should_save = true;
+                        }
+                    });
+
+                    let dim_resp = ui.horizontal(|ui| {
+                        ui.label(RichText::new("Затемнение подложки:").color(tokens.text));
+                        ui.add(
+                            egui::Slider::new(&mut state.config.theme.backdrop_dim, 0.0..=0.90)
+                                .step_by(0.05),
+                        )
+                    });
+                    if dim_resp.inner.drag_stopped() {
+                        should_save = true;
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // 3. Live Preview Card
+                ui.label(
+                    RichText::new("Живое превью")
+                        .color(tokens.text)
+                        .strong()
+                        .size(13.0),
+                );
+                ui.add_space(4.0);
+
+                let live_tokens = Tokens::from_config(&state.config.theme);
+                let live_style = ThemeStyleParams::from_config(&state.config.theme);
+                let preview_r =
+                    crate::state::safe_clamp_f32(state.config.theme.corner_radius, 0.0, 16.0)
+                        .round() as u8;
+                let preview_card = solid_card_frame_with_config(&live_tokens, &state.config.theme)
+                    .inner_margin(egui::Margin::same(12));
+
+                show_themed_card(
+                    ui,
+                    preview_card,
+                    CornerRadius::same(preview_r),
+                    ui.make_persistent_id("settings_live_preview_glass"),
+                    &live_style,
+                    &live_tokens,
+                    |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            let pri_col = rgb_to_c32(state.config.theme.accent_primary);
+                            let sec_col = rgb_to_c32(state.config.theme.accent_secondary);
+                            let _ = accent_button(
+                                ui,
+                                Some(VectorIcon::Play),
+                                "Основная кнопка",
+                                pri_col,
+                            );
+                            let _ =
+                                secondary_glass_button(ui, Some(VectorIcon::Folder), "Вторичная");
+                            tag_pill(ui, "Fabric", sec_col);
+                            let mut sample_toggle = true;
+                            let _ = smooth_toggle(ui, &mut sample_toggle);
+                        });
+                    },
+                );
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // 4. Surfaces, Radius, Density & Scale
+                ui.label(
+                    RichText::new("3. Карточки, скругления и масштаб")
+                        .color(tokens.text)
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(6.0);
+
+                ui.add_space(4.0);
+                egui::Grid::new("customization_sliders_grid")
+                    .num_columns(2)
+                    .spacing(Vec2::new(20.0, 8.0))
+                    .show(ui, |ui| {
+                        let mut slider_row = |label: &str, slider: egui::Slider<'_>| {
+                            ui.label(RichText::new(label).color(tokens.text));
+                            ui.scope(|ui| {
+                                ui.spacing_mut().slider_width = 210.0;
+                                let r = ui.add(slider);
+                                if r.changed() {
+                                    style_dirty = true;
+                                }
+                                if r.drag_stopped() {
+                                    should_save = true;
+                                }
+                            });
+                            ui.end_row();
+                        };
+
+                        slider_row(
+                            "Прозрачность окна:",
+                            egui::Slider::new(&mut state.config.theme.window_opacity, 0.35..=1.00)
+                                .step_by(0.01),
+                        );
+                        slider_row(
+                            "Прозрачность карточек:",
+                            egui::Slider::new(&mut state.config.theme.card_opacity, 0.35..=1.00)
+                                .step_by(0.01),
+                        );
+                        slider_row(
+                            "Акцентная обводка карточек:",
+                            egui::Slider::new(&mut state.config.theme.border_glow, 0.00..=1.00)
+                                .step_by(0.05),
+                        );
+                        slider_row(
+                            "Скругление углов:",
+                            egui::Slider::new(&mut state.config.theme.corner_radius, 0.0..=16.0)
+                                .step_by(1.0)
+                                .suffix(" px"),
+                        );
+                        slider_row(
+                            "Масштаб интерфейса:",
+                            egui::Slider::new(&mut state.config.theme.ui_scale, 0.80..=1.50)
+                                .step_by(0.05),
+                        );
+                        slider_row(
+                            "Размер шрифта:",
+                            egui::Slider::new(&mut state.config.theme.font_size, 12.0..=18.0)
+                                .step_by(0.5)
+                                .suffix(" px"),
+                        );
+                    });
+
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                    ui.label(RichText::new("Плотность:").color(tokens.text));
+                    for (density, label) in [
+                        (UiDensity::Compact, "Компактная"),
+                        (UiDensity::Comfortable, "Комфортная"),
+                        (UiDensity::Spacious, "Просторная"),
+                    ] {
+                        if choice_chip(ui, &tokens, state.config.theme.density == density, label) {
+                            state.config.theme.density = density;
+                            style_dirty = true;
+                            should_save = true;
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                egui::CollapsingHeader::new(
+                    RichText::new("Тонкая настройка цветов и экспорт").color(tokens.text),
+                )
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Фон окна:").color(tokens.text));
+                        if ui
+                            .color_edit_button_srgb(&mut state.config.theme.bg_window)
+                            .changed()
+                        {
+                            state.config.theme.preset = ThemePreset::Custom;
+                            style_dirty = true;
+                            should_save = true;
+                        }
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Фон карточек:").color(tokens.text));
+                        if ui
+                            .color_edit_button_srgb(&mut state.config.theme.bg_card)
+                            .changed()
+                        {
+                            state.config.theme.preset = ThemePreset::Custom;
+                            style_dirty = true;
+                            should_save = true;
+                        }
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Текст:").color(tokens.text));
+                        if ui
+                            .color_edit_button_srgb(&mut state.config.theme.text_primary)
+                            .changed()
+                        {
+                            state.config.theme.preset = ThemePreset::Custom;
+                            style_dirty = true;
+                            should_save = true;
+                        }
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Приглушённый:").color(tokens.text));
+                        if ui
+                            .color_edit_button_srgb(&mut state.config.theme.text_muted)
+                            .changed()
+                        {
+                            state.config.theme.preset = ThemePreset::Custom;
+                            style_dirty = true;
+                            should_save = true;
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Файл темы:").color(tokens.text));
+                        ui.text_edit_singleline(&mut self.theme_export_path);
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Download),
+                            "Экспортировать тему в файл",
+                        )
+                        .clicked()
+                        {
+                            let target_path = if self.theme_export_path.trim().is_empty() {
+                                state.paths.theme_file()
+                            } else {
+                                std::path::PathBuf::from(self.theme_export_path.trim())
+                            };
+                            if state.config.theme.save_to_file(&target_path).is_ok() {
+                                state.status_message = Some((
+                                    format!(
+                                        "Тема успешно экспортирована в {}",
+                                        target_path.display()
+                                    ),
+                                    false,
+                                ));
+                            }
+                        }
+
+                        if secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Folder),
+                            "Импортировать тему из файла",
+                        )
+                        .clicked()
+                        {
+                            let target_path = if self.theme_export_path.trim().is_empty() {
+                                state.paths.theme_file()
+                            } else {
+                                std::path::PathBuf::from(self.theme_export_path.trim())
+                            };
+                            if let Ok(loaded) = ThemeConfig::load_from_file(&target_path) {
+                                state.config.theme = loaded;
+                                apply_theme(ui.ctx(), &state.config.theme);
+                                let _ = state.config.save(&state.paths);
+                                state.status_message = Some((
+                                    format!("Тема успешно загружена из {}", target_path.display()),
+                                    false,
+                                ));
+                            } else {
+                                state.status_message = Some((
+                                    format!(
+                                        "Не удалось прочитать файл темы {}",
+                                        target_path.display()
+                                    ),
+                                    true,
+                                ));
+                            }
+                        }
+                    });
+                });
+
+                if style_dirty {
+                    apply_theme(ui.ctx(), &state.config.theme);
+                }
+                if should_save {
+                    let _ = state.config.save(&state.paths);
+                }
+            },
+        );
     }
 
     fn render_launch_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
+        let style = ThemeStyleParams::from_config(&state.config.theme);
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let card = solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(14));
 
-        card.show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        show_themed_card(
+            ui,
+            card,
+            card_r,
+            ui.make_persistent_id("settings_launch_glass"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
 
-            // 1. RAM Allocation
-            ui.label(
-                RichText::new("Выделение оперативной памяти (JVM RAM)")
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Минимум RAM (-Xms):");
-                ui.add(
-                    egui::Slider::new(&mut state.config.default_memory_min_mb, 512..=8192)
-                        .suffix(" MB")
-                        .step_by(256.0),
-                );
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Максимум RAM (-Xmx):");
-                ui.add(
-                    egui::Slider::new(&mut state.config.default_memory_max_mb, 1024..=32768)
-                        .suffix(" MB")
-                        .step_by(512.0),
-                );
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // 2. Quick JVM Flag Presets
-            ui.label(
-                RichText::new("Быстрые пресеты аргументов JVM")
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(4.0);
-
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Aikar's Flags (High Perf)")
-                    .clicked()
-                {
-                    state.config.default_jvm_args = vec![
-                        "-XX:+UseG1GC".to_string(),
-                        "-XX:+ParallelRefProcEnabled".to_string(),
-                        "-XX:MaxGCPauseMillis=200".to_string(),
-                        "-XX:+UnlockExperimentalVMOptions".to_string(),
-                        "-XX:+DisableExplicitGC".to_string(),
-                        "-XX:+AlwaysPreTouch".to_string(),
-                        "-XX:G1NewSizePercent=30".to_string(),
-                        "-XX:G1MaxNewSizePercent=40".to_string(),
-                        "-XX:G1ReservePercent=20".to_string(),
-                        "-XX:G1HeapWastePercent=5".to_string(),
-                        "-XX:G1MixedGCCountTarget=4".to_string(),
-                        "-XX:InitiatingHeapOccupancyPercent=15".to_string(),
-                        "-XX:G1MixedGCLiveThresholdPercent=90".to_string(),
-                        "-XX:G1RSetUpdatingPauseTimePercent=5".to_string(),
-                        "-XX:SurvivorRatio=32".to_string(),
-                        "-XX:+PerfDisableSharedMem".to_string(),
-                        "-XX:MaxTenuringThreshold=1".to_string(),
-                    ];
-                }
-
-                if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Java 21 Generational ZGC")
-                    .clicked()
-                {
-                    state.config.default_jvm_args =
-                        vec!["-XX:+UseZGC".to_string(), "-XX:+ZGenerational".to_string()];
-                }
-
-                if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Low-End PC (Low Memory)")
-                    .clicked()
-                {
-                    state.config.default_jvm_args =
-                        vec!["-XX:+UseSerialGC".to_string(), "-Xnoclassgc".to_string()];
-                }
-            });
-
-            ui.add_space(6.0);
-            ui.label("Текущие аргументы JVM:");
-            let mut jvm_args_str = state.config.default_jvm_args.join(" ");
-            if ui.text_edit_singleline(&mut jvm_args_str).changed() {
-                state.config.default_jvm_args = jvm_args_str
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // 3. Wrapper Command
-            ui.label(
-                RichText::new("Команда-обёртка запуска игры")
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(state.config.default_wrapper.is_none(), "Без обёртки")
-                    .clicked()
-                {
-                    state.config.default_wrapper = None;
-                }
-                if ui
-                    .selectable_label(
-                        state.config.default_wrapper.as_deref() == Some("gamemoderun"),
-                        "gamemoderun",
-                    )
-                    .clicked()
-                {
-                    state.config.default_wrapper = Some("gamemoderun".to_string());
-                }
-                if ui
-                    .selectable_label(
-                        state.config.default_wrapper.as_deref() == Some("mangohud"),
-                        "mangohud",
-                    )
-                    .clicked()
-                {
-                    state.config.default_wrapper = Some("mangohud".to_string());
-                }
-                if ui
-                    .selectable_label(
-                        state.config.default_wrapper.as_deref() == Some("prime-run"),
-                        "prime-run",
-                    )
-                    .clicked()
-                {
-                    state.config.default_wrapper = Some("prime-run".to_string());
-                }
-            });
-
-            let mut custom_wrapper = state.config.default_wrapper.clone().unwrap_or_default();
-            ui.horizontal(|ui| {
-                ui.label("Или произвольная команда:");
-                if ui.text_edit_singleline(&mut custom_wrapper).changed() {
-                    state.config.default_wrapper = if custom_wrapper.trim().is_empty() {
-                        None
-                    } else {
-                        Some(custom_wrapper.trim().to_string())
-                    };
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // 4. Action upon Launch
-            ui.label(
-                RichText::new("Поведение лаунчера при запуске Minecraft")
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                ui.selectable_value(
-                    &mut state.config.theme.launch_action,
-                    LaunchAction::KeepOpen,
-                    "Оставить лаунчер открытым",
-                );
-                ui.selectable_value(
-                    &mut state.config.theme.launch_action,
-                    LaunchAction::Minimize,
-                    "Свернуть",
-                );
-                ui.selectable_value(
-                    &mut state.config.theme.launch_action,
-                    LaunchAction::HideUntilExit,
-                    "Скрыть до выхода из игры",
-                );
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // 5. Java Runtimes & 1-Click Adoptium Downloader
-            ui.label(
-                RichText::new("Управление Java (JRE / JDK)")
-                    .strong()
-                    .size(14.0),
-            );
-            ui.add_space(4.0);
-
-            let tokens = Tokens::from_config(&state.config.theme);
-            let runtimes = mq_launch::discover_java_runtimes();
-            if runtimes.is_empty() {
+                // 1. RAM Allocation
                 ui.label(
-                    RichText::new("Установленные версии Java не найдены в системе")
-                        .color(tokens.text_muted),
+                    RichText::new("Выделение оперативной памяти (JVM RAM)")
+                        .strong()
+                        .size(14.0),
                 );
-            } else {
-                ui.label(
-                    RichText::new(format!("Найдено JVM в системе: {}", runtimes.len()))
-                        .color(tokens.text_muted)
-                        .small(),
-                );
-                for rt in runtimes.iter().take(5) {
-                    ui.horizontal(|ui| {
-                        version_badge(
-                            ui,
-                            &format!("Java {}", rt.major_version),
-                            crate::theme::ACCENT_COBALT,
-                        );
-                        ui.label(RichText::new(&rt.vendor).color(tokens.text).strong());
-                        ui.label(
-                            RichText::new(rt.path.display().to_string())
-                                .color(tokens.text_muted)
-                                .small(),
-                        );
-                    });
-                }
-            }
+                ui.add_space(4.0);
 
-            ui.add_space(6.0);
-            ui.label("Скачать проверенную Eclipse Temurin JRE напрямую из Adoptium:");
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                for &ver in &[8u32, 17u32, 21u32] {
-                    let btn_label = match ver {
-                        8 => "Скачать Java 8 (<= 1.16.5)",
-                        17 => "Скачать Java 17 (1.17 - 1.20.4)",
-                        21 => "Скачать Java 21 (1.20.5+)",
-                        _ => "Скачать Java",
-                    };
-                    if secondary_glass_button(ui, Some(VectorIcon::Download), btn_label).clicked() {
-                        let java_dir = state.paths.java_dir();
-                        let bus = state.event_bus.clone();
-                        tokio::spawn(async move {
-                            bus.publish(mq_core::Event::PhaseStarted {
-                                phase: format!("Скачивание Eclipse Temurin Java {ver}"),
-                                total_items: 1,
-                            });
-                            let client = reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(120))
-                                .build()
-                                .unwrap_or_default();
-                            match mq_launch::download_adoptium_java(&client, ver, &java_dir).await {
-                                Ok(rt) => {
-                                    bus.publish(mq_core::Event::PhaseCompleted {
-                                        phase: format!(
-                                            "Java {ver} успешно установлена: {}",
-                                            rt.full_version
-                                        ),
-                                        elapsed_ms: 0,
-                                    });
-                                }
-                                Err(e) => {
-                                    bus.publish(mq_core::Event::TaskError {
-                                        context: format!("Загрузка Java {ver}"),
-                                        message: e.to_string(),
-                                    });
-                                }
-                            }
+                ui.horizontal(|ui| {
+                    ui.label("Минимум RAM (-Xms):");
+                    ui.add(
+                        egui::Slider::new(&mut state.config.default_memory_min_mb, 512..=8192)
+                            .suffix(" MB")
+                            .step_by(256.0),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Максимум RAM (-Xmx):");
+                    ui.add(
+                        egui::Slider::new(&mut state.config.default_memory_max_mb, 1024..=32768)
+                            .suffix(" MB")
+                            .step_by(512.0),
+                    );
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // 2. Quick JVM Flag Presets
+                ui.label(
+                    RichText::new("Быстрые пресеты аргументов JVM")
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(4.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                    if secondary_glass_button(
+                        ui,
+                        Some(VectorIcon::Cpu),
+                        "Aikar's Flags (High Perf)",
+                    )
+                    .clicked()
+                    {
+                        state.config.default_jvm_args = vec![
+                            "-XX:+UseG1GC".to_string(),
+                            "-XX:+ParallelRefProcEnabled".to_string(),
+                            "-XX:MaxGCPauseMillis=200".to_string(),
+                            "-XX:+UnlockExperimentalVMOptions".to_string(),
+                            "-XX:+DisableExplicitGC".to_string(),
+                            "-XX:+AlwaysPreTouch".to_string(),
+                            "-XX:G1NewSizePercent=30".to_string(),
+                            "-XX:G1MaxNewSizePercent=40".to_string(),
+                            "-XX:G1ReservePercent=20".to_string(),
+                            "-XX:G1HeapWastePercent=5".to_string(),
+                            "-XX:G1MixedGCCountTarget=4".to_string(),
+                            "-XX:InitiatingHeapOccupancyPercent=15".to_string(),
+                            "-XX:G1MixedGCLiveThresholdPercent=90".to_string(),
+                            "-XX:G1RSetUpdatingPauseTimePercent=5".to_string(),
+                            "-XX:SurvivorRatio=32".to_string(),
+                            "-XX:+PerfDisableSharedMem".to_string(),
+                            "-XX:MaxTenuringThreshold=1".to_string(),
+                        ];
+                    }
+
+                    if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Java 21 Generational ZGC")
+                        .clicked()
+                    {
+                        state.config.default_jvm_args =
+                            vec!["-XX:+UseZGC".to_string(), "-XX:+ZGenerational".to_string()];
+                    }
+
+                    if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Low-End PC (Low Memory)")
+                        .clicked()
+                    {
+                        state.config.default_jvm_args =
+                            vec!["-XX:+UseSerialGC".to_string(), "-Xnoclassgc".to_string()];
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.label("Текущие аргументы JVM:");
+                let mut jvm_args_str = state.config.default_jvm_args.join(" ");
+                if ui.text_edit_singleline(&mut jvm_args_str).changed() {
+                    state.config.default_jvm_args = jvm_args_str
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect();
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // 3. Wrapper Command
+                ui.label(
+                    RichText::new("Команда-обёртка запуска игры")
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(state.config.default_wrapper.is_none(), "Без обёртки")
+                        .clicked()
+                    {
+                        state.config.default_wrapper = None;
+                    }
+                    if ui
+                        .selectable_label(
+                            state.config.default_wrapper.as_deref() == Some("gamemoderun"),
+                            "gamemoderun",
+                        )
+                        .clicked()
+                    {
+                        state.config.default_wrapper = Some("gamemoderun".to_string());
+                    }
+                    if ui
+                        .selectable_label(
+                            state.config.default_wrapper.as_deref() == Some("mangohud"),
+                            "mangohud",
+                        )
+                        .clicked()
+                    {
+                        state.config.default_wrapper = Some("mangohud".to_string());
+                    }
+                    if ui
+                        .selectable_label(
+                            state.config.default_wrapper.as_deref() == Some("prime-run"),
+                            "prime-run",
+                        )
+                        .clicked()
+                    {
+                        state.config.default_wrapper = Some("prime-run".to_string());
+                    }
+                });
+
+                let mut custom_wrapper = state.config.default_wrapper.clone().unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.label("Или произвольная команда:");
+                    if ui.text_edit_singleline(&mut custom_wrapper).changed() {
+                        state.config.default_wrapper = if custom_wrapper.trim().is_empty() {
+                            None
+                        } else {
+                            Some(custom_wrapper.trim().to_string())
+                        };
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // 4. Action upon Launch
+                ui.label(
+                    RichText::new("Поведение лаунчера при запуске Minecraft")
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut state.config.theme.launch_action,
+                        LaunchAction::KeepOpen,
+                        "Оставить лаунчер открытым",
+                    );
+                    ui.selectable_value(
+                        &mut state.config.theme.launch_action,
+                        LaunchAction::Minimize,
+                        "Свернуть",
+                    );
+                    ui.selectable_value(
+                        &mut state.config.theme.launch_action,
+                        LaunchAction::HideUntilExit,
+                        "Скрыть до выхода из игры",
+                    );
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // 5. Java Runtimes & 1-Click Adoptium Downloader
+                ui.label(
+                    RichText::new("Управление Java (JRE / JDK)")
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(4.0);
+
+                let tokens = Tokens::from_config(&state.config.theme);
+                let runtimes = mq_launch::discover_java_runtimes();
+                if runtimes.is_empty() {
+                    ui.label(
+                        RichText::new("Установленные версии Java не найдены в системе")
+                            .color(tokens.text_muted),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!("Найдено JVM в системе: {}", runtimes.len()))
+                            .color(tokens.text_muted)
+                            .small(),
+                    );
+                    for rt in runtimes.iter().take(5) {
+                        ui.horizontal(|ui| {
+                            version_badge(
+                                ui,
+                                &format!("Java {}", rt.major_version),
+                                crate::theme::ACCENT_COBALT,
+                            );
+                            ui.label(RichText::new(&rt.vendor).color(tokens.text).strong());
+                            ui.label(
+                                RichText::new(rt.path.display().to_string())
+                                    .color(tokens.text_muted)
+                                    .small(),
+                            );
                         });
                     }
                 }
-            });
-        });
+
+                ui.add_space(6.0);
+                ui.label("Скачать проверенную Eclipse Temurin JRE напрямую из Adoptium:");
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                    for &ver in &[8u32, 17u32, 21u32] {
+                        let btn_label = match ver {
+                            8 => "Скачать Java 8 (<= 1.16.5)",
+                            17 => "Скачать Java 17 (1.17 - 1.20.4)",
+                            21 => "Скачать Java 21 (1.20.5+)",
+                            _ => "Скачать Java",
+                        };
+                        if secondary_glass_button(ui, Some(VectorIcon::Download), btn_label)
+                            .clicked()
+                        {
+                            let java_dir = state.paths.java_dir();
+                            let bus = state.event_bus.clone();
+                            tokio::spawn(async move {
+                                bus.publish(mq_core::Event::PhaseStarted {
+                                    phase: format!("Скачивание Eclipse Temurin Java {ver}"),
+                                    total_items: 1,
+                                });
+                                let client = reqwest::Client::builder()
+                                    .timeout(std::time::Duration::from_secs(120))
+                                    .build()
+                                    .unwrap_or_default();
+                                match mq_launch::download_adoptium_java(&client, ver, &java_dir)
+                                    .await
+                                {
+                                    Ok(rt) => {
+                                        bus.publish(mq_core::Event::PhaseCompleted {
+                                            phase: format!(
+                                                "Java {ver} успешно установлена: {}",
+                                                rt.full_version
+                                            ),
+                                            elapsed_ms: 0,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        bus.publish(mq_core::Event::TaskError {
+                                            context: format!("Загрузка Java {ver}"),
+                                            message: e.to_string(),
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+            },
+        );
     }
 
     fn render_localization_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
+        let style = ThemeStyleParams::from_config(&state.config.theme);
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let card = solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(14));
 
-        card.show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        show_themed_card(
+            ui,
+            card,
+            card_r,
+            ui.make_persistent_id("settings_loc_glass"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
 
-            // 1. Launcher Interface Language
-            ui.label(RichText::new("1. Язык интерфейса лаунчера (11 языков)").color(tokens.text).strong().size(14.0));
-            ui.add_space(4.0);
+                // 1. Launcher Interface Language
+                ui.label(
+                    RichText::new("1. Язык интерфейса лаунчера (11 языков)")
+                        .color(tokens.text)
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(4.0);
 
-            ui.horizontal_wrapped(|ui| {
-                for lang in Language::ALL {
-                    let is_active = state.config.launcher_locale == lang.code();
-                    if ui.selectable_label(is_active, lang.native_name()).clicked() {
-                        state.config.launcher_locale = lang.code().to_string();
-                        // Automatically harmonize default Minecraft locale if not set
-                        state.config.default_mc_locale = mq_meta::launcher_locale_to_mc_locale(lang.code()).to_string();
+                ui.horizontal_wrapped(|ui| {
+                    for lang in Language::ALL {
+                        let is_active = state.config.launcher_locale == lang.code();
+                        if ui.selectable_label(is_active, lang.native_name()).clicked() {
+                            state.config.launcher_locale = lang.code().to_string();
+                            // Automatically harmonize default Minecraft locale if not set
+                            state.config.default_mc_locale =
+                                mq_meta::launcher_locale_to_mc_locale(lang.code()).to_string();
+                        }
                     }
-                }
-            });
+                });
 
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
 
-            // 2. Default Minecraft Game Locale (80+ locales)
-            ui.label(RichText::new("2. Язык Minecraft по умолчанию (80+ языков)").color(tokens.text).strong().size(14.0));
-            ui.label(RichText::new("Применяется автоматически ко всем новым инстансам и синхронизируется в options.txt перед запуском.").color(tokens.text_muted).small());
-            ui.add_space(6.0);
+                // 2. Default Minecraft Game Locale (80+ locales)
+                ui.label(
+                    RichText::new("2. Язык Minecraft по умолчанию (80+ языков)")
+                        .color(tokens.text)
+                        .strong()
+                        .size(14.0),
+                );
+                ui.label(RichText::new("Применяется автоматически ко всем новым инстансам и синхронизируется в options.txt перед запуском.").color(tokens.text_muted).small());
+                ui.add_space(6.0);
 
-            let current_info = find_mc_locale(&state.config.default_mc_locale);
-            let current_title = current_info
-                .map(|i| i.display_label())
-                .unwrap_or_else(|| state.config.default_mc_locale.clone());
+                let current_info = find_mc_locale(&state.config.default_mc_locale);
+                let current_title = current_info
+                    .map(|i| i.display_label())
+                    .unwrap_or_else(|| state.config.default_mc_locale.clone());
 
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Выбранная локаль Minecraft:").color(tokens.text));
-                version_badge(ui, &current_title, tokens.accent);
-            });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Выбранная локаль Minecraft:").color(tokens.text));
+                    version_badge(ui, &current_title, tokens.accent);
+                });
 
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
                 crate::widgets::paint_vector_icon(ui.painter(), rect, VectorIcon::Search, Color32::from_rgb(0x3B, 0x82, 0xF6));
                 let frame_resp = egui::Frame::new()
@@ -935,20 +1150,24 @@ impl SettingsView {
                 );
             });
 
-            ui.add_space(6.0);
-            let search_results = search_mc_locales(&self.mc_locale_search);
-            ScrollArea::vertical()
-                .max_height(160.0)
-                .id_salt("mc_locales_scroll")
-                .show(ui, |ui| {
-                    for loc in search_results.iter().take(25) {
-                        let is_active = state.config.default_mc_locale == loc.code;
-                        if ui.selectable_label(is_active, loc.display_label()).clicked() {
-                            state.config.default_mc_locale = loc.code.to_string();
+                ui.add_space(6.0);
+                let search_results = search_mc_locales(&self.mc_locale_search);
+                ScrollArea::vertical()
+                    .max_height(160.0)
+                    .id_salt("mc_locales_scroll")
+                    .show(ui, |ui| {
+                        for loc in search_results.iter().take(25) {
+                            let is_active = state.config.default_mc_locale == loc.code;
+                            if ui
+                                .selectable_label(is_active, loc.display_label())
+                                .clicked()
+                            {
+                                state.config.default_mc_locale = loc.code.to_string();
+                            }
                         }
-                    }
-                });
-        });
+                    });
+            },
+        );
     }
 
     fn render_catalog_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
@@ -1012,85 +1231,97 @@ impl SettingsView {
 
     fn render_network_api_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
+        let style = ThemeStyleParams::from_config(&state.config.theme);
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let card = solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(14));
 
-        card.show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        show_themed_card(
+            ui,
+            card,
+            card_r,
+            ui.make_persistent_id("settings_net_glass"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
 
-            ui.label(RichText::new("Потоки и соединения").strong());
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("Максимум параллельных HTTP-соединений:");
-                ui.add(egui::Slider::new(
-                    &mut state.config.max_connections,
-                    4..=128,
-                ));
-            });
+                ui.label(RichText::new("Потоки и соединения").strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Максимум параллельных HTTP-соединений:");
+                    ui.add(egui::Slider::new(
+                        &mut state.config.max_connections,
+                        4..=128,
+                    ));
+                });
 
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(8.0);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-            ui.label(RichText::new("Интеграции и ключи API").strong());
-            ui.add_space(4.0);
-            ui.label("CurseForge Core API Key:");
-            let mut cf_key = state
-                .config
-                .curseforge_api_key
-                .as_ref()
-                .map(|s| s.expose_secret().to_string())
-                .unwrap_or_default();
-            if ui
-                .add(egui::TextEdit::singleline(&mut cf_key).password(true))
-                .changed()
-            {
-                state.config.curseforge_api_key = if cf_key.trim().is_empty() {
-                    None
-                } else {
-                    Some(mq_core::SecretString::new(cf_key.trim()))
-                };
-            }
+                ui.label(RichText::new("Интеграции и ключи API").strong());
+                ui.add_space(4.0);
+                ui.label("CurseForge Core API Key:");
+                let mut cf_key = state
+                    .config
+                    .curseforge_api_key
+                    .as_ref()
+                    .map(|s| s.expose_secret().to_string())
+                    .unwrap_or_default();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut cf_key).password(true))
+                    .changed()
+                {
+                    state.config.curseforge_api_key = if cf_key.trim().is_empty() {
+                        None
+                    } else {
+                        Some(mq_core::SecretString::new(cf_key.trim()))
+                    };
+                }
 
-            ui.add_space(6.0);
-            ui.label("Microsoft OAuth Client ID:");
-            let mut ms_id = state.config.ms_client_id.clone().unwrap_or_default();
-            if ui.text_edit_singleline(&mut ms_id).changed() {
-                state.config.ms_client_id = if ms_id.trim().is_empty() {
-                    None
-                } else {
-                    Some(ms_id.trim().to_string())
-                };
-            }
+                ui.add_space(6.0);
+                ui.label("Microsoft OAuth Client ID:");
+                let mut ms_id = state.config.ms_client_id.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut ms_id).changed() {
+                    state.config.ms_client_id = if ms_id.trim().is_empty() {
+                        None
+                    } else {
+                        Some(ms_id.trim().to_string())
+                    };
+                }
 
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(8.0);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-            ui.label(RichText::new("Графический бэкенд (GUI)").strong());
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.selectable_value(
-                    &mut state.config.ui_backend,
-                    GuiBackend::Auto,
-                    "Авто (Vulkan -> OpenGL)",
-                );
-                ui.selectable_value(
-                    &mut state.config.ui_backend,
-                    GuiBackend::Vulkan,
-                    "Vulkan (WGPU)",
-                );
-                ui.selectable_value(
-                    &mut state.config.ui_backend,
-                    GuiBackend::Gl,
-                    "OpenGL (Glow)",
-                );
-            });
-        });
+                ui.label(RichText::new("Графический бэкенд (GUI)").strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut state.config.ui_backend,
+                        GuiBackend::Auto,
+                        "Авто (Vulkan -> OpenGL)",
+                    );
+                    ui.selectable_value(
+                        &mut state.config.ui_backend,
+                        GuiBackend::Vulkan,
+                        "Vulkan (WGPU)",
+                    );
+                    ui.selectable_value(
+                        &mut state.config.ui_backend,
+                        GuiBackend::Gl,
+                        "OpenGL (Glow)",
+                    );
+                });
+            },
+        );
     }
 
     fn render_updates_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
+        let style = ThemeStyleParams::from_config(&state.config.theme);
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let max_w = ui.available_width().min(640.0);
         ui.allocate_ui_with_layout(
             Vec2::new(max_w, 0.0),
@@ -1099,7 +1330,14 @@ impl SettingsView {
                 let card = solid_card_frame_with_config(&tokens, &state.config.theme)
                     .inner_margin(egui::Margin::same(14));
 
-                card.show(ui, |ui| {
+                show_themed_card(
+                    ui,
+                    card,
+                    card_r,
+                    ui.make_persistent_id("settings_updates_glass"),
+                    &style,
+                    &tokens,
+                    |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new("Обновления лаунчера").color(tokens.text).strong().size(15.0));
                     ui.add_space(8.0);
@@ -1205,7 +1443,8 @@ impl SettingsView {
                             }
                         }
                     }
-                });
+                    },
+                );
 
                 ui.add_space(12.0);
                 self.render_uninstall_card(ui, state, &tokens);
@@ -1214,28 +1453,37 @@ impl SettingsView {
     }
 
     fn render_uninstall_card(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
+        let style = ThemeStyleParams::from_config(&state.config.theme);
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let card = solid_card_frame_with_config(tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(14));
 
-        card.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                RichText::new("Удаление MQ Launcher")
-                    .color(tokens.text)
-                    .strong()
-                    .size(15.0),
-            );
-            ui.add_space(6.0);
-            ui.label(
+        show_themed_card(
+            ui,
+            card,
+            card_r,
+            ui.make_persistent_id("settings_uninstall_glass"),
+            &style,
+            tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new("Удаление MQ Launcher")
+                        .color(tokens.text)
+                        .strong()
+                        .size(15.0),
+                );
+                ui.add_space(6.0);
+                ui.label(
                 RichText::new(
                     "Удаляет бинарник лаунчера, ярлык и иконку в системе (Linux и Windows). Инстансы Minecraft, моды, миры и аккаунты по умолчанию сохраняются.",
                 )
                 .color(tokens.text_muted)
                 .small(),
             );
-            ui.add_space(8.0);
+                ui.add_space(8.0);
 
-            ui.horizontal_wrapped(|ui| {
+                ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
                 if secondary_glass_button(
                     ui,
@@ -1266,48 +1514,51 @@ impl SettingsView {
                 }
             });
 
-            if self.confirm_uninstall {
-                ui.add_space(8.0);
-                ui.checkbox(
-                    &mut self.uninstall_purge_data,
-                    "Также удалить все инстансы, моды, сохранения миров и настройки",
-                );
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                    if secondary_glass_button(
-                        ui,
-                        Some(VectorIcon::Trash),
-                        "Подтвердить удаление",
-                    )
-                    .clicked()
-                    {
-                        match mq_update::UpdateManager::uninstall(
-                            &state.paths.data_dir,
-                            &state.paths.config_dir,
-                            &state.paths.cache_dir,
-                            self.uninstall_purge_data,
-                            false,
-                        ) {
-                            Ok(_) => std::process::exit(0),
-                            Err(e) => {
-                                state.status_message =
-                                    Some((format!("Ошибка удаления: {e}"), true));
-                                self.confirm_uninstall = false;
+                if self.confirm_uninstall {
+                    ui.add_space(8.0);
+                    ui.checkbox(
+                        &mut self.uninstall_purge_data,
+                        "Также удалить все инстансы, моды, сохранения миров и настройки",
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        if secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Trash),
+                            "Подтвердить удаление",
+                        )
+                        .clicked()
+                        {
+                            match mq_update::UpdateManager::uninstall(
+                                &state.paths.data_dir,
+                                &state.paths.config_dir,
+                                &state.paths.cache_dir,
+                                self.uninstall_purge_data,
+                                false,
+                            ) {
+                                Ok(_) => std::process::exit(0),
+                                Err(e) => {
+                                    state.status_message =
+                                        Some((format!("Ошибка удаления: {e}"), true));
+                                    self.confirm_uninstall = false;
+                                }
                             }
                         }
-                    }
-                    if secondary_glass_button(ui, None, "Отмена").clicked() {
-                        self.confirm_uninstall = false;
-                        self.uninstall_purge_data = false;
-                    }
-                });
-            }
-        });
+                        if secondary_glass_button(ui, None, "Отмена").clicked() {
+                            self.confirm_uninstall = false;
+                            self.uninstall_purge_data = false;
+                        }
+                    });
+                }
+            },
+        );
     }
 
     fn render_about_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
+        let style = ThemeStyleParams::from_config(&state.config.theme);
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let max_w = ui.available_width().min(640.0);
         ui.allocate_ui_with_layout(
             Vec2::new(max_w, 0.0),
@@ -1316,7 +1567,14 @@ impl SettingsView {
                 let card = solid_card_frame_with_config(&tokens, &state.config.theme)
                     .inner_margin(egui::Margin::same(16));
 
-                card.show(ui, |ui| {
+                show_themed_card(
+                    ui,
+                    card,
+                    card_r,
+                    ui.make_persistent_id("settings_about_glass"),
+                    &style,
+                    &tokens,
+                    |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), egui::Sense::hover());
@@ -1372,7 +1630,8 @@ impl SettingsView {
                             state.status_message = Some(("Диагностическая информация скопирована в буфер обмена".to_string(), false));
                         }
                     });
-                });
+                    },
+                );
 
                 ui.add_space(12.0);
                 self.render_uninstall_card(ui, state, &tokens);
