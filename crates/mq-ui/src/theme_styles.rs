@@ -736,6 +736,12 @@ fn build_gpu_liquid_glass_shape(
     let screen_pts = ctx.screen_rect().size();
     let screen_px = [(screen_pts.x * ppp).max(1.0), (screen_pts.y * ppp).max(1.0)];
 
+    let (xform, opacity) = crate::animation::current_visual_transform(ctx);
+    let rect = xform * rect;
+    let radius_pt = radius_pt * xform.scaling;
+    let bevel_pt = bevel_pt * xform.scaling;
+    let op = opacity.clamp(0.01, 1.0);
+
     let phys_min = [rect.left() * ppp, rect.top() * ppp];
     let phys_size = [
         (rect.width() * ppp).max(1.0),
@@ -785,7 +791,7 @@ fn build_gpu_liquid_glass_shape(
         rect_min: phys_min,
         rect_size: phys_size,
         screen_size: screen_px,
-        light_dir: [-0.5523, -0.8336],
+        light_dir: [-0.5523 * op, -0.8336 * op],
         uv_min,
         uv_size,
         backdrop_min,
@@ -796,7 +802,7 @@ fn build_gpu_liquid_glass_shape(
         ior_strength,
         dispersion,
         cursor_pos,
-        spec_radius: spec_radius_pt * ppp,
+        spec_radius: spec_radius_pt * xform.scaling * ppp,
         hover_t: hover_t.clamp(0.0, 1.0),
     };
 
@@ -976,18 +982,18 @@ pub fn paint_glass_surface_overlay(
     }
 }
 
-/// Paints a tinted variant of Liquid Glass for active navigation rows, segmented controls, and
-/// primary action buttons (via WGSL `PaintCallback` on wgpu, or `Mesh` fallback on `glow`).
+/// Collects tinted Liquid Glass shapes (`PaintCallback` on wgpu, or `Mesh` fallback on `glow`)
+/// into `out` so callers can also assign them into a pre-allocated [`Shape::Noop`] slot.
 #[allow(clippy::too_many_arguments)]
-pub fn paint_tinted_glass_pill(
+pub fn collect_tinted_glass_pill_shapes(
     ctx: &Context,
-    painter: &Painter,
     rect: Rect,
     radius: CornerRadius,
     style: &ThemeStyleParams,
     tokens: &Tokens,
     tint: Color32,
     hover_t: f32,
+    out: &mut Vec<Shape>,
 ) {
     if !rect.is_positive() || !style.refraction_border {
         return;
@@ -1005,7 +1011,7 @@ pub fn paint_tinted_glass_pill(
             tint.b() as f32 / 255.0,
             0.32 + 0.08 * hover_t,
         ];
-        painter.add(build_gpu_liquid_glass_shape(
+        out.push(build_gpu_liquid_glass_shape(
             ctx,
             rect,
             rect.expand(3.0),
@@ -1023,15 +1029,14 @@ pub fn paint_tinted_glass_pill(
     if let Some(mesh) =
         build_serpantinum_refracted_glass_mesh(ctx, rect, r, hover_t, true, Some(tint))
     {
-        painter.add(Shape::Mesh(mesh.into()));
+        out.push(Shape::Mesh(mesh.into()));
     }
-    painter.rect_filled(
+    out.push(Shape::rect_filled(
         rect.shrink(0.5),
         CornerRadius::same(r.round() as u8),
         Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 64),
-    );
-    paint_refractive_gradient_border(
-        painter,
+    ));
+    collect_refractive_gradient_border_shapes(
         rect,
         r,
         style.refraction_top_left,
@@ -1040,7 +1045,28 @@ pub fn paint_tinted_glass_pill(
         smoothed_pointer_pos(ctx),
         style.specular_radius_button,
         hover_t,
+        out,
     );
+}
+
+/// Paints a tinted variant of Liquid Glass for active navigation rows, segmented controls, and
+/// primary action buttons (via WGSL `PaintCallback` on wgpu, or `Mesh` fallback on `glow`).
+#[allow(clippy::too_many_arguments)]
+pub fn paint_tinted_glass_pill(
+    ctx: &Context,
+    painter: &Painter,
+    rect: Rect,
+    radius: CornerRadius,
+    style: &ThemeStyleParams,
+    tokens: &Tokens,
+    tint: Color32,
+    hover_t: f32,
+) {
+    let mut shapes = Vec::new();
+    collect_tinted_glass_pill_shapes(ctx, rect, radius, style, tokens, tint, hover_t, &mut shapes);
+    for shape in shapes {
+        painter.add(shape);
+    }
 }
 
 /// Renders a subtle Serpantinum selection highlight border around selected items without loud rings.
@@ -1204,8 +1230,8 @@ pub fn paint_hud_glass_dock(
     );
 }
 
-/// Renders an `egui::Frame` with blurred glass interior + bezel refraction + 1px directional
-/// specular edge strictly beneath child widgets.
+/// Renders an `egui::Frame` with smooth spring hover lift, subtle press feedback, and
+/// blurred glass interior + bezel refraction beneath child widgets when in Liquid Glass mode.
 pub fn show_themed_card<R>(
     ui: &mut Ui,
     frame: egui::Frame,
@@ -1216,7 +1242,51 @@ pub fn show_themed_card<R>(
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> InnerResponse<R> {
     if !style.refraction_border {
-        return frame.show(ui, add_contents);
+        let orig_fill = frame.fill;
+        let orig_stroke = frame.stroke;
+        let orig_radius = frame.corner_radius;
+        let mut frame = frame;
+        frame.fill = Color32::TRANSPARENT;
+        frame.stroke = Stroke::NONE;
+
+        let mut prepared = frame.begin(ui);
+        let bg_slot = prepared.content_ui.painter().add(Shape::Noop);
+        let inner = add_contents(&mut prepared.content_ui);
+        let frame_resp = prepared.end(ui);
+
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+        let hovered = pointer_pos.is_some_and(|pos| frame_resp.rect.contains(pos));
+        let pressed = hovered && ui.input(|i| i.pointer.primary_down());
+        let anim = crate::animation::animate_interaction(ui.ctx(), hover_id, hovered, pressed);
+        let visual_rect = anim.transform_card_rect(frame_resp.rect);
+
+        let fill = if orig_fill == Color32::TRANSPARENT {
+            Color32::TRANSPARENT
+        } else {
+            lerp_rgba(
+                orig_fill,
+                style.surface_hover_fill(tokens),
+                anim.hover_t * 0.55,
+            )
+        };
+        let stroke_col = if orig_stroke.width <= 0.0 || orig_stroke.color == Color32::TRANSPARENT {
+            Color32::TRANSPARENT
+        } else {
+            lerp_rgba(
+                orig_stroke.color,
+                blend_color(tokens.border_strong, tokens.accent, 0.35),
+                anim.hover_t,
+            )
+        };
+        let shape = egui::epaint::RectShape::new(
+            visual_rect,
+            orig_radius,
+            fill,
+            Stroke::new(orig_stroke.width, stroke_col),
+            StrokeKind::Inside,
+        );
+        ui.painter().set(bg_slot, Shape::Rect(shape));
+        return InnerResponse::new(inner, frame_resp);
     }
 
     let effective_radius = style.card_corner_radius(radius.nw as f32);
@@ -1229,19 +1299,20 @@ pub fn show_themed_card<R>(
     let overlay_slot = prepared.content_ui.painter().add(Shape::Noop);
     let inner = add_contents(&mut prepared.content_ui);
     let frame_resp = prepared.end(ui);
-    let hovered = ui
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|pos| frame_resp.rect.contains(pos));
-    let hover_t = ui.ctx().animate_bool_with_time(hover_id, hovered, 0.14);
+    let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+    let hovered = pointer_pos.is_some_and(|pos| frame_resp.rect.contains(pos));
+    let pressed = hovered && ui.input(|i| i.pointer.primary_down());
+    let anim = crate::animation::animate_interaction(ui.ctx(), hover_id, hovered, pressed);
+    let visual_rect = anim.transform_card_rect(frame_resp.rect);
 
     let mut under_shapes = Vec::new();
     collect_glass_underlay_shapes(
         ui.ctx(),
-        frame_resp.rect,
+        visual_rect,
         effective_radius,
         style,
         tokens,
-        hover_t,
+        anim.hover_t,
         false,
         &mut under_shapes,
     );
@@ -1252,14 +1323,14 @@ pub fn show_themed_card<R>(
     if !is_wgpu_glass_available(ui.ctx()) {
         paint_refractive_gradient_border(
             ui.painter(),
-            frame_resp.rect,
+            visual_rect,
             effective_radius.nw as f32,
             style.refraction_top_left,
             style.refraction_bottom_right,
             tokens.accent,
             smoothed_pointer_pos(ui.ctx()),
             style.specular_radius_card,
-            hover_t,
+            anim.hover_t,
         );
     }
 
@@ -1268,9 +1339,16 @@ pub fn show_themed_card<R>(
 
 fn smoothed_pointer_pos(ctx: &Context) -> Option<Pos2> {
     let raw = ctx.input(|i| i.pointer.hover_pos())?;
-    let x = ctx.animate_value_with_time(Id::new("mq_glass_cursor_x"), raw.x, 0.08);
-    let y = ctx.animate_value_with_time(Id::new("mq_glass_cursor_y"), raw.y, 0.08);
-    Some(Pos2::new(x, y))
+    let sm = crate::animation::animate_spring_vec2(
+        ctx,
+        Id::new("mq_glass_cursor_pos"),
+        raw.to_vec2(),
+        crate::animation::SpringConfig::snappy()
+            .with_stiffness(650.0)
+            .with_damping(42.0)
+            .with_epsilon(0.35),
+    );
+    Some(sm.to_pos2())
 }
 
 fn build_vertical_rounded_fade_mesh(
@@ -1312,8 +1390,7 @@ fn build_vertical_rounded_fade_mesh(
 /// Delicate 1.0px Serpantinum specular rim (`hair = exp(-t/1.1)` + 5px meniscus `wide`),
 /// lit by `lightDir = normalize(-0.55, -0.83)` with gentle hover direction steering.
 #[allow(clippy::too_many_arguments)]
-fn paint_refractive_gradient_border(
-    painter: &Painter,
+fn collect_refractive_gradient_border_shapes(
     rect: Rect,
     radius: f32,
     top_left_col: Color32,
@@ -1322,15 +1399,16 @@ fn paint_refractive_gradient_border(
     cursor: Option<Pos2>,
     spec_radius: f32,
     hover_t: f32,
+    out: &mut Vec<Shape>,
 ) {
     let r = radius.clamp(0.0, (rect.width().min(rect.height()) * 0.49).max(0.0));
     if r < 1.0 {
-        painter.rect_stroke(
+        out.push(Shape::rect_stroke(
             rect,
             CornerRadius::ZERO,
             Stroke::new(1.0_f32, top_left_col),
             StrokeKind::Inside,
-        );
+        ));
         return;
     }
 
@@ -1412,9 +1490,38 @@ fn paint_refractive_gradient_border(
     }
 
     if r >= 5.0 {
-        painter.add(Shape::Mesh(wide_mesh.into()));
+        out.push(Shape::Mesh(wide_mesh.into()));
     }
-    painter.add(Shape::Mesh(hair_mesh.into()));
+    out.push(Shape::Mesh(hair_mesh.into()));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_refractive_gradient_border(
+    painter: &Painter,
+    rect: Rect,
+    radius: f32,
+    top_left_col: Color32,
+    bottom_right_col: Color32,
+    accent_col: Color32,
+    cursor: Option<Pos2>,
+    spec_radius: f32,
+    hover_t: f32,
+) {
+    let mut shapes = Vec::new();
+    collect_refractive_gradient_border_shapes(
+        rect,
+        radius,
+        top_left_col,
+        bottom_right_col,
+        accent_col,
+        cursor,
+        spec_radius,
+        hover_t,
+        &mut shapes,
+    );
+    for shape in shapes {
+        painter.add(shape);
+    }
 }
 
 #[inline]

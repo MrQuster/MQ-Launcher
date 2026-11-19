@@ -66,31 +66,44 @@ impl<'a> FilterChip<'a> {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
 
-        let painter = ui.painter();
-        let bg_fill = if self.active {
-            tokens.bg_surface_hover
-        } else {
-            tokens.bg_input
-        };
+        let anim = crate::animation::animate_interaction(
+            ui.ctx(),
+            resp.id.with("chip_anim"),
+            resp.hovered(),
+            resp.is_pointer_button_down_on(),
+        );
+        let active_t = crate::animation::animate_spring_bool(
+            ui.ctx(),
+            resp.id.with("chip_active"),
+            self.active,
+            crate::animation::SpringConfig::snappy(),
+        );
+        let visual_rect = anim.transform_rect(rect);
 
-        let stroke_color = if self.active {
-            tokens.border_strong
-        } else if resp.hovered() {
-            tokens.border
-        } else {
-            tokens.border.gamma_multiply(0.6)
-        };
+        let painter = ui.painter();
+        let bg_idle =
+            crate::theme_styles::lerp_rgba(tokens.bg_input, tokens.bg_surface_hover, active_t);
+        let bg_fill =
+            crate::theme_styles::lerp_rgba(bg_idle, tokens.bg_surface_hover, anim.hover_t * 0.55);
+
+        let idle_stroke = crate::theme_styles::lerp_rgba(
+            tokens.border.gamma_multiply(0.6),
+            tokens.border_strong,
+            active_t,
+        );
+        let stroke_color =
+            crate::theme_styles::lerp_rgba(idle_stroke, tokens.border_strong, anim.hover_t * 0.7);
 
         painter.rect(
-            rect,
+            visual_rect,
             RADIUS_TAG,
             bg_fill,
             Stroke::new(1.0_f32, stroke_color),
             egui::StrokeKind::Inside,
         );
 
-        let mut current_x = rect.left() + 8.0;
-        let center_y = rect.center().y;
+        let mut current_x = visual_rect.left() + 8.0;
+        let center_y = visual_rect.center().y;
 
         // Render level dot if present
         if let Some(dot_col) = self.dot_color {
@@ -101,11 +114,11 @@ impl<'a> FilterChip<'a> {
         }
 
         // Render chip label text
-        let text_color = if self.active {
-            tokens.text
-        } else {
-            tokens.text_muted
-        };
+        let text_color = crate::theme_styles::lerp_rgba(
+            tokens.text_muted,
+            tokens.text,
+            active_t.max(anim.hover_t),
+        );
 
         let galley = painter.layout_no_wrap(
             self.label.to_string(),

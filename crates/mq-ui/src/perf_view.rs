@@ -55,7 +55,15 @@ impl PerfView {
                                 .color(TEXT_MUTED)
                                 .monospace(),
                         );
-                        let frac = crate::state::safe_clamp_f32(core.usage_pct / 100.0, 0.0, 1.0);
+                        let raw_frac =
+                            crate::state::safe_clamp_f32(core.usage_pct / 100.0, 0.0, 1.0);
+                        let frac = crate::animation::animate_spring_f32(
+                            ui.ctx(),
+                            egui::Id::new(("mq_perf_core_bar", core.core_id)),
+                            raw_frac,
+                            crate::animation::SpringConfig::smooth(),
+                        )
+                        .clamp(0.0, 1.0);
                         ui.add(
                             ProgressBar::new(frac)
                                 .desired_width(260.0)

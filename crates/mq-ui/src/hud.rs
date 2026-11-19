@@ -134,19 +134,26 @@ fn render_per_core_bars(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens) {
 
 fn render_smooth_progress_bar(ui: &mut Ui, fraction: f32, tokens: &Tokens) {
     let clamped = safe_clamp_f32(fraction, 0.0, 1.0);
+    let smooth = crate::animation::animate_spring_f32(
+        ui.ctx(),
+        egui::Id::new("mq_hud_progress_bar"),
+        clamped,
+        crate::animation::SpringConfig::smooth(),
+    )
+    .clamp(0.0, 1.0);
     let desired = Vec2::new(130.0, 14.0);
     let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, RADIUS_TAG, tokens.border);
-        if clamped > 0.0 {
-            let fill_w = (rect.width() * clamped).max(3.0);
+        if smooth > 0.001 {
+            let fill_w = (rect.width() * smooth).max(3.0);
             let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_w, rect.height()));
             painter.rect_filled(fill_rect, RADIUS_TAG, tokens.accent);
         }
-        let pct_str = format!("{:>3.0}%", clamped * 100.0);
-        let text_col = if clamped >= 0.45 {
+        let pct_str = format!("{:>3.0}%", smooth * 100.0);
+        let text_col = if smooth >= 0.45 {
             tokens.accent_text
         } else {
             tokens.text
@@ -287,6 +294,7 @@ mod tests {
     #[test]
     fn zero_emojis_exist_across_all_owned_ui_files() {
         let sources = [
+            ("animation.rs", include_str!("animation.rs")),
             ("theme.rs", include_str!("theme.rs")),
             ("fonts.rs", include_str!("fonts.rs")),
             ("widgets.rs", include_str!("widgets.rs")),

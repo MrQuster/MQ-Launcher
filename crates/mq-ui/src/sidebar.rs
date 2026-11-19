@@ -12,7 +12,7 @@ use mq_auth::{AccountKind, AccountProfile};
 use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
 use crate::i18n::{tr, Language};
 use crate::theme::{solid_sidebar_frame, Tokens, RADIUS_BUTTON};
-use crate::widgets::{paint_vector_icon, VectorIcon};
+use crate::widgets::{paint_animated_chevron, paint_vector_icon, VectorIcon};
 
 /// Expanded width of the left navigation sidebar in logical points.
 pub const SIDEBAR_WIDTH: f32 = 224.0;
@@ -76,10 +76,15 @@ pub fn toggle_sidebar_compact(ctx: &Context) {
     });
 }
 
-/// Returns the animated width for the left navigation sidebar (`224 px` <-> `64 px`, `~150 ms`).
+/// Returns the animated width for the left navigation sidebar (`224 px` <-> `64 px`).
 pub fn sidebar_width(ctx: &Context) -> f32 {
     let compact = is_sidebar_compact(ctx);
-    let t = ctx.animate_bool_with_time(Id::new(COLLAPSE_ANIM_ID), compact, SIDEBAR_ANIMATION_SECS);
+    let t = crate::animation::animate_spring_bool(
+        ctx,
+        Id::new(COLLAPSE_ANIM_ID),
+        compact,
+        crate::animation::SpringConfig::snappy(),
+    );
     egui::lerp(SIDEBAR_WIDTH..=COMPACT_SIDEBAR_WIDTH, t)
 }
 
@@ -490,7 +495,7 @@ fn render_nav_row(
     badge_count: Option<usize>,
     lang_code: &str,
     tokens: &Tokens,
-) -> bool {
+) -> (bool, Rect) {
     let available_w = ui
         .available_width()
         .max(if is_compact { 40.0 } else { 140.0 });
@@ -500,78 +505,79 @@ fn render_nav_row(
 
     let has_focus = response.has_focus();
     let hovered = response.hovered();
+    let pressed = response.is_pointer_button_down_on();
+    let anim = crate::animation::animate_interaction(
+        ui.ctx(),
+        id.with("nav_interaction"),
+        hovered,
+        pressed,
+    );
+    let active_t = crate::animation::animate_spring_bool(
+        ui.ctx(),
+        id.with("glass_nav_active"),
+        is_active,
+        crate::animation::SpringConfig::snappy(),
+    );
+    let hover_t = anim.hover_t;
+    let visual_rect = if is_active {
+        rect
+    } else {
+        anim.transform_rect(rect)
+    };
 
     if ui.is_rect_visible(rect) {
         let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
         let painter = ui.painter();
-        let cr = style.control_corner_radius(rect.height(), CornerRadius::same(NAV_ROW_RADIUS));
-        let hover_t =
-            ui.ctx()
-                .animate_bool_with_time(id.with("glass_nav_hover"), hovered || is_active, 0.14);
+        let cr =
+            style.control_corner_radius(visual_rect.height(), CornerRadius::same(NAV_ROW_RADIUS));
 
-        if style.refraction_border {
-            if is_active {
-                crate::theme_styles::paint_tinted_glass_pill(
-                    ui.ctx(),
-                    painter,
-                    rect,
-                    cr,
-                    &style,
-                    tokens,
-                    crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.28),
-                    hover_t.max(0.55),
-                );
-            } else if hovered || hover_t > 0.02 {
+        if !is_active && hover_t > 0.02 {
+            if style.refraction_border {
                 crate::theme_styles::paint_glass_surface_overlay(
                     ui.ctx(),
                     painter,
-                    rect,
+                    visual_rect,
                     cr,
                     &style,
                     tokens,
                     hover_t * 0.85,
                     true,
                 );
+            } else {
+                painter.rect_filled(
+                    visual_rect,
+                    cr,
+                    tokens.bg_surface_hover.gamma_multiply(hover_t),
+                );
             }
-        } else if is_active {
-            painter.rect_filled(rect, cr, tokens.bg_surface);
-            let bar_rect = Rect::from_min_max(
-                Pos2::new(rect.left(), rect.top() + 6.0),
-                Pos2::new(rect.left() + 2.0, rect.bottom() - 6.0),
-            );
-            painter.rect_filled(bar_rect, CornerRadius::same(1), tokens.accent);
-        } else if hovered {
-            painter.rect_filled(rect, cr, tokens.bg_surface_hover);
         }
 
         if has_focus {
             painter.rect_stroke(
-                rect,
+                visual_rect,
                 cr,
                 Stroke::new(2.0_f32, tokens.accent),
                 StrokeKind::Inside,
             );
         }
 
-        let fg_color = if is_active || hovered {
-            tokens.text
-        } else {
-            tokens.text_muted
-        };
+        let fg_color =
+            crate::theme_styles::lerp_rgba(tokens.text_muted, tokens.text, active_t.max(hover_t));
 
         if is_compact {
-            let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(NAV_ICON_SIZE));
+            let icon_rect =
+                Rect::from_center_size(visual_rect.center(), Vec2::splat(NAV_ICON_SIZE));
             paint_vector_icon(painter, icon_rect, tab.icon(), fg_color);
 
             if let Some(count) = badge_count.filter(|&c| c > 0) {
-                let badge_center = Pos2::new(rect.right() - 8.0, rect.top() + 8.0);
+                let badge_center = Pos2::new(visual_rect.right() - 8.0, visual_rect.top() + 8.0);
                 painter.circle_filled(badge_center, 4.0, tokens.border_strong);
                 let _ = count;
             }
         } else {
-            let icon_left = rect.left() + NAV_ROW_PADDING_X;
+            let icon_left = visual_rect.left() + NAV_ROW_PADDING_X;
             let icon_rect = Rect::from_min_size(
-                Pos2::new(icon_left, rect.center().y - NAV_ICON_SIZE * 0.5),
+                Pos2::new(icon_left, visual_rect.center().y - NAV_ICON_SIZE * 0.5),
                 Vec2::splat(NAV_ICON_SIZE),
             );
             paint_vector_icon(painter, icon_rect, tab.icon(), fg_color);
@@ -583,7 +589,7 @@ fn render_nav_row(
             };
             let text_left = icon_left + NAV_ICON_SIZE + NAV_ICON_TEXT_GAP;
             let max_text_w =
-                (rect.right() - NAV_ROW_PADDING_X - badge_reserve - text_left).max(20.0);
+                (visual_rect.right() - NAV_ROW_PADDING_X - badge_reserve - text_left).max(20.0);
             let font_id = FontId::proportional(13.0);
             let galley = truncate_text_to_width(
                 painter,
@@ -592,7 +598,7 @@ fn render_nav_row(
                 max_text_w,
                 fg_color,
             );
-            let text_pos = Pos2::new(text_left, rect.center().y - galley.size().y * 0.5);
+            let text_pos = Pos2::new(text_left, visual_rect.center().y - galley.size().y * 0.5);
             painter.galley(text_pos, galley, fg_color);
 
             if let Some(count) = badge_count.filter(|&c| c > 0) {
@@ -607,8 +613,8 @@ fn render_nav_row(
                 let pill_h = 16.0;
                 let pill_rect = Rect::from_min_size(
                     Pos2::new(
-                        rect.right() - NAV_ROW_PADDING_X - pill_w,
-                        rect.center().y - pill_h * 0.5,
+                        visual_rect.right() - NAV_ROW_PADDING_X - pill_w,
+                        visual_rect.center().y - pill_h * 0.5,
                     ),
                     Vec2::new(pill_w, pill_h),
                 );
@@ -661,7 +667,7 @@ fn render_nav_row(
         response
     };
 
-    resp.clicked() || activated_by_enter
+    (resp.clicked() || activated_by_enter, rect)
 }
 
 fn handle_keyboard_navigation(ui: &mut Ui) -> Option<NavTab> {
@@ -889,29 +895,48 @@ fn render_bottom_account_profile(
     }
 
     let popup_id = Id::new("mq_sidebar_quick_account_popup");
+    let popup_is_open = ui.memory(|m| m.is_popup_open(popup_id));
+    let popup_open_t = crate::animation::animate_spring_bool(
+        ui.ctx(),
+        popup_id.with("acc_chev_open"),
+        popup_is_open,
+        crate::animation::SpringConfig::snappy(),
+    );
     let available_w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(available_w, 44.0), Sense::click());
 
     if ui.is_rect_visible(rect) {
-        let hovered = resp.hovered();
+        let hovered = resp.hovered() || popup_is_open;
+        let pressed = resp.is_pointer_button_down_on();
+        let anim = crate::animation::animate_interaction(
+            ui.ctx(),
+            resp.id.with("acc_card_anim"),
+            hovered,
+            pressed,
+        );
+        let visual_rect = anim.transform_rect(rect);
         let painter = ui.painter();
 
-        if hovered {
+        if anim.hover_t > 0.02 {
             let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
-            let r = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+            let r = style.control_corner_radius(visual_rect.height(), RADIUS_BUTTON);
             if style.refraction_border {
                 crate::theme_styles::paint_glass_surface_overlay(
                     ui.ctx(),
                     painter,
-                    rect,
+                    visual_rect,
                     r,
                     &style,
                     tokens,
-                    0.85,
+                    0.85 * anim.hover_t,
                     true,
                 );
             } else {
-                painter.rect_filled(rect, r, tokens.bg_surface_hover);
+                painter.rect_filled(
+                    visual_rect,
+                    r,
+                    tokens.bg_surface_hover.gamma_multiply(anim.hover_t),
+                );
             }
         }
 
@@ -926,27 +951,31 @@ fn render_bottom_account_profile(
 
         if is_compact {
             let avatar_rect =
-                Rect::from_center_size(rect.center(), Vec2::splat(ACCOUNT_AVATAR_SIZE));
+                Rect::from_center_size(visual_rect.center(), Vec2::splat(ACCOUNT_AVATAR_SIZE));
             crate::widgets::paint_skin_head_in_rect(painter, avatar_rect, resolved);
         } else {
             let avatar_rect = Rect::from_min_size(
                 Pos2::new(
-                    rect.left() + 6.0,
-                    rect.center().y - ACCOUNT_AVATAR_SIZE * 0.5,
+                    visual_rect.left() + 6.0,
+                    visual_rect.center().y - ACCOUNT_AVATAR_SIZE * 0.5,
                 ),
                 Vec2::splat(ACCOUNT_AVATAR_SIZE),
             );
             crate::widgets::paint_skin_head_in_rect(painter, avatar_rect, resolved);
 
             let chev_rect = Rect::from_center_size(
-                Pos2::new(rect.right() - 14.0, rect.center().y),
+                Pos2::new(visual_rect.right() - 14.0, visual_rect.center().y),
                 Vec2::splat(16.0),
             );
-            paint_vector_icon(
+            paint_animated_chevron(
                 painter,
                 chev_rect,
-                VectorIcon::ChevronDown,
-                tokens.text_muted,
+                popup_open_t,
+                crate::theme_styles::lerp_rgba(
+                    tokens.text_muted,
+                    tokens.text,
+                    popup_open_t.max(anim.hover_t),
+                ),
             );
 
             let text_left = avatar_rect.right() + 8.0;
@@ -955,13 +984,13 @@ fn render_bottom_account_profile(
             let name_font = FontId::proportional(12.5);
             let name_galley =
                 truncate_text_to_width(painter, username, &name_font, max_text_w, tokens.text);
-            let name_pos = Pos2::new(text_left, rect.top() + 7.0);
+            let name_pos = Pos2::new(text_left, visual_rect.top() + 7.0);
             painter.galley(name_pos, name_galley, tokens.text);
 
             let kind_font = FontId::proportional(11.0);
             let kind_galley =
                 painter.layout_no_wrap(source_str.to_owned(), kind_font, tokens.text_muted);
-            let kind_pos = Pos2::new(text_left, rect.top() + 23.0);
+            let kind_pos = Pos2::new(text_left, visual_rect.top() + 23.0);
             painter.galley(kind_pos, kind_galley, tokens.text_muted);
         }
     }
@@ -987,47 +1016,40 @@ fn render_bottom_account_profile(
         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
     }
 
-    egui::popup_above_or_below_widget(
-        ui,
-        popup_id,
-        &resp,
-        egui::AboveOrBelow::Above,
-        egui::PopupCloseBehavior::CloseOnClickOutside,
-        |ui| {
-            ui.set_min_width(200.0);
-            ui.label(
-                RichText::new("Аккаунты")
-                    .color(tokens.text_muted)
-                    .size(11.0),
-            );
-            ui.separator();
-            if accounts.is_empty() {
-                ui.label(RichText::new("Гость (Офлайн)").color(tokens.text_muted));
-            } else {
-                for acc in accounts {
-                    let is_current = active_profile
-                        .map(|curr| curr.id == acc.id)
-                        .unwrap_or(false);
-                    let label = format!("{} ({})", acc.username, account_source_label(acc.kind));
-                    if ui
-                        .selectable_label(is_current, RichText::new(label).color(tokens.text))
-                        .clicked()
-                    {
-                        action = Some(SidebarAction::SwitchAccount(acc.id.to_string()));
-                        ui.memory_mut(|mem| mem.close_popup());
-                    }
+    crate::animation::show_animated_dropdown_popup(ui, popup_id, &resp, 212.0, true, false, |ui| {
+        ui.set_min_width(196.0);
+        ui.label(
+            RichText::new("Аккаунты")
+                .color(tokens.text_muted)
+                .size(11.0),
+        );
+        ui.separator();
+        if accounts.is_empty() {
+            ui.label(RichText::new("Гость (Офлайн)").color(tokens.text_muted));
+        } else {
+            for acc in accounts {
+                let is_current = active_profile
+                    .map(|curr| curr.id == acc.id)
+                    .unwrap_or(false);
+                let label = format!("{} ({})", acc.username, account_source_label(acc.kind));
+                if ui
+                    .selectable_label(is_current, RichText::new(label).color(tokens.text))
+                    .clicked()
+                {
+                    action = Some(SidebarAction::SwitchAccount(acc.id.to_string()));
+                    ui.memory_mut(|mem| mem.close_popup());
                 }
             }
-            ui.separator();
-            if ui
-                .button(RichText::new("Управление аккаунтами").color(tokens.accent))
-                .clicked()
-            {
-                action = Some(SidebarAction::OpenAccountsTab);
-                ui.memory_mut(|mem| mem.close_popup());
-            }
-        },
-    );
+        }
+        ui.separator();
+        if ui
+            .button(RichText::new("Управление аккаунтами").color(tokens.accent))
+            .clicked()
+        {
+            action = Some(SidebarAction::OpenAccountsTab);
+            ui.memory_mut(|mem| mem.close_popup());
+        }
+    });
 
     action
 }
@@ -1080,6 +1102,9 @@ pub fn render_sidebar_with_state(
     // 1. Brand Header (56 px)
     render_header(ui, is_compact, tokens);
 
+    let active_indicator_slot = ui.painter().add(Shape::Noop);
+    let mut active_row_rect: Option<Rect> = None;
+
     // 2. Top groups: Библиотека & Активность
     for group in [NavGroup::Library, NavGroup::Activity] {
         ui.add_space(6.0);
@@ -1094,7 +1119,7 @@ pub fn render_sidebar_with_state(
             } else {
                 None
             };
-            if render_nav_row(
+            let (clicked, row_rect) = render_nav_row(
                 ui,
                 tab,
                 tab == active_tab,
@@ -1102,7 +1127,11 @@ pub fn render_sidebar_with_state(
                 badge,
                 lang_code,
                 tokens,
-            ) {
+            );
+            if tab == active_tab {
+                active_row_rect = Some(row_rect);
+            }
+            if clicked {
                 action = Some(SidebarAction::SelectTab(tab));
             }
         }
@@ -1127,7 +1156,7 @@ pub fn render_sidebar_with_state(
             ui.add_space(6.0);
 
             for &tab in NavGroup::System.tabs().iter().rev() {
-                if render_nav_row(
+                let (clicked, row_rect) = render_nav_row(
                     ui,
                     tab,
                     tab == active_tab,
@@ -1135,7 +1164,11 @@ pub fn render_sidebar_with_state(
                     None,
                     lang_code,
                     tokens,
-                ) {
+                );
+                if tab == active_tab {
+                    active_row_rect = Some(row_rect);
+                }
+                if clicked {
                     action = Some(SidebarAction::SelectTab(tab));
                 }
             }
@@ -1167,7 +1200,7 @@ pub fn render_sidebar_with_state(
                     ui.add_space(6.0);
                 }
                 for &tab in NavGroup::System.tabs() {
-                    if render_nav_row(
+                    let (clicked, row_rect) = render_nav_row(
                         ui,
                         tab,
                         tab == active_tab,
@@ -1175,7 +1208,11 @@ pub fn render_sidebar_with_state(
                         None,
                         lang_code,
                         tokens,
-                    ) {
+                    );
+                    if tab == active_tab {
+                        active_row_rect = Some(row_rect);
+                    }
+                    if clicked {
                         action = Some(SidebarAction::SelectTab(tab));
                     }
                 }
@@ -1193,6 +1230,45 @@ pub fn render_sidebar_with_state(
                     action = Some(card_action);
                 }
             });
+    }
+
+    if let Some(target_rect) = active_row_rect {
+        let anim_rect = crate::animation::animate_spring_rect(
+            ui.ctx(),
+            Id::new("mq_sidebar_active_rect"),
+            target_rect,
+            crate::animation::SpringConfig::rect(),
+        );
+        let cr =
+            style.control_corner_radius(anim_rect.height(), CornerRadius::same(NAV_ROW_RADIUS));
+        if style.refraction_border {
+            let mut shapes = Vec::new();
+            crate::theme_styles::collect_tinted_glass_pill_shapes(
+                ui.ctx(),
+                anim_rect,
+                cr,
+                &style,
+                tokens,
+                crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.28),
+                0.68,
+                &mut shapes,
+            );
+            if !shapes.is_empty() {
+                ui.painter().set(active_indicator_slot, Shape::Vec(shapes));
+            }
+        } else {
+            let bar_rect = Rect::from_min_max(
+                Pos2::new(anim_rect.left(), anim_rect.top() + 6.0),
+                Pos2::new(anim_rect.left() + 2.5, anim_rect.bottom() - 6.0),
+            );
+            ui.painter().set(
+                active_indicator_slot,
+                Shape::Vec(vec![
+                    Shape::rect_filled(anim_rect, cr, tokens.bg_surface),
+                    Shape::rect_filled(bar_rect, CornerRadius::same(1), tokens.accent),
+                ]),
+            );
+        }
     }
 
     action

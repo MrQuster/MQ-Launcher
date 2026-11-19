@@ -18,7 +18,7 @@ use crate::widgets::{
     version_badge, VectorIcon,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingsSection {
     Customization,
     Launch,
@@ -27,6 +27,20 @@ pub enum SettingsSection {
     Catalog,
     Updates,
     About,
+}
+
+impl SettingsSection {
+    const fn tab_index(self) -> i32 {
+        match self {
+            Self::Customization => 0,
+            Self::Launch => 1,
+            Self::Localization => 2,
+            Self::NetworkAndApi => 3,
+            Self::Catalog => 4,
+            Self::Updates => 5,
+            Self::About => 6,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -49,13 +63,17 @@ pub struct SettingsView {
 impl SettingsView {
     pub fn ui(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
+        let style = ThemeStyleParams::active(ui.ctx());
         let current_section = self
             .active_section
             .unwrap_or(SettingsSection::Customization);
         let lang = state.config.launcher_locale.clone();
 
+        let indicator_slot = ui.painter().add(egui::Shape::Noop);
+        let mut active_tab_rect: Option<egui::Rect> = None;
+
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(12.0, 6.0);
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
             ui.heading(
                 RichText::new(tr("tab_settings", &lang))
                     .color(tokens.text)
@@ -81,7 +99,58 @@ impl SettingsView {
             ];
             for (sec, title) in sub_tabs {
                 let is_sel = current_section == sec;
-                let resp = ui.selectable_label(is_sel, title);
+                let font_id = egui::FontId::proportional(13.0);
+                let text_w = ui
+                    .painter()
+                    .layout_no_wrap(title.to_owned(), font_id.clone(), tokens.text)
+                    .size()
+                    .x;
+                let (rect, resp) =
+                    ui.allocate_exact_size(Vec2::new(text_w + 20.0, 28.0), egui::Sense::click());
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let anim = crate::animation::animate_interaction(
+                    ui.ctx(),
+                    resp.id.with("settings_tab_anim"),
+                    resp.hovered(),
+                    resp.is_pointer_button_down_on(),
+                );
+                let active_t = crate::animation::animate_spring_bool(
+                    ui.ctx(),
+                    resp.id.with("settings_tab_sel"),
+                    is_sel,
+                    crate::animation::SpringConfig::snappy(),
+                );
+                let visual_rect = if is_sel {
+                    rect
+                } else {
+                    anim.transform_rect(rect)
+                };
+                if !is_sel && anim.hover_t > 0.02 {
+                    let tab_r = style
+                        .control_corner_radius(visual_rect.height(), crate::theme::RADIUS_BUTTON);
+                    ui.painter().rect_filled(
+                        visual_rect,
+                        tab_r,
+                        tokens.bg_surface_hover.gamma_multiply(0.50 * anim.hover_t),
+                    );
+                }
+                let fg = crate::theme_styles::lerp_rgba(
+                    tokens.text_muted,
+                    tokens.text,
+                    active_t.max(anim.hover_t),
+                );
+                ui.painter().text(
+                    visual_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    title,
+                    font_id,
+                    fg,
+                );
+                if is_sel {
+                    active_tab_rect = Some(rect);
+                }
                 register_widget(
                     ui,
                     &resp,
@@ -89,11 +158,7 @@ impl SettingsView {
                         .label(title)
                         .text(title)
                         .active(is_sel)
-                        .fg(if is_sel {
-                            tokens.text
-                        } else {
-                            tokens.text_muted
-                        })
+                        .fg(fg)
                         .bg(tokens.bg_app),
                 );
                 if resp.clicked() {
@@ -102,6 +167,45 @@ impl SettingsView {
             }
         });
 
+        if let Some(target_rect) = active_tab_rect {
+            let anim_rect = crate::animation::animate_spring_rect(
+                ui.ctx(),
+                egui::Id::new("mq_settings_tab_pill"),
+                target_rect,
+                crate::animation::SpringConfig::rect(),
+            );
+            let pill_r =
+                style.control_corner_radius(anim_rect.height(), crate::theme::RADIUS_BUTTON);
+            if style.refraction_border {
+                let mut shapes = Vec::new();
+                crate::theme_styles::collect_tinted_glass_pill_shapes(
+                    ui.ctx(),
+                    anim_rect,
+                    pill_r,
+                    &style,
+                    &tokens,
+                    crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.24),
+                    0.75,
+                    &mut shapes,
+                );
+                if !shapes.is_empty() {
+                    ui.painter().set(indicator_slot, egui::Shape::Vec(shapes));
+                }
+            } else {
+                let pill_fill = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.16);
+                ui.painter().set(
+                    indicator_slot,
+                    egui::Shape::Rect(egui::epaint::RectShape::new(
+                        anim_rect,
+                        pill_r,
+                        pill_fill,
+                        Stroke::new(1.0_f32, tokens.accent),
+                        StrokeKind::Inside,
+                    )),
+                );
+            }
+        }
+
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(8.0);
@@ -109,15 +213,28 @@ impl SettingsView {
         ScrollArea::vertical()
             .id_salt("settings_scroll_area")
             .show(ui, |ui| {
-                match current_section {
-                    SettingsSection::Customization => self.render_customization_studio(ui, state),
-                    SettingsSection::Launch => self.render_launch_settings(ui, state),
-                    SettingsSection::Localization => self.render_localization_settings(ui, state),
-                    SettingsSection::NetworkAndApi => self.render_network_api_settings(ui, state),
-                    SettingsSection::Catalog => self.render_catalog_settings(ui, state),
-                    SettingsSection::Updates => self.render_updates_settings(ui, state),
-                    SettingsSection::About => self.render_about_settings(ui, state),
-                }
+                crate::animation::render_tab_transition(
+                    ui,
+                    "mq_settings_sec_transition",
+                    current_section,
+                    current_section.tab_index(),
+                    true,
+                    |ui| match current_section {
+                        SettingsSection::Customization => {
+                            self.render_customization_studio(ui, state);
+                        }
+                        SettingsSection::Launch => self.render_launch_settings(ui, state),
+                        SettingsSection::Localization => {
+                            self.render_localization_settings(ui, state);
+                        }
+                        SettingsSection::NetworkAndApi => {
+                            self.render_network_api_settings(ui, state);
+                        }
+                        SettingsSection::Catalog => self.render_catalog_settings(ui, state),
+                        SettingsSection::Updates => self.render_updates_settings(ui, state),
+                        SettingsSection::About => self.render_about_settings(ui, state),
+                    },
+                );
 
                 ui.add_space(16.0);
                 ui.separator();
@@ -146,62 +263,82 @@ impl SettingsView {
         fn choice_chip(ui: &mut Ui, tokens: &Tokens, selected: bool, label: &str) -> bool {
             let style = ThemeStyleParams::active(ui.ctx());
             let chip_r = style.control_corner_radius(26.0, RADIUS_TAG);
-            let fill = if selected {
-                blend_color(
-                    tokens.bg_surface,
-                    tokens.accent,
-                    if tokens.is_light() { 0.16 } else { 0.22 },
-                )
-            } else {
-                tokens.bg_input
-            };
-            let stroke = if selected {
-                tokens.accent
-            } else {
-                tokens.border
-            };
-            let fg = if selected {
-                tokens.text
-            } else {
-                tokens.text_muted
-            };
+            let sel_fill = blend_color(
+                tokens.bg_surface,
+                tokens.accent,
+                if tokens.is_light() { 0.16 } else { 0.22 },
+            );
             let font_id = egui::FontId::proportional(12.5);
-            let galley = ui.painter().layout_no_wrap(label.to_owned(), font_id, fg);
-            let desired = Vec2::new(galley.size().x + 20.0, 26.0);
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(label.to_owned(), font_id.clone(), tokens.text)
+                .size()
+                .x;
+            let desired = Vec2::new(text_w + 20.0, 26.0);
             let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
+            let anim = crate::animation::animate_interaction(
+                ui.ctx(),
+                resp.id.with("choice_chip_anim"),
+                resp.hovered(),
+                resp.is_pointer_button_down_on(),
+            );
+            let sel_t = crate::animation::animate_spring_bool(
+                ui.ctx(),
+                resp.id.with("choice_chip_sel"),
+                selected,
+                crate::animation::SpringConfig::snappy(),
+            );
+            let visual_rect = anim.transform_rect(rect);
+            let fill = crate::theme_styles::lerp_rgba(tokens.bg_input, sel_fill, sel_t);
+            let stroke = crate::theme_styles::lerp_rgba(
+                tokens.border,
+                tokens.accent,
+                sel_t.max(anim.press_t * 0.5),
+            );
+            let fg = crate::theme_styles::lerp_rgba(
+                tokens.text_muted,
+                tokens.text,
+                sel_t.max(anim.hover_t),
+            );
             if ui.is_rect_visible(rect) {
                 let p = ui.painter();
+                let galley = p.layout_no_wrap(label.to_owned(), font_id, fg);
                 if style.refraction_border {
-                    if selected {
+                    if selected || sel_t > 0.35 {
                         crate::theme_styles::paint_tinted_glass_pill(
                             ui.ctx(),
                             p,
-                            rect,
+                            visual_rect,
                             chip_r,
                             &style,
                             tokens,
                             fill,
-                            0.85,
+                            (0.65 + 0.25 * anim.hover_t).min(1.0),
                         );
                     } else {
                         crate::theme_styles::paint_glass_surface_overlay(
                             ui.ctx(),
                             p,
-                            rect,
+                            visual_rect,
                             chip_r,
                             &style,
                             tokens,
-                            if resp.hovered() { 0.72 } else { 0.20 },
+                            0.20 + 0.52 * anim.hover_t,
                             true,
                         );
                     }
                 } else {
-                    p.rect_filled(rect, chip_r, fill);
+                    let hov_fill = crate::theme_styles::lerp_rgba(
+                        fill,
+                        tokens.bg_surface_hover,
+                        anim.hover_t * 0.5,
+                    );
+                    p.rect_filled(visual_rect, chip_r, hov_fill);
                     p.rect_stroke(
-                        rect,
+                        visual_rect,
                         chip_r,
                         Stroke::new(1.0_f32, stroke),
                         StrokeKind::Inside,
@@ -209,8 +346,8 @@ impl SettingsView {
                 }
                 p.galley(
                     Pos2::new(
-                        rect.center().x - galley.size().x * 0.5,
-                        rect.center().y - galley.size().y * 0.5,
+                        visual_rect.center().x - galley.size().x * 0.5,
+                        visual_rect.center().y - galley.size().y * 0.5,
                     ),
                     galley,
                     fg,
@@ -240,68 +377,88 @@ impl SettingsView {
             let chip_r = style.control_corner_radius(28.0, RADIUS_TAG);
             let swatch = rgb_to_c32(primary);
             let font_id = egui::FontId::proportional(12.5);
-            let fg = if selected {
-                tokens.text
-            } else {
-                tokens.text_muted
-            };
-            let galley = ui.painter().layout_no_wrap(name.to_owned(), font_id, fg);
-            let desired = Vec2::new(10.0 + 12.0 + 6.0 + galley.size().x + 10.0, 28.0);
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(name.to_owned(), font_id.clone(), tokens.text)
+                .size()
+                .x;
+            let desired = Vec2::new(10.0 + 12.0 + 6.0 + text_w + 10.0, 28.0);
             let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
+            let anim = crate::animation::animate_interaction(
+                ui.ctx(),
+                resp.id.with("swatch_chip_anim"),
+                resp.hovered(),
+                resp.is_pointer_button_down_on(),
+            );
+            let sel_t = crate::animation::animate_spring_bool(
+                ui.ctx(),
+                resp.id.with("swatch_chip_sel"),
+                selected,
+                crate::animation::SpringConfig::snappy(),
+            );
+            let visual_rect = anim.transform_rect(rect);
+            let fg = crate::theme_styles::lerp_rgba(
+                tokens.text_muted,
+                tokens.text,
+                sel_t.max(anim.hover_t),
+            );
             if ui.is_rect_visible(rect) {
                 let p = ui.painter();
-                let fill = if selected {
-                    blend_color(tokens.bg_surface, swatch, 0.18)
-                } else if resp.hovered() {
-                    tokens.bg_surface_hover
-                } else {
-                    tokens.bg_input
-                };
-                let stroke_col = if selected {
-                    swatch
-                } else if resp.hovered() {
-                    tokens.border_strong
-                } else {
-                    tokens.border
-                };
+                let galley = p.layout_no_wrap(name.to_owned(), font_id, fg);
+                let base_fill = crate::theme_styles::lerp_rgba(
+                    tokens.bg_input,
+                    tokens.bg_surface_hover,
+                    anim.hover_t,
+                );
+                let fill = crate::theme_styles::lerp_rgba(
+                    base_fill,
+                    blend_color(tokens.bg_surface, swatch, 0.18),
+                    sel_t,
+                );
+                let base_stroke = crate::theme_styles::lerp_rgba(
+                    tokens.border,
+                    tokens.border_strong,
+                    anim.hover_t,
+                );
+                let stroke_col = crate::theme_styles::lerp_rgba(base_stroke, swatch, sel_t);
                 if style.refraction_border {
-                    if selected {
+                    if selected || sel_t > 0.35 {
                         crate::theme_styles::paint_tinted_glass_pill(
                             ui.ctx(),
                             p,
-                            rect,
+                            visual_rect,
                             chip_r,
                             &style,
                             tokens,
                             fill,
-                            0.85,
+                            (0.65 + 0.25 * anim.hover_t).min(1.0),
                         );
                     } else {
                         crate::theme_styles::paint_glass_surface_overlay(
                             ui.ctx(),
                             p,
-                            rect,
+                            visual_rect,
                             chip_r,
                             &style,
                             tokens,
-                            if resp.hovered() { 0.72 } else { 0.20 },
+                            0.20 + 0.52 * anim.hover_t,
                             true,
                         );
                     }
                 } else {
-                    p.rect_filled(rect, chip_r, fill);
+                    p.rect_filled(visual_rect, chip_r, fill);
                     p.rect_stroke(
-                        rect,
+                        visual_rect,
                         chip_r,
-                        Stroke::new(if selected { 1.5_f32 } else { 1.0_f32 }, stroke_col),
+                        Stroke::new(1.0_f32 + 0.5 * sel_t, stroke_col),
                         StrokeKind::Inside,
                     );
                 }
                 let dot_rect = egui::Rect::from_center_size(
-                    Pos2::new(rect.left() + 14.0, rect.center().y),
+                    Pos2::new(visual_rect.left() + 14.0, visual_rect.center().y),
                     Vec2::splat(12.0),
                 );
                 let dot_r = if style.refraction_border {
@@ -313,7 +470,7 @@ impl SettingsView {
                 p.galley(
                     Pos2::new(
                         dot_rect.right() + 6.0,
-                        rect.center().y - galley.size().y * 0.5,
+                        visual_rect.center().y - galley.size().y * 0.5,
                     ),
                     galley,
                     fg,

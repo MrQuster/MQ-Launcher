@@ -19,8 +19,21 @@ pub fn toggle_switch(ui: &mut Ui, tokens: &Tokens, on: &mut bool) -> Response {
         response.mark_changed();
     }
 
-    let bg_color = if *on { tokens.accent } else { tokens.bg_input };
-    let border_color = if *on { tokens.accent } else { tokens.border };
+    let t = crate::animation::animate_spring_bool(
+        ui.ctx(),
+        response.id,
+        *on,
+        crate::animation::SpringConfig::snappy(),
+    );
+    let press_t = crate::animation::animate_spring_bool(
+        ui.ctx(),
+        response.id.with("toggle_press"),
+        response.is_pointer_button_down_on(),
+        crate::animation::SpringConfig::snappy().with_stiffness(560.0),
+    );
+
+    let bg_color = crate::theme::blend_color(tokens.bg_input, tokens.accent, t);
+    let border_color = crate::theme::blend_color(tokens.border, tokens.accent, t);
 
     let painter = ui.painter();
     painter.rect(
@@ -31,17 +44,14 @@ pub fn toggle_switch(ui: &mut Ui, tokens: &Tokens, on: &mut bool) -> Response {
         egui::StrokeKind::Inside,
     );
 
-    let circle_x = if *on {
-        track_rect.right() - 10.0
-    } else {
-        track_rect.left() + 10.0
-    };
-    let knob_color = if *on {
-        tokens.accent_text
-    } else {
-        tokens.text_muted
-    };
-    painter.circle_filled(egui::pos2(circle_x, track_rect.center().y), 7.0, knob_color);
+    let circle_x = egui::lerp((track_rect.left() + 10.0)..=(track_rect.right() - 10.0), t);
+    let knob_color = crate::theme_styles::lerp_rgba(tokens.text_muted, tokens.accent_text, t);
+    let knob_r = 7.0 * (1.0 - 0.12 * press_t);
+    painter.circle_filled(
+        egui::pos2(circle_x, track_rect.center().y),
+        knob_r,
+        knob_color,
+    );
 
     register_widget(
         ui,

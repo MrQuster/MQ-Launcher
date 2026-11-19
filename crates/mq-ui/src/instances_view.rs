@@ -186,7 +186,7 @@ impl LoaderFilter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstanceDetailTab {
     Console,
     Mods,
@@ -198,7 +198,22 @@ pub enum InstanceDetailTab {
     Settings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+impl InstanceDetailTab {
+    const fn order_index(self) -> i32 {
+        match self {
+            Self::Console => 0,
+            Self::Mods => 1,
+            Self::ResourcePacks => 2,
+            Self::ShaderPacks => 3,
+            Self::Worlds => 4,
+            Self::Servers => 5,
+            Self::Screenshots => 6,
+            Self::Settings => 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum InstanceViewMode {
     #[default]
     List,
@@ -223,7 +238,7 @@ pub enum ModStatusFilter {
 }
 
 /// Sub-mode inside an instance's content tabs (`Моды`, `Ресурспаки`, `Шейдеры`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum ContentSubMode {
     #[default]
     Installed,
@@ -434,59 +449,71 @@ impl InstancesView {
             }
         }
 
-        // Instance creation modal
-        if state.show_create_instance_dialog {
-            self.render_create_instance_modal(ui, state, &tokens);
-        }
+        // Instance creation modal (runs even during fade-out)
+        self.render_create_instance_modal(ui, state, &tokens);
 
         // Duplicate modal
-        if self.show_duplicate_dialog {
-            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.show_duplicate_dialog = false;
-            } else if let Some(selected_inst) = state.selected_instance().cloned() {
-                egui::Window::new("Дублирование инстанса")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ui.ctx(), |ui| {
-                        let modal_w = 340.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
-                        ui.set_width(modal_w);
-                        ui.label("Имя нового инстанса:");
-                        ui.text_edit_singleline(&mut self.duplicate_name);
-                        ui.add_space(10.0);
-                        ui.horizontal_wrapped(|ui| {
-                            if primary_emerald_button(ui, Some(VectorIcon::Check), "Дублировать")
-                                .clicked()
-                                && !self.duplicate_name.trim().is_empty()
+        if self.show_duplicate_dialog && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_duplicate_dialog = false;
+        }
+        let dup_payload = if self.show_duplicate_dialog {
+            state.selected_instance().cloned()
+        } else {
+            None
+        };
+        if let Some((selected_inst, dup_anim)) = crate::animation::animate_modal_cached(
+            ui.ctx(),
+            egui::Id::new("mq_duplicate_inst_modal"),
+            dup_payload,
+        ) {
+            let modal_win = egui::Window::new("Дублирование инстанса")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+            crate::animation::show_animated_modal_window(
+                ui.ctx(),
+                egui::Id::new("mq_duplicate_inst_modal_win"),
+                &dup_anim,
+                modal_win,
+                |ui| {
+                    let modal_w = 340.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
+                    ui.set_width(modal_w);
+                    ui.label("Имя нового инстанса:");
+                    ui.text_edit_singleline(&mut self.duplicate_name);
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if primary_emerald_button(ui, Some(VectorIcon::Check), "Дублировать")
+                            .clicked()
+                            && !self.duplicate_name.trim().is_empty()
+                        {
+                            match state
+                                .instance_mgr
+                                .clone_instance(&selected_inst.name, &self.duplicate_name)
                             {
-                                match state
-                                    .instance_mgr
-                                    .clone_instance(&selected_inst.name, &self.duplicate_name)
-                                {
-                                    Ok(cloned) => {
-                                        state.instances.push(cloned.clone());
-                                        state.selected_instance_id = Some(cloned.id);
-                                        state.status_message = Some((
-                                            format!(
-                                                "Инстанс успешно продублирован как '{}'",
-                                                self.duplicate_name
-                                            ),
-                                            false,
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        state.status_message =
-                                            Some((format!("Ошибка дублирования: {e}"), true));
-                                    }
+                                Ok(cloned) => {
+                                    state.instances.push(cloned.clone());
+                                    state.selected_instance_id = Some(cloned.id);
+                                    state.status_message = Some((
+                                        format!(
+                                            "Инстанс успешно продублирован как '{}'",
+                                            self.duplicate_name
+                                        ),
+                                        false,
+                                    ));
                                 }
-                                self.show_duplicate_dialog = false;
+                                Err(e) => {
+                                    state.status_message =
+                                        Some((format!("Ошибка дублирования: {e}"), true));
+                                }
                             }
-                            if secondary_glass_button(ui, None, "Отмена").clicked() {
-                                self.show_duplicate_dialog = false;
-                            }
-                        });
+                            self.show_duplicate_dialog = false;
+                        }
+                        if secondary_glass_button(ui, None, "Отмена").clicked() {
+                            self.show_duplicate_dialog = false;
+                        }
                     });
-            }
+                },
+            );
         }
 
         if let Some(picked) = state.picked_import_path.take() {
@@ -524,21 +551,34 @@ impl InstancesView {
             self.show_import_dialog = false;
             self.import_error = None;
         }
-        if self.show_import_dialog {
-            let hovered_file = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-            let dropped_file = ui.ctx().input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|f| f.path.clone())
-                    .next()
-            });
+        let import_anim = crate::animation::animate_modal_presence(
+            ui.ctx(),
+            egui::Id::new("mq_import_inst_modal"),
+            self.show_import_dialog,
+        );
+        if import_anim.should_render {
+            let hovered_file = if !import_anim.is_closing {
+                ui.ctx().input(|i| !i.raw.hovered_files.is_empty())
+            } else {
+                false
+            };
+            let dropped_file = if !import_anim.is_closing {
+                ui.ctx().input(|i| {
+                    i.raw
+                        .dropped_files
+                        .iter()
+                        .filter_map(|f| f.path.clone())
+                        .next()
+                })
+            } else {
+                None
+            };
             if let Some(p) = dropped_file {
                 self.import_file_path = p.display().to_string();
                 self.import_error = None;
             }
 
-            egui::Window::new("Импорт сборки (.mrpack или .zip)")
+            let import_win = egui::Window::new("Импорт сборки (.mrpack или .zip)")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -548,8 +588,14 @@ impl InstancesView {
                         .stroke(Stroke::new(1.2_f32, tokens.border_strong))
                         .corner_radius(RADIUS_CARD)
                         .inner_margin(egui::Margin::same(16)),
-                )
-                .show(ui.ctx(), |ui| {
+                );
+
+            crate::animation::show_animated_modal_window(
+                ui.ctx(),
+                egui::Id::new("mq_import_inst_modal_win"),
+                &import_anim,
+                import_win,
+                |ui| {
                     let modal_w = 460.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
                     ui.set_width(modal_w);
 
@@ -600,12 +646,8 @@ impl InstancesView {
                         {
                             self.import_error = None;
                         }
-                        if secondary_glass_button(
-                            ui,
-                            Some(VectorIcon::Folder),
-                            "Выбрать файл...",
-                        )
-                        .clicked()
+                        if secondary_glass_button(ui, Some(VectorIcon::Folder), "Выбрать файл...")
+                            .clicked()
                         {
                             let _ = state.cmd_sender.send(UiWorkerCommand::PickImportArchive);
                         }
@@ -643,10 +685,8 @@ impl InstancesView {
                                 self.import_error =
                                     Some("Укажите путь к файлу .mrpack или .zip.".to_string());
                             } else if !path.is_file() {
-                                self.import_error = Some(format!(
-                                    "Файл не найден: {}",
-                                    path.display()
-                                ));
+                                self.import_error =
+                                    Some(format!("Файл не найден: {}", path.display()));
                             } else {
                                 let opt_name = if self.import_name.trim().is_empty() {
                                     None
@@ -660,10 +700,7 @@ impl InstancesView {
                                 if is_mrpack {
                                     self.show_import_dialog = false;
                                     self.import_error = None;
-                                    state.import_local_pack_with_name(
-                                        path.to_path_buf(),
-                                        opt_name,
-                                    );
+                                    state.import_local_pack_with_name(path.to_path_buf(), opt_name);
                                 } else {
                                     match import_instance_from_zip(
                                         path,
@@ -694,112 +731,129 @@ impl InstancesView {
                             self.import_error = None;
                         }
                     });
-                });
+                },
+            );
         }
 
         // Delete confirmation modal
-        if self.show_delete_dialog {
-            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.show_delete_dialog = false;
-                self.instance_to_delete = None;
-            } else if let Some((target_id, target_name)) = self.instance_to_delete.clone() {
-                let is_running = state.running_instances.contains_key(&target_id);
-                let is_downloading = state.installing_instance.as_ref() == Some(&target_id);
+        if self.show_delete_dialog && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_delete_dialog = false;
+            self.instance_to_delete = None;
+        }
+        let del_payload = if self.show_delete_dialog {
+            self.instance_to_delete.clone()
+        } else {
+            None
+        };
+        if self.show_delete_dialog && del_payload.is_none() {
+            self.show_delete_dialog = false;
+        }
+        if let Some(((target_id, target_name), del_anim)) = crate::animation::animate_modal_cached(
+            ui.ctx(),
+            egui::Id::new("mq_delete_inst_modal"),
+            del_payload,
+        ) {
+            let is_running = state.running_instances.contains_key(&target_id);
+            let is_downloading = state.installing_instance.as_ref() == Some(&target_id);
 
-                egui::Window::new("Удаление инстанса")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ui.ctx(), |ui| {
-                        let screen_rect = ui.ctx().screen_rect();
-                        let modal_w = 420.0_f32.min(screen_rect.width() - 32.0);
-                        ui.set_width(modal_w);
+            let del_win = egui::Window::new("Удаление инстанса")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+            crate::animation::show_animated_modal_window(
+                ui.ctx(),
+                egui::Id::new("mq_delete_inst_modal_win"),
+                &del_anim,
+                del_win,
+                |ui| {
+                    let screen_rect = ui.ctx().screen_rect();
+                    let modal_w = 420.0_f32.min(screen_rect.width() - 32.0);
+                    ui.set_width(modal_w);
 
-                        let body_max_h = (screen_rect.height() - 110.0).max(60.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("delete_dialog_scroll")
-                            .max_height(body_max_h)
-                            .show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        Vec2::splat(22.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    paint_vector_icon(
-                                        ui.painter(),
-                                        rect,
-                                        VectorIcon::Warning,
-                                        STATUS_DANGER,
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(format!("Удалить «{}»?", target_name))
-                                            .color(TEXT_PRIMARY)
-                                            .strong()
-                                            .size(15.0),
-                                    );
-                                });
+                    let body_max_h = (screen_rect.height() - 110.0).max(60.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("delete_dialog_scroll")
+                        .max_height(body_max_h)
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
+                                paint_vector_icon(
+                                    ui.painter(),
+                                    rect,
+                                    VectorIcon::Warning,
+                                    STATUS_DANGER,
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(format!("Удалить «{}»?", target_name))
+                                        .color(TEXT_PRIMARY)
+                                        .strong()
+                                        .size(15.0),
+                                );
+                            });
 
-                                ui.add_space(8.0);
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(
+                                    "Вы уверены, что хотите удалить этот инстанс? Это действие безвозвратно удалит директорию инстанса, включая все установленные моды, миры, скриншоты и настройки.",
+                                )
+                                .color(TEXT_MUTED)
+                                .size(12.5),
+                            );
+
+                            if is_running {
+                                ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(
-                                        "Вы уверены, что хотите удалить этот инстанс? Это действие безвозвратно удалит директорию инстанса, включая все установленные моды, миры, скриншоты и настройки.",
+                                        "Инстанс сейчас запущен! Закройте игру перед удалением.",
                                     )
-                                    .color(TEXT_MUTED)
-                                    .size(12.5),
+                                    .color(STATUS_DANGER)
+                                    .strong(),
                                 );
+                            } else if is_downloading {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("Инстанс сейчас загружается/устанавливается. Дождитесь окончания или отмените загрузку.")
+                                        .color(STATUS_DANGER)
+                                        .strong(),
+                                );
+                            }
+                        });
 
-                                if is_running {
-                                    ui.add_space(6.0);
-                                    ui.label(
-                                        RichText::new("Инстанс сейчас запущен! Закройте игру перед удалением.")
-                                            .color(STATUS_DANGER)
-                                            .strong(),
-                                    );
-                                } else if is_downloading {
-                                    ui.add_space(6.0);
-                                    ui.label(
-                                        RichText::new("Инстанс сейчас загружается/устанавливается. Дождитесь окончания или отмените загрузку.")
-                                            .color(STATUS_DANGER)
-                                            .strong(),
-                                    );
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let can_delete = !is_running && !is_downloading;
+                        ui.add_enabled_ui(can_delete, |ui| {
+                            if danger_button(ui, Some(VectorIcon::Trash), "Удалить").clicked()
+                            {
+                                let inst_dir = state.paths.instance_dir(target_id.as_str());
+                                if inst_dir.exists() {
+                                    let _ = std::fs::remove_dir_all(&inst_dir);
                                 }
-                            });
-
-                        ui.add_space(10.0);
-                        ui.horizontal_wrapped(|ui| {
-                            let can_delete = !is_running && !is_downloading;
-                            ui.add_enabled_ui(can_delete, |ui| {
-                                if danger_button(ui, Some(VectorIcon::Trash), "Удалить").clicked() {
-                                    let inst_dir = state.paths.instance_dir(target_id.as_str());
-                                    if inst_dir.exists() {
-                                        let _ = std::fs::remove_dir_all(&inst_dir);
-                                    }
-                                    let _ = state.instance_mgr.delete_instance(target_id.as_str());
-                                    let id_to_remove = target_id.clone();
-                                    state.instances.retain(|i| i.id != id_to_remove);
-                                    state.favorite_instances.remove(target_id.as_str());
-                                    if state.selected_instance_id.as_ref() == Some(&id_to_remove) {
-                                        state.selected_instance_id =
-                                            state.instances.first().map(|i| i.id.clone());
-                                    }
-                                    state.status_message = Some((
-                                        format!("Инстанс «{}» успешно удален", target_name),
-                                        false,
-                                    ));
-                                    self.show_delete_dialog = false;
-                                    self.instance_to_delete = None;
+                                let _ = state.instance_mgr.delete_instance(target_id.as_str());
+                                let id_to_remove = target_id.clone();
+                                state.instances.retain(|i| i.id != id_to_remove);
+                                state.favorite_instances.remove(target_id.as_str());
+                                if state.selected_instance_id.as_ref() == Some(&id_to_remove) {
+                                    state.selected_instance_id =
+                                        state.instances.first().map(|i| i.id.clone());
                                 }
-                            });
-                            if secondary_glass_button(ui, None, "Отмена").clicked() {
+                                state.status_message = Some((
+                                    format!("Инстанс «{}» успешно удален", target_name),
+                                    false,
+                                ));
                                 self.show_delete_dialog = false;
                                 self.instance_to_delete = None;
                             }
                         });
+                        if secondary_glass_button(ui, None, "Отмена").clicked() {
+                            self.show_delete_dialog = false;
+                            self.instance_to_delete = None;
+                        }
                     });
-            } else {
-                self.show_delete_dialog = false;
-            }
+                },
+            );
         }
 
         crate::catalog_dialogs::show_overlays(ui.ctx(), state);
@@ -858,15 +912,27 @@ impl InstancesView {
             return;
         }
 
-        if self.view_mode == InstanceViewMode::Grid {
-            self.render_grid_view(ui, state, &tokens);
-            return;
-        }
+        let view_order = if self.view_mode == InstanceViewMode::Grid {
+            0
+        } else {
+            1
+        };
+        crate::animation::render_tab_transition(
+            ui,
+            "mq_inst_view_mode_trans",
+            self.view_mode,
+            view_order,
+            true,
+            |ui| {
+                if self.view_mode == InstanceViewMode::Grid {
+                    self.render_grid_view(ui, state, &tokens);
+                    return;
+                }
 
-        let avail_h = ui.available_height();
+                let avail_h = ui.available_height();
 
-        // Layout: Left column (instances list) + Right column (selected instance details)
-        ui.horizontal(|ui| {
+                // Layout: Left column (instances list) + Right column (selected instance details)
+                ui.horizontal(|ui| {
             ui.set_min_height(avail_h);
 
             // Left list of instances
@@ -1563,11 +1629,13 @@ impl InstancesView {
                                     ui.memory_mut(|mem| mem.toggle_popup(menu_id));
                                 }
 
-                                egui::popup_below_widget(
+                                crate::animation::show_animated_dropdown_popup(
                                     ui,
                                     menu_id,
                                     &more_btn,
-                                    egui::PopupCloseBehavior::CloseOnClick,
+                                    170.0,
+                                    false,
+                                    true,
                                     |ui| {
                                         ui.set_min_width(160.0);
                                         if ui.button("Папка модов").clicked() {
@@ -1664,32 +1732,39 @@ impl InstancesView {
                     ui.separator();
 
                     // Tab contents
-                    match self.current_tab {
-                        InstanceDetailTab::Console => {
-                            self.render_console_tab(ui, state, &inst_id);
-                        }
-                        InstanceDetailTab::Mods => {
-                            self.render_mods_tab(ui, state, &inst_id);
-                        }
-                        InstanceDetailTab::ResourcePacks => {
-                            self.render_resourcepacks_tab(ui, state, &inst_id);
-                        }
-                        InstanceDetailTab::ShaderPacks => {
-                            self.render_shaderpacks_tab(ui, state, &inst_id);
-                        }
-                        InstanceDetailTab::Worlds => {
-                            self.render_worlds_tab(ui, state, &inst_id);
-                        }
-                        InstanceDetailTab::Servers => {
-                            self.render_servers_tab(ui, state, &inst_id);
-                        }
-                        InstanceDetailTab::Screenshots => {
-                            self.render_screenshots_tab(ui, state, &inst_id);
-                        }
-                        InstanceDetailTab::Settings => {
-                            self.render_settings_tab(ui, state, &inst_id);
-                        }
-                    }
+                    crate::animation::render_tab_transition(
+                        ui,
+                        ("mq_inst_detail_tab_trans", inst_id.as_str()),
+                        self.current_tab,
+                        self.current_tab.order_index(),
+                        true,
+                        |ui| match self.current_tab {
+                            InstanceDetailTab::Console => {
+                                self.render_console_tab(ui, state, &inst_id);
+                            }
+                            InstanceDetailTab::Mods => {
+                                self.render_mods_tab(ui, state, &inst_id);
+                            }
+                            InstanceDetailTab::ResourcePacks => {
+                                self.render_resourcepacks_tab(ui, state, &inst_id);
+                            }
+                            InstanceDetailTab::ShaderPacks => {
+                                self.render_shaderpacks_tab(ui, state, &inst_id);
+                            }
+                            InstanceDetailTab::Worlds => {
+                                self.render_worlds_tab(ui, state, &inst_id);
+                            }
+                            InstanceDetailTab::Servers => {
+                                self.render_servers_tab(ui, state, &inst_id);
+                            }
+                            InstanceDetailTab::Screenshots => {
+                                self.render_screenshots_tab(ui, state, &inst_id);
+                            }
+                            InstanceDetailTab::Settings => {
+                                self.render_settings_tab(ui, state, &inst_id);
+                            }
+                        },
+                    );
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label(
@@ -1699,6 +1774,8 @@ impl InstancesView {
                 }
             });
         });
+            },
+        );
     }
 
     fn filtered_instances(&self, state: &UiState) -> Vec<InstanceManifest> {
@@ -2024,7 +2101,27 @@ impl InstancesView {
     }
 
     fn render_create_instance_modal(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
-        if state.remote_versions.is_empty() && !state.is_fetching_manifest {
+        let modal_id = egui::Id::new("mq_create_instance_modal");
+        if state.show_create_instance_dialog
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            state.show_create_instance_dialog = false;
+        }
+        let anim = crate::animation::animate_modal_presence(
+            ui.ctx(),
+            modal_id,
+            state.show_create_instance_dialog,
+        );
+        if !anim.should_render {
+            return;
+        }
+
+        if state.show_create_instance_dialog
+            && state.remote_versions.is_empty()
+            && !state.is_fetching_manifest
+        {
             state.is_fetching_manifest = true;
             let _ = state.cmd_sender.send(UiWorkerCommand::FetchVersionManifest);
         }
@@ -2046,15 +2143,6 @@ impl InstancesView {
         let auto_name = format!("{} {}", state.create_inst_loader.as_str(), effective_ver);
 
         let screen = ui.ctx().screen_rect();
-        egui::Area::new(egui::Id::new("create_instance_backdrop"))
-            .fixed_pos(screen.min)
-            .order(egui::Order::Middle)
-            .show(ui.ctx(), |ui| {
-                let (rect, _) = ui.allocate_exact_size(screen.size(), Sense::click());
-                ui.painter()
-                    .rect_filled(rect, 0.0, Color32::from_black_alpha(150));
-            });
-
         let modal_frame = egui::Frame::window(ui.style())
             .fill(tokens.bg_surface)
             .stroke(Stroke::new(1.0_f32, tokens.border_strong))
@@ -2103,21 +2191,17 @@ impl InstancesView {
             resp.clicked()
         }
 
-        if ui
-            .ctx()
-            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        {
-            state.show_create_instance_dialog = false;
-            return;
-        }
-
-        egui::Window::new("Создать инстанс")
-            .order(egui::Order::Foreground)
+        let window = egui::Window::new("Создать инстанс")
             .frame(modal_frame)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ui.ctx(), |ui| {
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+        crate::animation::show_animated_modal_window(
+            ui.ctx(),
+            modal_id.with("win"),
+            &anim,
+            window,
+            |ui| {
                 let modal_w = 480.0_f32.min(screen.width() - 32.0);
                 ui.set_width(modal_w);
 
@@ -2665,7 +2749,8 @@ impl InstancesView {
                         state.show_create_instance_dialog = false;
                     }
                 });
-            });
+            },
+        );
     }
 
     fn render_empty_onboarding_hub(&mut self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
@@ -2821,8 +2906,12 @@ impl InstancesView {
         folder_path: &std::path::Path,
         tokens: &Tokens,
     ) {
+        let style = ThemeStyleParams::active(ui.ctx());
+        let indicator_slot = ui.painter().add(egui::Shape::Noop);
+        let mut active_pill_rect: Option<Rect> = None;
+
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
             for (mode, label) in [
                 (
                     ContentSubMode::Installed,
@@ -2831,27 +2920,70 @@ impl InstancesView {
                 (ContentSubMode::Catalog, "Каталог".to_string()),
             ] {
                 let selected = self.content_sub_mode == mode;
-                let text = RichText::new(label).color(if selected {
-                    tokens.text
+                let font_id = egui::FontId::proportional(13.0);
+                let text_w = ui
+                    .painter()
+                    .layout_no_wrap(label.clone(), font_id.clone(), tokens.text)
+                    .size()
+                    .x;
+                let width = (text_w + 16.0).max(68.0);
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+                let anim = crate::animation::animate_interaction(
+                    ui.ctx(),
+                    resp.id.with("submode_anim"),
+                    resp.hovered(),
+                    resp.is_pointer_button_down_on(),
+                );
+                let active_t = crate::animation::animate_spring_bool(
+                    ui.ctx(),
+                    resp.id.with("submode_sel"),
+                    selected,
+                    crate::animation::SpringConfig::snappy(),
+                );
+                let visual_rect = if selected {
+                    rect
                 } else {
-                    tokens.text_muted
-                });
-                let fill = if selected {
-                    blend_color(tokens.bg_surface, tokens.accent, 0.18)
-                } else {
-                    tokens.bg_surface
+                    anim.transform_rect(rect)
                 };
-                let stroke_col = if selected {
-                    tokens.accent
-                } else {
-                    tokens.border
-                };
-                let btn = egui::Button::new(if selected { text.strong() } else { text })
-                    .fill(fill)
-                    .stroke(Stroke::new(1.0_f32, stroke_col))
-                    .corner_radius(RADIUS_TAG)
-                    .min_size(Vec2::new(96.0, 30.0));
-                if ui.add(btn).clicked() && self.content_sub_mode != mode {
+                if !selected {
+                    let idle_fill = tokens.bg_surface;
+                    let fill = crate::theme_styles::lerp_rgba(
+                        idle_fill,
+                        tokens.bg_surface_hover,
+                        anim.hover_t,
+                    );
+                    let stroke_col = crate::theme_styles::lerp_rgba(
+                        tokens.border,
+                        tokens.border_strong,
+                        anim.hover_t,
+                    );
+                    ui.painter().rect(
+                        visual_rect,
+                        RADIUS_TAG,
+                        fill,
+                        Stroke::new(1.0_f32, stroke_col),
+                        StrokeKind::Inside,
+                    );
+                }
+                let fg = crate::theme_styles::lerp_rgba(
+                    tokens.text_muted,
+                    tokens.text,
+                    active_t.max(anim.hover_t),
+                );
+                ui.painter().text(
+                    visual_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    font_id,
+                    fg,
+                );
+                if selected {
+                    active_pill_rect = Some(rect);
+                }
+                if resp.clicked() && self.content_sub_mode != mode {
                     self.content_sub_mode = mode;
                     if mode == ContentSubMode::Catalog {
                         self.synced_catalog_context = None;
@@ -2893,6 +3025,42 @@ impl InstancesView {
                 let _ = crate::opener::open_that(folder_path);
             }
         });
+        if let Some(target_rect) = active_pill_rect {
+            let anim_rect = crate::animation::animate_spring_rect(
+                ui.ctx(),
+                ui.make_persistent_id(("mq_content_submode_pill", inst_id.as_str(), catalog_tab)),
+                target_rect,
+                crate::animation::SpringConfig::rect(),
+            );
+            if style.refraction_border {
+                let mut shapes = Vec::new();
+                crate::theme_styles::collect_tinted_glass_pill_shapes(
+                    ui.ctx(),
+                    anim_rect,
+                    RADIUS_TAG,
+                    &style,
+                    tokens,
+                    blend_color(tokens.bg_surface, tokens.accent, 0.24),
+                    0.75,
+                    &mut shapes,
+                );
+                if !shapes.is_empty() {
+                    ui.painter().set(indicator_slot, egui::Shape::Vec(shapes));
+                }
+            } else {
+                let fill = blend_color(tokens.bg_surface, tokens.accent, 0.18);
+                ui.painter().set(
+                    indicator_slot,
+                    egui::Shape::Rect(egui::epaint::RectShape::new(
+                        anim_rect,
+                        RADIUS_TAG,
+                        fill,
+                        Stroke::new(1.0_f32, tokens.accent),
+                        StrokeKind::Inside,
+                    )),
+                );
+            }
+        }
         ui.add_space(if self.content_sub_mode == ContentSubMode::Catalog {
             2.0
         } else {
@@ -3022,52 +3190,67 @@ impl InstancesView {
             &tokens,
         );
 
-        if self.content_sub_mode == ContentSubMode::Catalog {
-            self.sync_and_render_instance_catalog(
-                ui,
-                state,
-                inst_id,
-                crate::catalog_state::CatalogTab::Mods,
-            );
-            return;
-        }
+        let sub_order = if self.content_sub_mode == ContentSubMode::Installed {
+            0
+        } else {
+            1
+        };
+        crate::animation::render_tab_transition(
+            ui,
+            ("mq_mods_submode_trans", inst_id.as_str()),
+            self.content_sub_mode,
+            sub_order,
+            true,
+            |ui| {
+                if self.content_sub_mode == ContentSubMode::Catalog {
+                    self.sync_and_render_instance_catalog(
+                        ui,
+                        state,
+                        inst_id,
+                        crate::catalog_state::CatalogTab::Mods,
+                    );
+                    return;
+                }
 
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-            ui.label(
-                RichText::new(format!("Модов: {total_count} (вкл. {enabled_count})"))
-                    .color(tokens.text)
-                    .strong(),
-            );
-            if secondary_glass_button(ui, Some(VectorIcon::Refresh), "Пересканировать").clicked()
-            {
-                let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
-                    instance_id: inst_id.clone(),
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                    ui.label(
+                        RichText::new(format!("Модов: {total_count} (вкл. {enabled_count})"))
+                            .color(tokens.text)
+                            .strong(),
+                    );
+                    if secondary_glass_button(ui, Some(VectorIcon::Refresh), "Пересканировать")
+                        .clicked()
+                    {
+                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                            instance_id: inst_id.clone(),
+                        });
+                    }
+                    if secondary_glass_button(ui, Some(VectorIcon::Check), "Проверить зависимости")
+                        .clicked()
+                    {
+                        let _ = state.cmd_sender.send(UiWorkerCommand::RunPreflight {
+                            instance_id: inst_id.clone(),
+                        });
+                    }
+                    if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить неиспользуемые")
+                        .clicked()
+                    {
+                        let _ = state.cmd_sender.send(UiWorkerCommand::CleanupUnusedDeps {
+                            instance_id: inst_id.clone(),
+                        });
+                    }
                 });
-            }
-            if secondary_glass_button(ui, Some(VectorIcon::Check), "Проверить зависимости")
-                .clicked()
-            {
-                let _ = state.cmd_sender.send(UiWorkerCommand::RunPreflight {
-                    instance_id: inst_id.clone(),
-                });
-            }
-            if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить неиспользуемые")
-                .clicked()
-            {
-                let _ = state.cmd_sender.send(UiWorkerCommand::CleanupUnusedDeps {
-                    instance_id: inst_id.clone(),
-                });
-            }
-        });
 
-        if let Some((ref prompt_inst, ref deleted_file, ref orphans)) = state.orphaned_deps_prompt {
-            if prompt_inst == inst_id && !orphans.is_empty() {
-                ui.add_space(6.0);
-                let deleted_file = deleted_file.clone();
-                let orphans_clone = orphans.clone();
-                let mut clear_prompt = false;
-                egui::Frame::new()
+                if let Some((ref prompt_inst, ref deleted_file, ref orphans)) =
+                    state.orphaned_deps_prompt
+                {
+                    if prompt_inst == inst_id && !orphans.is_empty() {
+                        ui.add_space(6.0);
+                        let deleted_file = deleted_file.clone();
+                        let orphans_clone = orphans.clone();
+                        let mut clear_prompt = false;
+                        egui::Frame::new()
                     .fill(tokens.bg_surface)
                     .stroke(Stroke::new(1.0_f32, tokens.warning))
                     .corner_radius(RADIUS_CARD)
@@ -3104,18 +3287,18 @@ impl InstancesView {
                             }
                         });
                     });
-                if clear_prompt {
-                    state.orphaned_deps_prompt = None;
+                        if clear_prompt {
+                            state.orphaned_deps_prompt = None;
+                        }
+                    }
                 }
-            }
-        }
 
-        if let Some((ref report_inst, ref report)) = state.preflight_report {
-            if report_inst == inst_id && !report.issues.is_empty() {
-                ui.add_space(6.0);
-                let report_clone = report.clone();
-                let mut clear_report = false;
-                egui::Frame::new()
+                if let Some((ref report_inst, ref report)) = state.preflight_report {
+                    if report_inst == inst_id && !report.issues.is_empty() {
+                        ui.add_space(6.0);
+                        let report_clone = report.clone();
+                        let mut clear_report = false;
+                        egui::Frame::new()
                     .fill(tokens.bg_surface)
                     .stroke(Stroke::new(1.0_f32, tokens.danger))
                     .corner_radius(RADIUS_CARD)
@@ -3177,88 +3360,88 @@ impl InstancesView {
                             }
                         });
                     });
-                if clear_report {
-                    state.preflight_report = None;
+                        if clear_report {
+                            state.preflight_report = None;
+                        }
+                    }
                 }
-            }
-        }
 
-        ui.add_space(6.0);
-        self.render_local_file_import_bar(
-            ui,
-            state,
-            inst_id,
-            &mods_dir,
-            &[".jar"],
-            "Путь к .jar файлу мода или перетащите .jar в окно...",
-            true,
-            &tokens,
-        );
+                ui.add_space(6.0);
+                self.render_local_file_import_bar(
+                    ui,
+                    state,
+                    inst_id,
+                    &mods_dir,
+                    &[".jar"],
+                    "Путь к .jar файлу мода или перетащите .jar в окно...",
+                    true,
+                    &tokens,
+                );
 
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-            let search_w = (ui.available_width() - 340.0).clamp(150.0, 300.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut self.mod_search_query)
-                    .hint_text("Поиск модов по названию, ID или файлу...")
-                    .desired_width(search_w),
-            );
-            if !self.mod_search_query.is_empty()
-                && secondary_glass_button(ui, None, "Сброс").clicked()
-            {
-                self.mod_search_query.clear();
-            }
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                    let search_w = (ui.available_width() - 340.0).clamp(150.0, 300.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.mod_search_query)
+                            .hint_text("Поиск модов по названию, ID или файлу...")
+                            .desired_width(search_w),
+                    );
+                    if !self.mod_search_query.is_empty()
+                        && secondary_glass_button(ui, None, "Сброс").clicked()
+                    {
+                        self.mod_search_query.clear();
+                    }
 
-            for (filter, lbl) in [
-                (ModStatusFilter::All, format!("Все ({total_count})")),
-                (
-                    ModStatusFilter::Enabled,
-                    format!("Включены ({enabled_count})"),
-                ),
-                (
-                    ModStatusFilter::Disabled,
-                    format!("Отключены ({disabled_count})"),
-                ),
-            ] {
-                let is_sel = self.mod_status_filter == filter;
-                let fill = if is_sel {
-                    blend_color(tokens.bg_surface, tokens.accent, 0.18)
-                } else {
-                    tokens.bg_input
-                };
-                let stroke_col = if is_sel { tokens.accent } else { tokens.border };
-                let fg = if is_sel {
-                    tokens.text
-                } else {
-                    tokens.text_muted
-                };
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(lbl).color(fg).size(12.0))
-                            .fill(fill)
-                            .stroke(Stroke::new(1.0_f32, stroke_col))
-                            .corner_radius(RADIUS_TAG),
-                    )
-                    .clicked()
-                {
-                    self.mod_status_filter = filter;
-                }
-            }
-        });
+                    for (filter, lbl) in [
+                        (ModStatusFilter::All, format!("Все ({total_count})")),
+                        (
+                            ModStatusFilter::Enabled,
+                            format!("Включены ({enabled_count})"),
+                        ),
+                        (
+                            ModStatusFilter::Disabled,
+                            format!("Отключены ({disabled_count})"),
+                        ),
+                    ] {
+                        let is_sel = self.mod_status_filter == filter;
+                        let fill = if is_sel {
+                            blend_color(tokens.bg_surface, tokens.accent, 0.18)
+                        } else {
+                            tokens.bg_input
+                        };
+                        let stroke_col = if is_sel { tokens.accent } else { tokens.border };
+                        let fg = if is_sel {
+                            tokens.text
+                        } else {
+                            tokens.text_muted
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new(lbl).color(fg).size(12.0))
+                                    .fill(fill)
+                                    .stroke(Stroke::new(1.0_f32, stroke_col))
+                                    .corner_radius(RADIUS_TAG),
+                            )
+                            .clicked()
+                        {
+                            self.mod_status_filter = filter;
+                        }
+                    }
+                });
 
-        ui.add_space(4.0);
-        crate::catalog_dialogs::jobs_panel(ui, state);
-        Self::updates_panel(ui, state, inst_id);
+                ui.add_space(4.0);
+                crate::catalog_dialogs::jobs_panel(ui, state);
+                Self::updates_panel(ui, state, inst_id);
 
-        if !state.mod_conflicts.is_empty() {
-            let warn_frame = egui::Frame::new()
-                .fill(tokens.bg_surface)
-                .stroke(Stroke::new(1.0_f32, tokens.warning))
-                .corner_radius(RADIUS_CARD)
-                .inner_margin(egui::Margin::same(8));
+                if !state.mod_conflicts.is_empty() {
+                    let warn_frame = egui::Frame::new()
+                        .fill(tokens.bg_surface)
+                        .stroke(Stroke::new(1.0_f32, tokens.warning))
+                        .corner_radius(RADIUS_CARD)
+                        .inner_margin(egui::Margin::same(8));
 
-            warn_frame.show(ui, |ui| {
+                    warn_frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                     paint_vector_icon(ui.painter(), rect, VectorIcon::Warning, tokens.warning);
@@ -3297,29 +3480,29 @@ impl InstancesView {
                     }
                 }
             });
-            ui.add_space(6.0);
-        }
+                    ui.add_space(6.0);
+                }
 
-        let lock = Self::cached_lock(ui.ctx(), &state.paths.instance_dir(inst_id.as_str()));
-        let q = self.mod_search_query.trim().to_lowercase();
-        let filtered_mods: Vec<_> = state
-            .installed_mods
-            .iter()
-            .filter(|m| match self.mod_status_filter {
-                ModStatusFilter::All => true,
-                ModStatusFilter::Enabled => m.enabled,
-                ModStatusFilter::Disabled => !m.enabled,
-            })
-            .filter(|m| {
-                q.is_empty()
-                    || m.name.to_lowercase().contains(&q)
-                    || m.file_name.to_lowercase().contains(&q)
-                    || m.mod_id.to_lowercase().contains(&q)
-            })
-            .collect();
+                let lock = Self::cached_lock(ui.ctx(), &state.paths.instance_dir(inst_id.as_str()));
+                let q = self.mod_search_query.trim().to_lowercase();
+                let filtered_mods: Vec<_> = state
+                    .installed_mods
+                    .iter()
+                    .filter(|m| match self.mod_status_filter {
+                        ModStatusFilter::All => true,
+                        ModStatusFilter::Enabled => m.enabled,
+                        ModStatusFilter::Disabled => !m.enabled,
+                    })
+                    .filter(|m| {
+                        q.is_empty()
+                            || m.name.to_lowercase().contains(&q)
+                            || m.file_name.to_lowercase().contains(&q)
+                            || m.mod_id.to_lowercase().contains(&q)
+                    })
+                    .collect();
 
-        let mut open_catalog = false;
-        ScrollArea::vertical()
+                let mut open_catalog = false;
+                ScrollArea::vertical()
             .id_salt("mods_table_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -3450,10 +3633,12 @@ impl InstancesView {
                     }
                 }
             });
-        if open_catalog {
-            self.content_sub_mode = ContentSubMode::Catalog;
-            self.synced_catalog_context = None;
-        }
+                if open_catalog {
+                    self.content_sub_mode = ContentSubMode::Catalog;
+                    self.synced_catalog_context = None;
+                }
+            },
+        );
     }
 
     fn render_console_tab(
@@ -3823,43 +4008,57 @@ impl InstancesView {
             &tokens,
         );
 
-        if self.content_sub_mode == ContentSubMode::Catalog {
-            self.sync_and_render_instance_catalog(ui, state, inst_id, catalog_tab);
-            return;
-        }
-
-        self.render_local_file_import_bar(
-            ui,
-            state,
-            inst_id,
-            &dir,
-            &[".zip"],
-            import_hint,
-            false,
-            &tokens,
-        );
-        ui.add_space(6.0);
-        crate::catalog_dialogs::jobs_panel(ui, state);
-
-        let search_query = if is_shader_tab {
-            &mut self.shader_search_query
+        let sub_order = if self.content_sub_mode == ContentSubMode::Installed {
+            0
         } else {
-            &mut self.pack_search_query
+            1
         };
-        let open_catalog = Self::render_pack_directory_tab(
+        crate::animation::render_tab_transition(
             ui,
-            &tokens,
-            &dir,
-            packs,
-            title,
-            empty_hint,
-            catalog_btn_label,
-            search_query,
+            ("mq_pack_submode_trans", inst_id.as_str(), catalog_tab),
+            self.content_sub_mode,
+            sub_order,
+            true,
+            |ui| {
+                if self.content_sub_mode == ContentSubMode::Catalog {
+                    self.sync_and_render_instance_catalog(ui, state, inst_id, catalog_tab);
+                    return;
+                }
+
+                self.render_local_file_import_bar(
+                    ui,
+                    state,
+                    inst_id,
+                    &dir,
+                    &[".zip"],
+                    import_hint,
+                    false,
+                    &tokens,
+                );
+                ui.add_space(6.0);
+                crate::catalog_dialogs::jobs_panel(ui, state);
+
+                let search_query = if is_shader_tab {
+                    &mut self.shader_search_query
+                } else {
+                    &mut self.pack_search_query
+                };
+                let open_catalog = Self::render_pack_directory_tab(
+                    ui,
+                    &tokens,
+                    &dir,
+                    packs,
+                    title,
+                    empty_hint,
+                    catalog_btn_label,
+                    search_query,
+                );
+                if open_catalog {
+                    self.content_sub_mode = ContentSubMode::Catalog;
+                    self.synced_catalog_context = None;
+                }
+            },
         );
-        if open_catalog {
-            self.content_sub_mode = ContentSubMode::Catalog;
-            self.synced_catalog_context = None;
-        }
     }
 
     fn render_resourcepacks_tab(
@@ -4287,12 +4486,22 @@ impl InstancesView {
             }
         }
 
-        if self.show_add_server_dialog {
-            egui::Window::new("Добавление сервера")
+        let srv_modal_anim = crate::animation::animate_modal_presence(
+            ui.ctx(),
+            egui::Id::new("mq_add_server_modal"),
+            self.show_add_server_dialog,
+        );
+        if srv_modal_anim.should_render {
+            let srv_win = egui::Window::new("Добавление сервера")
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ui.ctx(), |ui| {
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+            crate::animation::show_animated_modal_window(
+                ui.ctx(),
+                egui::Id::new("mq_add_server_modal_win"),
+                &srv_modal_anim,
+                srv_win,
+                |ui| {
                     let modal_w = 320.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
                     ui.set_width(modal_w);
                     ui.label("Название сервера:");
@@ -4325,7 +4534,8 @@ impl InstancesView {
                             self.show_add_server_dialog = false;
                         }
                     });
-                });
+                },
+            );
         }
     }
 
@@ -4508,12 +4718,22 @@ impl InstancesView {
                 }
             });
 
-            if self.show_locale_dialog {
-                egui::Window::new("Выбор языка Minecraft")
+            let loc_modal_anim = crate::animation::animate_modal_presence(
+                ui.ctx(),
+                egui::Id::new("mq_inst_locale_modal"),
+                self.show_locale_dialog,
+            );
+            if loc_modal_anim.should_render {
+                let loc_win = egui::Window::new("Выбор языка Minecraft")
                     .collapsible(false)
                     .resizable(true)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ui.ctx(), |ui| {
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+                crate::animation::show_animated_modal_window(
+                    ui.ctx(),
+                    egui::Id::new("mq_inst_locale_modal_win"),
+                    &loc_modal_anim,
+                    loc_win,
+                    |ui| {
                         let modal_w = 380.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
                         ui.set_width(modal_w);
                         ui.horizontal(|ui| {
@@ -4548,7 +4768,8 @@ impl InstancesView {
                         if secondary_glass_button(ui, None, "Закрыть").clicked() {
                             self.show_locale_dialog = false;
                         }
-                    });
+                    },
+                );
             }
 
             ui.add_space(14.0);

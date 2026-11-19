@@ -22,11 +22,21 @@ use crate::widgets::{
     VectorIcon,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccountTab {
     Offline,
     ElyBy,
     Microsoft,
+}
+
+impl AccountTab {
+    const fn order_index(self) -> i32 {
+        match self {
+            Self::Offline => 0,
+            Self::ElyBy => 1,
+            Self::Microsoft => 2,
+        }
+    }
 }
 
 pub struct AccountsView {
@@ -74,11 +84,17 @@ impl AccountsView {
         );
         ui.add_space(8.0);
 
+        let tokens = crate::theme::Tokens::from_config(&state.config.theme);
+        let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+        let indicator_slot = ui.painter().add(egui::Shape::Noop);
+        let mut active_tab_rect: Option<egui::Rect> = None;
+
         // Tab buttons conforming to specification:
         // 1. Офлайн (только ник)
         // 2. Ely.by (через браузер)
         // 3. Microsoft (через браузер)
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
             let tabs = [
                 (
                     AccountTab::Offline,
@@ -95,7 +111,58 @@ impl AccountsView {
             ];
             for (tab, label) in tabs {
                 let is_sel = self.current_tab == tab;
-                let resp = ui.selectable_label(is_sel, label);
+                let font_id = egui::FontId::proportional(13.0);
+                let text_w = ui
+                    .painter()
+                    .layout_no_wrap(label.to_owned(), font_id.clone(), tokens.text)
+                    .size()
+                    .x;
+                let (rect, resp) =
+                    ui.allocate_exact_size(Vec2::new(text_w + 22.0, 30.0), egui::Sense::click());
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let anim = crate::animation::animate_interaction(
+                    ui.ctx(),
+                    resp.id.with("acc_tab_anim"),
+                    resp.hovered(),
+                    resp.is_pointer_button_down_on(),
+                );
+                let active_t = crate::animation::animate_spring_bool(
+                    ui.ctx(),
+                    resp.id.with("acc_tab_sel"),
+                    is_sel,
+                    crate::animation::SpringConfig::snappy(),
+                );
+                let visual_rect = if is_sel {
+                    rect
+                } else {
+                    anim.transform_rect(rect)
+                };
+                if !is_sel && anim.hover_t > 0.02 {
+                    let tab_r = style
+                        .control_corner_radius(visual_rect.height(), crate::theme::RADIUS_BUTTON);
+                    ui.painter().rect_filled(
+                        visual_rect,
+                        tab_r,
+                        tokens.bg_surface_hover.gamma_multiply(0.55 * anim.hover_t),
+                    );
+                }
+                let fg = crate::theme_styles::lerp_rgba(
+                    tokens.text_muted,
+                    tokens.text,
+                    active_t.max(anim.hover_t),
+                );
+                ui.painter().text(
+                    visual_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    font_id,
+                    fg,
+                );
+                if is_sel {
+                    active_tab_rect = Some(rect);
+                }
                 register_widget(
                     ui,
                     &resp,
@@ -103,7 +170,7 @@ impl AccountsView {
                         .label(label)
                         .text(label)
                         .active(is_sel)
-                        .fg(TEXT_PRIMARY)
+                        .fg(fg)
                         .bg(CARD_SURFACE),
                 );
                 if resp.clicked() {
@@ -112,11 +179,48 @@ impl AccountsView {
             }
         });
 
+        if let Some(target_rect) = active_tab_rect {
+            let anim_rect = crate::animation::animate_spring_rect(
+                ui.ctx(),
+                egui::Id::new("mq_accounts_tab_pill"),
+                target_rect,
+                crate::animation::SpringConfig::rect(),
+            );
+            let pill_r =
+                style.control_corner_radius(anim_rect.height(), crate::theme::RADIUS_BUTTON);
+            if style.refraction_border {
+                let mut shapes = Vec::new();
+                crate::theme_styles::collect_tinted_glass_pill_shapes(
+                    ui.ctx(),
+                    anim_rect,
+                    pill_r,
+                    &style,
+                    &tokens,
+                    crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.24),
+                    0.75,
+                    &mut shapes,
+                );
+                if !shapes.is_empty() {
+                    ui.painter().set(indicator_slot, egui::Shape::Vec(shapes));
+                }
+            } else {
+                let pill_fill = crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.16);
+                ui.painter().set(
+                    indicator_slot,
+                    egui::Shape::Rect(egui::epaint::RectShape::new(
+                        anim_rect,
+                        pill_r,
+                        pill_fill,
+                        Stroke::new(1.0_f32, tokens.accent),
+                        egui::StrokeKind::Inside,
+                    )),
+                );
+            }
+        }
+
         ui.add_space(8.0);
 
         // Tab form card
-        let tokens = crate::theme::Tokens::from_config(&state.config.theme);
-        let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
         let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let form_card = crate::theme::solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(12));
@@ -130,11 +234,18 @@ impl AccountsView {
             &tokens,
             |ui| {
                 ui.set_width(ui.available_width());
-                match self.current_tab {
-                    AccountTab::Offline => self.render_offline_tab(ui, state),
-                    AccountTab::ElyBy => self.render_elyby_tab(ui, state),
-                    AccountTab::Microsoft => self.render_msa_tab(ui, state),
-                }
+                crate::animation::render_tab_transition(
+                    ui,
+                    "mq_accounts_tab_transition",
+                    self.current_tab,
+                    self.current_tab.order_index(),
+                    true,
+                    |ui| match self.current_tab {
+                        AccountTab::Offline => self.render_offline_tab(ui, state),
+                        AccountTab::ElyBy => self.render_elyby_tab(ui, state),
+                        AccountTab::Microsoft => self.render_msa_tab(ui, state),
+                    },
+                );
             },
         );
 

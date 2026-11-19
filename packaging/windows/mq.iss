@@ -21,7 +21,7 @@
     #expr FileClose(CargoFile)
   #endif
   #if MyAppVersion == ""
-    #expr MyAppVersion = "2.7.0"
+    #expr MyAppVersion = "2.7.1"
   #endif
 #endif
 

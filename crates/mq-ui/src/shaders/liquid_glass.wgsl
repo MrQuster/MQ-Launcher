@@ -114,6 +114,7 @@ fn evaluate_liquid_glass(frag_xy: vec2<f32>) -> vec4<f32> {
     let center = u.rect_min + half_size;
     let p = frag_xy - center;
     let r = min(u.corner_radius, min(half_size.x, half_size.y));
+    let panel_opacity = clamp(length(u.light_dir), 0.0, 1.0);
 
     let dist = sd_rounded_box(p, half_size, r);
 
@@ -122,14 +123,14 @@ fn evaluate_liquid_glass(frag_xy: vec2<f32>) -> vec4<f32> {
         if u.corner_radius >= 0.5 {
             let shadow_dist = sd_rounded_box(p - vec2<f32>(0.0, 1.5), half_size, r);
             if shadow_dist > 0.0 && shadow_dist < 3.0 {
-                let sa = exp(-shadow_dist * 1.15) * (0.14 + 0.04 * u.hover_t);
+                let sa = exp(-shadow_dist * 1.15) * (0.14 + 0.04 * u.hover_t) * panel_opacity;
                 return vec4<f32>(0.0, 0.0, 0.0, sa);
             }
         }
         return vec4<f32>(0.0, 0.0, 0.0, -1.0);
     }
 
-    let alpha_mask = clamp(0.5 - dist, 0.0, 1.0);
+    let alpha_mask = clamp(0.5 - dist, 0.0, 1.0) * panel_opacity;
 
     // Analytical 2D normal pointing outward near the rounded bevel
     let eps = vec2<f32>(0.75, 0.0);

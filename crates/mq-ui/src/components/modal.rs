@@ -1,6 +1,6 @@
-//! Centered modal dialog container with 60% black backdrop, 8px panel, and Esc dismiss.
+//! Centered modal dialog container with animated backdrop, 8px panel, and Esc dismiss.
 
-use egui::{Color32, Context, Frame, Margin, Stroke, Ui};
+use egui::{Color32, Context, Frame, LayerId, Margin, Order, Stroke, Ui};
 
 use crate::components::registry::{register_rect, ElementKind, ElementMeta};
 use crate::theme::{Tokens, RADIUS_CARD};
@@ -12,14 +12,13 @@ pub fn render_modal_container<R>(
     max_width: f32,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
+    let modal_id = egui::Id::new(("mq_modal_container", title));
+    let anim = crate::animation::animate_modal_presence(ctx, modal_id, true);
     let screen_rect = ctx.screen_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("modal_backdrop"),
-    ));
+    let painter = ctx.layer_painter(LayerId::new(Order::Middle, modal_id.with("backdrop")));
 
-    // 60% Black backdrop
-    painter.rect_filled(screen_rect, 0.0, Color32::from_black_alpha(153));
+    let backdrop_a = (anim.backdrop_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    painter.rect_filled(screen_rect, 0.0, Color32::from_black_alpha(backdrop_a));
 
     let modal_width = max_width.min(screen_rect.width() - 32.0).max(360.0);
     let modal_pos = egui::pos2(
@@ -35,11 +34,29 @@ pub fn render_modal_container<R>(
         .corner_radius(modal_r)
         .inner_margin(Margin::same(20));
 
-    let area = egui::Area::new(egui::Id::new("modal_window"))
-        .order(egui::Order::Foreground)
+    let area_id = modal_id.with("window");
+    let area = egui::Area::new(area_id)
+        .order(Order::Foreground)
+        .fade_in(false)
         .fixed_pos(modal_pos);
 
-    let inner = area.show(ctx, |ui| {
+    let start_idx = ctx.graphics(|g| {
+        g.get(LayerId::new(Order::Foreground, area_id))
+            .map_or(0, |l| l.next_idx().0)
+    });
+
+    let predicted_center = ctx.memory(|m| m.area_rect(area_id)).map_or_else(
+        || egui::pos2(screen_rect.center().x, modal_pos.y + 120.0),
+        |r| r.center(),
+    );
+    let pre_xform = egui::emath::TSTransform {
+        scaling: anim.scale,
+        translation: predicted_center.to_vec2() * (1.0 - anim.scale)
+            + egui::vec2(0.0, anim.offset_y),
+    };
+    crate::animation::push_visual_transform(ctx, pre_xform, anim.alpha);
+
+    let area_resp = area.show(ctx, |ui| {
         ui.set_width(modal_width);
         let resp = crate::theme_styles::show_themed_card(
             ui,
@@ -76,5 +93,25 @@ pub fn render_modal_container<R>(
         resp.inner
     });
 
-    Some(inner.inner)
+    crate::animation::pop_visual_transform(ctx);
+
+    let layer_id = area_resp.response.layer_id;
+    let end_idx = ctx.graphics(|g| g.get(layer_id).map_or(0, |l| l.next_idx().0));
+    let actual_center = area_resp.response.rect.center();
+    let actual_xform = egui::emath::TSTransform {
+        scaling: anim.scale,
+        translation: actual_center.to_vec2() * (1.0 - anim.scale) + egui::vec2(0.0, anim.offset_y),
+    };
+    crate::animation::adjust_paint_list_opacity(ctx, layer_id, start_idx, end_idx, anim.alpha);
+    if actual_xform != egui::emath::TSTransform::IDENTITY && end_idx > start_idx {
+        ctx.graphics_mut(|g| {
+            g.entry(layer_id).transform_range(
+                egui::layers::ShapeIdx(start_idx),
+                egui::layers::ShapeIdx(end_idx),
+                actual_xform,
+            );
+        });
+    }
+
+    Some(area_resp.inner)
 }

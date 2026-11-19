@@ -6,7 +6,14 @@ use crate::components::registry::{register_widget, ElementKind, ElementMeta};
 use crate::theme::Tokens;
 
 pub fn render_progress_bar(ui: &mut Ui, tokens: &Tokens, progress: f32, height: f32) {
-    let p = crate::state::safe_progress_clamp(progress);
+    let clamped = crate::state::safe_progress_clamp(progress);
+    let p = crate::animation::animate_spring_f32(
+        ui.ctx(),
+        ui.id().with("mq_progress_bar"),
+        clamped,
+        crate::animation::SpringConfig::smooth(),
+    )
+    .clamp(0.0, 1.0);
     let desired_width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(desired_width, height.max(2.0)),

@@ -95,6 +95,9 @@ pub fn segmented_switch<T: PartialEq + Clone>(
         );
     }
 
+    let active_pill_slot = painter.add(egui::Shape::Noop);
+    let mut selected_seg_rect: Option<egui::Rect> = None;
+
     let mut current_x = outer_rect.left();
     for (i, opt) in options.iter().enumerate() {
         let seg_w = widths[i];
@@ -118,28 +121,22 @@ pub fn segmented_switch<T: PartialEq + Clone>(
             item_resp.clone().on_hover_text(tt);
         }
 
+        let anim = crate::animation::animate_interaction(
+            ui.ctx(),
+            item_id.with("seg_anim"),
+            item_resp.hovered(),
+            item_resp.is_pointer_button_down_on(),
+        );
+        let active_t = crate::animation::animate_spring_bool(
+            ui.ctx(),
+            item_id.with("seg_active"),
+            is_selected,
+            crate::animation::SpringConfig::snappy(),
+        );
+
         if is_selected {
-            if style.refraction_border {
-                crate::theme_styles::paint_tinted_glass_pill(
-                    ui.ctx(),
-                    painter,
-                    seg_rect.shrink(3.0),
-                    inner_radius,
-                    &style,
-                    tokens,
-                    crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.22),
-                    0.75,
-                );
-            } else {
-                painter.rect(
-                    seg_rect.shrink(1.5),
-                    inner_radius,
-                    tokens.bg_surface_hover,
-                    Stroke::new(1.0_f32, tokens.border_strong),
-                    egui::StrokeKind::Inside,
-                );
-            }
-        } else if item_resp.hovered() {
+            selected_seg_rect = Some(seg_rect);
+        } else if anim.hover_t > 0.02 {
             if style.refraction_border {
                 crate::theme_styles::paint_glass_surface_overlay(
                     ui.ctx(),
@@ -148,25 +145,25 @@ pub fn segmented_switch<T: PartialEq + Clone>(
                     hover_radius,
                     &style,
                     tokens,
-                    0.55,
+                    0.55 * anim.hover_t,
                     true,
                 );
             } else {
                 painter.rect(
                     seg_rect.shrink(2.0),
                     hover_radius,
-                    tokens.bg_surface.gamma_multiply(0.5),
+                    tokens.bg_surface.gamma_multiply(0.55 * anim.hover_t),
                     Stroke::NONE,
                     egui::StrokeKind::Inside,
                 );
             }
         }
 
-        let fg = if is_selected || item_resp.hovered() {
-            tokens.text
-        } else {
-            tokens.text_muted
-        };
+        let fg = crate::theme_styles::lerp_rgba(
+            tokens.text_muted,
+            tokens.text,
+            active_t.max(anim.hover_t),
+        );
 
         if let Some(icon) = opt.icon {
             let icon_pos = if opt.label.is_empty() {
@@ -215,6 +212,45 @@ pub fn segmented_switch<T: PartialEq + Clone>(
         register_widget(ui, &item_resp, meta);
 
         current_x += seg_w;
+    }
+
+    if let Some(target_seg) = selected_seg_rect {
+        let target_inner = if style.refraction_border {
+            target_seg.shrink(3.0)
+        } else {
+            target_seg.shrink(1.5)
+        };
+        let anim_rect = crate::animation::animate_spring_rect(
+            ui.ctx(),
+            ui.id().with("mq_segmented_pill"),
+            target_inner,
+            crate::animation::SpringConfig::rect(),
+        );
+        if style.refraction_border {
+            let mut shapes = Vec::new();
+            crate::theme_styles::collect_tinted_glass_pill_shapes(
+                ui.ctx(),
+                anim_rect,
+                inner_radius,
+                &style,
+                tokens,
+                crate::theme::blend_color(tokens.bg_surface_hover, tokens.accent, 0.22),
+                0.75,
+                &mut shapes,
+            );
+            if !shapes.is_empty() {
+                ui.painter().set(active_pill_slot, egui::Shape::Vec(shapes));
+            }
+        } else {
+            let shape = egui::Shape::Rect(egui::epaint::RectShape::new(
+                anim_rect,
+                inner_radius,
+                tokens.bg_surface_hover,
+                Stroke::new(1.0_f32, tokens.border_strong),
+                egui::StrokeKind::Inside,
+            ));
+            ui.painter().set(active_pill_slot, shape);
+        }
     }
 
     main_resp

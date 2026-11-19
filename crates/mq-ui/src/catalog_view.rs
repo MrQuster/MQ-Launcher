@@ -267,7 +267,28 @@ impl CatalogView {
 
         crate::catalog_dialogs::jobs_panel(ui, state);
         ui.separator();
-        self.results(ui, state, tokens);
+        let cat_tab = state.catalog.tab;
+        let tab_idx = match cat_tab {
+            CatalogTab::Mods => 0,
+            CatalogTab::ResourcePacks => 1,
+            CatalogTab::Shaders => 2,
+            CatalogTab::Modpacks => 3,
+        };
+        let src_idx = match state.catalog.source {
+            CatalogSourceFilter::All => 0,
+            CatalogSourceFilter::Modrinth => 1,
+            CatalogSourceFilter::CurseForge => 2,
+        };
+        crate::animation::render_tab_transition(
+            ui,
+            "mq_catalog_results_trans",
+            (cat_tab, src_idx),
+            tab_idx * 4 + src_idx,
+            true,
+            |ui| {
+                self.results(ui, state, tokens);
+            },
+        );
     }
 
     fn instance_target_selector(&self, ui: &mut Ui, state: &mut UiState, tokens: &Tokens) {
@@ -398,41 +419,88 @@ impl CatalogView {
 
     fn tabs_row(&self, ui: &mut Ui, cat: &mut CatalogState, tokens: &Tokens) -> bool {
         let mut changed = false;
+        let style = ThemeStyleParams::active(ui.ctx());
+        let indicator_slot = ui.painter().add(egui::Shape::Noop);
+        let mut active_tab_rect: Option<egui::Rect> = None;
+
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             for tab in CatalogTab::ALL {
                 let selected = cat.tab == tab;
-                let fg = if selected {
-                    tokens.text
+                let font_id = egui::FontId::proportional(13.0);
+                let text_w = ui
+                    .painter()
+                    .layout_no_wrap(tab.label().to_owned(), font_id.clone(), tokens.text)
+                    .size()
+                    .x;
+                let width = (text_w + 24.0).max(96.0);
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let anim = crate::animation::animate_interaction(
+                    ui.ctx(),
+                    resp.id.with("cat_tab_anim"),
+                    resp.hovered(),
+                    resp.is_pointer_button_down_on(),
+                );
+                let active_t = crate::animation::animate_spring_bool(
+                    ui.ctx(),
+                    resp.id.with("cat_tab_sel"),
+                    selected,
+                    crate::animation::SpringConfig::snappy(),
+                );
+                let visual_rect = if selected {
+                    rect
                 } else {
-                    tokens.text_muted
+                    anim.transform_rect(rect)
                 };
-                let fill = if selected {
-                    crate::theme::blend_color(tokens.bg_surface, tokens.accent, 0.14)
-                } else {
-                    tokens.bg_surface
-                };
-                let text = RichText::new(tab.label()).color(fg);
-                let btn = egui::Button::new(if selected { text.strong() } else { text })
-                    .fill(fill)
-                    .stroke(Stroke::new(
-                        1.0_f32,
-                        if selected {
-                            tokens.accent
-                        } else {
-                            tokens.border
-                        },
-                    ))
-                    .corner_radius(RADIUS_BUTTON)
-                    .min_size(Vec2::new(96.0, 32.0));
-                let resp = ui.add(btn);
+                if !selected {
+                    let idle_fill = tokens.bg_surface;
+                    let fill = crate::theme_styles::lerp_rgba(
+                        idle_fill,
+                        tokens.bg_surface_hover,
+                        anim.hover_t,
+                    );
+                    let stroke_col = crate::theme_styles::lerp_rgba(
+                        tokens.border,
+                        tokens.border_strong,
+                        anim.hover_t,
+                    );
+                    ui.painter().rect(
+                        visual_rect,
+                        RADIUS_BUTTON,
+                        fill,
+                        Stroke::new(1.0_f32, stroke_col),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let fg = crate::theme_styles::lerp_rgba(
+                    tokens.text_muted,
+                    tokens.text,
+                    active_t.max(anim.hover_t),
+                );
+                ui.painter().text(
+                    visual_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    tab.label(),
+                    font_id,
+                    fg,
+                );
+                if selected {
+                    active_tab_rect = Some(rect);
+                }
                 register_widget(
                     ui,
                     &resp,
                     ElementMeta::new(ElementKind::Tab)
                         .label(tab.label())
                         .fg(fg)
-                        .bg(fill)
+                        .bg(if selected {
+                            blend_color(tokens.bg_surface, tokens.accent, 0.14)
+                        } else {
+                            tokens.bg_surface
+                        })
                         .active(selected)
                         .interactive(true),
                 );
@@ -443,6 +511,43 @@ impl CatalogView {
                 }
             }
         });
+
+        if let Some(target_rect) = active_tab_rect {
+            let anim_rect = crate::animation::animate_spring_rect(
+                ui.ctx(),
+                egui::Id::new("mq_catalog_tab_pill"),
+                target_rect,
+                crate::animation::SpringConfig::rect(),
+            );
+            if style.refraction_border {
+                let mut shapes = Vec::new();
+                crate::theme_styles::collect_tinted_glass_pill_shapes(
+                    ui.ctx(),
+                    anim_rect,
+                    RADIUS_BUTTON,
+                    &style,
+                    tokens,
+                    blend_color(tokens.bg_surface, tokens.accent, 0.24),
+                    0.75,
+                    &mut shapes,
+                );
+                if !shapes.is_empty() {
+                    ui.painter().set(indicator_slot, egui::Shape::Vec(shapes));
+                }
+            } else {
+                let fill = blend_color(tokens.bg_surface, tokens.accent, 0.14);
+                ui.painter().set(
+                    indicator_slot,
+                    egui::Shape::Rect(egui::epaint::RectShape::new(
+                        anim_rect,
+                        RADIUS_BUTTON,
+                        fill,
+                        Stroke::new(1.0_f32, tokens.accent),
+                        egui::StrokeKind::Inside,
+                    )),
+                );
+            }
+        }
         changed
     }
 
@@ -478,25 +583,97 @@ impl CatalogView {
     fn source_items(&self, ui: &mut Ui, cat: &mut CatalogState, tokens: &Tokens) -> bool {
         let mut changed = false;
         ui.label(RichText::new("Источник").color(tokens.text_muted));
+        let indicator_slot = ui.painter().add(egui::Shape::Noop);
+        let mut active_src_rect: Option<egui::Rect> = None;
         for (filter, label) in [
             (CatalogSourceFilter::All, "Все"),
             (CatalogSourceFilter::Modrinth, "Modrinth"),
             (CatalogSourceFilter::CurseForge, "CurseForge"),
         ] {
-            let resp = ui.selectable_label(cat.source == filter, label);
+            let is_sel = cat.source == filter;
+            let font_id = egui::FontId::proportional(13.0);
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(label.to_owned(), font_id.clone(), tokens.text)
+                .size()
+                .x;
+            let (rect, resp) =
+                ui.allocate_exact_size(Vec2::new(text_w + 8.0, 20.0), Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let anim = crate::animation::animate_interaction(
+                ui.ctx(),
+                resp.id.with("cat_src_anim"),
+                resp.hovered(),
+                resp.is_pointer_button_down_on(),
+            );
+            let active_t = crate::animation::animate_spring_bool(
+                ui.ctx(),
+                resp.id.with("cat_src_sel"),
+                is_sel,
+                crate::animation::SpringConfig::snappy(),
+            );
+            let visual_rect = if is_sel {
+                rect
+            } else {
+                anim.transform_rect(rect)
+            };
+            if !is_sel && anim.hover_t > 0.02 {
+                ui.painter().rect_filled(
+                    visual_rect,
+                    RADIUS_BUTTON,
+                    tokens.bg_surface_hover.gamma_multiply(0.55 * anim.hover_t),
+                );
+            }
+            let fg = crate::theme_styles::lerp_rgba(
+                tokens.text_muted,
+                tokens.text,
+                active_t.max(anim.hover_t),
+            );
+            ui.painter().text(
+                visual_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                font_id,
+                fg,
+            );
+            if is_sel {
+                active_src_rect = Some(rect);
+            }
             register_widget(
                 ui,
                 &resp,
                 ElementMeta::new(ElementKind::Button)
                     .label(label)
+                    .active(is_sel)
                     .interactive(true),
             );
-            if resp.clicked() && cat.source != filter {
+            if resp.clicked() && !is_sel {
                 cat.source = filter;
                 cat.hits.clear();
                 cat.searched = false;
                 changed = true;
             }
+        }
+        if let Some(target_rect) = active_src_rect {
+            let anim_rect = crate::animation::animate_spring_rect(
+                ui.ctx(),
+                ui.id().with("mq_catalog_src_pill"),
+                target_rect,
+                crate::animation::SpringConfig::rect(),
+            );
+            let pill_fill = blend_color(tokens.bg_surface, tokens.accent, 0.16);
+            ui.painter().set(
+                indicator_slot,
+                egui::Shape::Rect(egui::epaint::RectShape::new(
+                    anim_rect,
+                    RADIUS_BUTTON,
+                    pill_fill,
+                    Stroke::new(1.0_f32, tokens.accent),
+                    egui::StrokeKind::Inside,
+                )),
+            );
         }
         changed
     }

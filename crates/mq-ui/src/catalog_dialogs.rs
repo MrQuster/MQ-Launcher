@@ -42,7 +42,11 @@ pub fn show_overlays(ctx: &Context, state: &mut UiState) {
 }
 
 fn project_window(ctx: &Context, state: &mut UiState) {
-    let Some(hit) = state.project.open.clone() else {
+    let Some((hit, anim)) = crate::animation::animate_modal_cached(
+        ctx,
+        egui::Id::new("mq_cat_project_modal"),
+        state.project.open.clone(),
+    ) else {
         return;
     };
     let tokens = Tokens::active(ctx);
@@ -51,77 +55,93 @@ fn project_window(ctx: &Context, state: &mut UiState) {
     let mut modpack_version: Option<usize> = None;
     let mut open = true;
 
-    window(ctx, &hit.title).open(&mut open).show(ctx, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            version_badge(ui, source_name(hit.source), source_color(hit.source));
-            ui.label(
-                RichText::new(format!(
-                    "{}  |  {} загрузок",
-                    hit.author,
-                    format_downloads(hit.downloads)
-                ))
-                .color(tokens.text_muted)
-                .small(),
-            );
-        });
-        ui.add_space(8.0);
-
-        if state.project.loading {
-            for _ in 0..3 {
-                crate::catalog_view::skeleton_card(ui);
-                ui.add_space(4.0);
-            }
-            return;
-        }
-        if let Some(err) = &state.project.error {
-            ui.label(RichText::new(err).color(tokens.danger));
-            return;
-        }
-
-        let is_pack = hit.project_kind == ProjectKind::Modpack;
-        if !is_pack && primary_emerald_button(ui, Some(VectorIcon::Plus), "Установить").clicked()
-        {
-            install_hit = true;
-        }
-        ui.add_space(8.0);
-
-        ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-            for block in &state.project.blocks {
-                render_block(ui, block, &tokens);
-            }
-            ui.add_space(12.0);
-            ui.label(RichText::new("Версии").color(tokens.text).strong());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Версия MC:").color(tokens.text_muted).small());
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.project.filter_mc).desired_width(80.0),
+    crate::animation::show_animated_modal_window(
+        ctx,
+        egui::Id::new("mq_cat_project_modal_win"),
+        &anim,
+        window(ctx, &hit.title).open(&mut open),
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                version_badge(ui, source_name(hit.source), source_color(hit.source));
+                ui.label(
+                    RichText::new(format!(
+                        "{}  |  {} загрузок",
+                        hit.author,
+                        format_downloads(hit.downloads)
+                    ))
+                    .color(tokens.text_muted)
+                    .small(),
                 );
             });
-            let indices = state.project.filtered_versions();
-            if indices.is_empty() {
-                ui.label(RichText::new("Нет подходящих версий").color(tokens.text_muted));
-            }
-            if let Some(page) = &state.project.page {
-                for i in indices.into_iter().take(50) {
-                    let v = &page.versions[i];
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&v.version_number).color(tokens.text));
-                        ui.label(
-                            RichText::new(v.game_versions.join(", "))
-                                .color(tokens.text_muted)
-                                .small(),
-                        );
-                        if is_pack
-                            && secondary_glass_button(ui, Some(VectorIcon::Plus), "Создать сборку")
-                                .clicked()
-                        {
-                            modpack_version = Some(i);
-                        }
-                    });
+            ui.add_space(8.0);
+
+            if state.project.loading {
+                for _ in 0..3 {
+                    crate::catalog_view::skeleton_card(ui);
+                    ui.add_space(4.0);
                 }
+                return;
             }
-        });
-    });
+            if let Some(err) = &state.project.error {
+                ui.label(RichText::new(err).color(tokens.danger));
+                return;
+            }
+
+            let is_pack = hit.project_kind == ProjectKind::Modpack;
+            if !is_pack
+                && primary_emerald_button(ui, Some(VectorIcon::Plus), "Установить").clicked()
+            {
+                install_hit = true;
+            }
+            ui.add_space(8.0);
+
+            ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for block in &state.project.blocks {
+                    render_block(ui, block, &tokens);
+                }
+                ui.add_space(12.0);
+                ui.label(RichText::new("Версии").color(tokens.text).strong());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Версия MC:").color(tokens.text_muted).small());
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.project.filter_mc)
+                            .desired_width(80.0),
+                    );
+                });
+                let indices = state.project.filtered_versions();
+                if indices.is_empty() {
+                    ui.label(RichText::new("Нет подходящих версий").color(tokens.text_muted));
+                }
+                if let Some(page) = &state.project.page {
+                    for i in indices.into_iter().take(50) {
+                        let v = &page.versions[i];
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&v.version_number).color(tokens.text));
+                            ui.label(
+                                RichText::new(v.game_versions.join(", "))
+                                    .color(tokens.text_muted)
+                                    .small(),
+                            );
+                            if is_pack
+                                && secondary_glass_button(
+                                    ui,
+                                    Some(VectorIcon::Plus),
+                                    "Создать сборку",
+                                )
+                                .clicked()
+                            {
+                                modpack_version = Some(i);
+                            }
+                        });
+                    }
+                }
+            });
+        },
+    );
+
+    if anim.is_closing {
+        return;
+    }
 
     if !open {
         close = true;
@@ -182,10 +202,22 @@ fn render_block(ui: &mut Ui, block: &MdBlock, tokens: &Tokens) {
     }
 }
 
+#[derive(Clone)]
+struct InstallClosingPreview {
+    title: String,
+    heading: String,
+}
+
 fn install_window(ctx: &Context, state: &mut UiState) {
-    if state.install.is_none() {
+    let modal_id = egui::Id::new("mq_cat_install_modal");
+    let anim = crate::animation::animate_modal_presence(ctx, modal_id, state.install.is_some());
+    if !anim.should_render {
+        ctx.data_mut(|d| {
+            d.insert_temp::<Option<InstallClosingPreview>>(modal_id.with("preview"), None);
+        });
         return;
     }
+
     let tokens = Tokens::active(ctx);
     let mut cancel = false;
     let mut confirm = false;
@@ -197,203 +229,248 @@ fn install_window(ctx: &Context, state: &mut UiState) {
         .map(|i| (i.id.clone(), i.name.clone()))
         .collect();
 
-    let title = state
-        .install
-        .as_ref()
-        .map(|d| {
-            if d.is_modpack() {
-                "Создать инстанс из сборки"
-            } else if d.is_batch() {
-                "Пакетная установка"
-            } else {
-                "Установка"
-            }
-        })
-        .unwrap_or("Установка");
-
-    window(ctx, title).show(ctx, |ui| {
-        let Some(d) = state.install.as_mut() else {
-            return;
-        };
-        if d.is_batch() {
-            let count = 1 + d.batch_hits.len();
-            ui.label(
-                RichText::new(format!("Выбрано проектов: {count}"))
-                    .color(tokens.text)
-                    .strong(),
-            );
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                for h in d.all_hits() {
-                    version_badge(ui, &h.title, source_color(h.source));
-                }
-            });
+    let title_owned: String = if let Some(d) = state.install.as_ref() {
+        let t = if d.is_modpack() {
+            "Создать инстанс из сборки"
+        } else if d.is_batch() {
+            "Пакетная установка"
         } else {
-            ui.label(RichText::new(&d.hit.title).color(tokens.text).strong());
+            "Установка"
         }
-        ui.add_space(8.0);
+        .to_string();
+        let heading = if d.is_batch() {
+            format!("Выбрано проектов: {}", 1 + d.batch_hits.len())
+        } else {
+            d.hit.title.clone()
+        };
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                modal_id.with("preview"),
+                Some(InstallClosingPreview {
+                    title: t.clone(),
+                    heading,
+                }),
+            );
+        });
+        t
+    } else {
+        ctx.data(|data| {
+            data.get_temp::<Option<InstallClosingPreview>>(modal_id.with("preview"))
+                .flatten()
+        })
+        .map_or_else(|| "Установка".to_string(), |p| p.title)
+    };
 
-        if d.is_modpack() {
-            if let InstallTarget::NewInstance { name } = &mut d.target {
-                ui.label(
-                    RichText::new("Название инстанса")
-                        .color(tokens.text_muted)
-                        .small(),
-                );
-                ui.text_edit_singleline(name);
-            }
-        } else if let InstallTarget::Existing(current) = d.target.clone() {
-            ui.label(RichText::new("Инстанс").color(tokens.text_muted).small());
-            egui::ComboBox::from_id_salt("install_target")
-                .selected_text(
-                    instances
-                        .iter()
-                        .find(|(id, _)| *id == current)
-                        .map_or_else(|| current.to_string(), |(_, n)| n.clone()),
-                )
-                .show_ui(ui, |ui| {
-                    for (id, name) in &instances {
-                        if ui.selectable_label(*id == current, name).clicked() && *id != current {
-                            new_target = Some(id.clone());
-                        }
-                    }
+    crate::animation::show_animated_modal_window(
+        ctx,
+        egui::Id::new("mq_cat_install_modal_win"),
+        &anim,
+        window(ctx, &title_owned),
+        |ui| {
+            let Some(d) = state.install.as_mut() else {
+                let heading = ctx
+                    .data(|data| {
+                        data.get_temp::<Option<InstallClosingPreview>>(modal_id.with("preview"))
+                            .flatten()
+                    })
+                    .map(|p| p.heading)
+                    .unwrap_or_default();
+                if !heading.is_empty() {
+                    ui.label(RichText::new(heading).color(tokens.text).strong());
+                    ui.add_space(12.0);
+                }
+                ui.horizontal(|ui| {
+                    let _ = primary_emerald_button(ui, Some(VectorIcon::Plus), "Установить");
+                    let _ = secondary_glass_button(ui, None, "Отмена");
                 });
-        }
-        ui.add_space(8.0);
-
-        if d.loading {
-            crate::catalog_view::skeleton_card(ui);
-        }
-        if let Some(err) = &d.error {
-            ui.label(RichText::new(err).color(tokens.danger));
-        }
-
-        if let Some(p) = &d.preview {
-            ui.label(
-                RichText::new(format!(
-                    "Minecraft {}  |  {}{}",
-                    p.mc_version,
-                    p.loader.as_str(),
-                    p.loader_version
-                        .as_deref()
-                        .map(|v| format!(" {v}"))
-                        .unwrap_or_default()
-                ))
-                .color(tokens.text),
-            );
-            ui.label(
-                RichText::new(format!(
-                    "Файлов: {}  |  Размер: {}",
-                    p.file_count,
-                    format_size(p.total_size)
-                ))
-                .color(tokens.text_muted),
-            );
-            if !p.blocked.is_empty() {
+                return;
+            };
+            if d.is_batch() {
+                let count = 1 + d.batch_hits.len();
                 ui.label(
-                    RichText::new(format!(
-                        "{} файл(ов) нужно будет скачать вручную",
-                        p.blocked.len()
-                    ))
-                    .color(tokens.warning),
-                );
-            }
-            ui.label(
-                RichText::new("Команды запуска из архива игнорируются.")
-                    .color(tokens.text_muted)
-                    .small(),
-            );
-            ui.checkbox(
-                &mut d.confirm_modpack,
-                "Я хочу создать новый инстанс из этой сборки",
-            );
-        }
-
-        if let Some(plan) = d.plan.clone() {
-            let selected_count = plan.downloads.iter().filter(|dl| !dl.is_dependency).count();
-            let dep_count = plan.downloads.iter().filter(|dl| dl.is_dependency).count();
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Будет установлено")
+                    RichText::new(format!("Выбрано проектов: {count}"))
                         .color(tokens.text)
                         .strong(),
                 );
-                if dep_count > 0 || d.is_batch() {
-                    ui.label(
-                        RichText::new(format!(
-                            "Выбрано: {selected_count} · Обязательные зависимости: {dep_count}"
-                        ))
-                        .color(tokens.text_muted)
-                        .small(),
-                    );
-                }
-            });
-            ui.add_space(4.0);
-            ScrollArea::vertical()
-                .id_salt("install_plan_scroll")
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    for dl in &plan.downloads {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&dl.filename).color(tokens.text));
-                            ui.label(
-                                RichText::new(format_size(dl.size))
-                                    .color(tokens.text_muted)
-                                    .small(),
-                            );
-                            if dl.is_dependency {
-                                version_badge(ui, "зависимость", ACCENT_COBALT);
-                            } else if d.is_batch() || dep_count > 0 {
-                                version_badge(ui, "выбран", tokens.accent);
-                            }
-                            if dl.is_download_blocked() {
-                                version_badge(ui, "вручную", tokens.warning);
-                            }
-                        });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                    for h in d.all_hits() {
+                        version_badge(ui, &h.title, source_color(h.source));
                     }
-                    if !plan.optional_dependencies.is_empty() {
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("Необязательные зависимости").color(tokens.text_muted),
-                        );
-                        for o in &plan.optional_dependencies {
-                            if let Some(pid) = &o.project_id {
-                                let mut on = d.selected_optionals.contains(pid);
-                                let label =
-                                    d.titles.get(pid).cloned().unwrap_or_else(|| pid.clone());
-                                if ui.checkbox(&mut on, label).changed() {
-                                    toggled = Some(pid.clone());
-                                }
+                });
+            } else {
+                ui.label(RichText::new(&d.hit.title).color(tokens.text).strong());
+            }
+            ui.add_space(8.0);
+
+            if d.is_modpack() {
+                if let InstallTarget::NewInstance { name } = &mut d.target {
+                    ui.label(
+                        RichText::new("Название инстанса")
+                            .color(tokens.text_muted)
+                            .small(),
+                    );
+                    ui.text_edit_singleline(name);
+                }
+            } else if let InstallTarget::Existing(current) = d.target.clone() {
+                ui.label(RichText::new("Инстанс").color(tokens.text_muted).small());
+                egui::ComboBox::from_id_salt("install_target")
+                    .selected_text(
+                        instances
+                            .iter()
+                            .find(|(id, _)| *id == current)
+                            .map_or_else(|| current.to_string(), |(_, n)| n.clone()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (id, name) in &instances {
+                            if ui.selectable_label(*id == current, name).clicked() && *id != current
+                            {
+                                new_target = Some(id.clone());
                             }
                         }
-                    }
-                    for b in &plan.blocked_downloads {
+                    });
+            }
+            ui.add_space(8.0);
+
+            if d.loading {
+                crate::catalog_view::skeleton_card(ui);
+            }
+            if let Some(err) = &d.error {
+                ui.label(RichText::new(err).color(tokens.danger));
+            }
+
+            if let Some(p) = &d.preview {
+                ui.label(
+                    RichText::new(format!(
+                        "Minecraft {}  |  {}{}",
+                        p.mc_version,
+                        p.loader.as_str(),
+                        p.loader_version
+                            .as_deref()
+                            .map(|v| format!(" {v}"))
+                            .unwrap_or_default()
+                    ))
+                    .color(tokens.text),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Файлов: {}  |  Размер: {}",
+                        p.file_count,
+                        format_size(p.total_size)
+                    ))
+                    .color(tokens.text_muted),
+                );
+                if !p.blocked.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} файл(ов) нужно будет скачать вручную",
+                            p.blocked.len()
+                        ))
+                        .color(tokens.warning),
+                    );
+                }
+                ui.label(
+                    RichText::new("Команды запуска из архива игнорируются.")
+                        .color(tokens.text_muted)
+                        .small(),
+                );
+                ui.checkbox(
+                    &mut d.confirm_modpack,
+                    "Я хочу создать новый инстанс из этой сборки",
+                );
+            }
+
+            if let Some(plan) = d.plan.clone() {
+                let selected_count = plan.downloads.iter().filter(|dl| !dl.is_dependency).count();
+                let dep_count = plan.downloads.iter().filter(|dl| dl.is_dependency).count();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Будет установлено")
+                            .color(tokens.text)
+                            .strong(),
+                    );
+                    if dep_count > 0 || d.is_batch() {
                         ui.label(
-                            RichText::new(format!("Вручную: {}", b.filename))
-                                .color(tokens.warning)
-                                .small(),
+                            RichText::new(format!(
+                                "Выбрано: {selected_count} · Обязательные зависимости: {dep_count}"
+                            ))
+                            .color(tokens.text_muted)
+                            .small(),
                         );
                     }
                 });
-        }
+                ui.add_space(4.0);
+                ScrollArea::vertical()
+                    .id_salt("install_plan_scroll")
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for dl in &plan.downloads {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&dl.filename).color(tokens.text));
+                                ui.label(
+                                    RichText::new(format_size(dl.size))
+                                        .color(tokens.text_muted)
+                                        .small(),
+                                );
+                                if dl.is_dependency {
+                                    version_badge(ui, "зависимость", ACCENT_COBALT);
+                                } else if d.is_batch() || dep_count > 0 {
+                                    version_badge(ui, "выбран", tokens.accent);
+                                }
+                                if dl.is_download_blocked() {
+                                    version_badge(ui, "вручную", tokens.warning);
+                                }
+                            });
+                        }
+                        if !plan.optional_dependencies.is_empty() {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("Необязательные зависимости")
+                                    .color(tokens.text_muted),
+                            );
+                            for o in &plan.optional_dependencies {
+                                if let Some(pid) = &o.project_id {
+                                    let mut on = d.selected_optionals.contains(pid);
+                                    let label =
+                                        d.titles.get(pid).cloned().unwrap_or_else(|| pid.clone());
+                                    if ui.checkbox(&mut on, label).changed() {
+                                        toggled = Some(pid.clone());
+                                    }
+                                }
+                            }
+                        }
+                        for b in &plan.blocked_downloads {
+                            ui.label(
+                                RichText::new(format!("Вручную: {}", b.filename))
+                                    .color(tokens.warning)
+                                    .small(),
+                            );
+                        }
+                    });
+            }
 
-        ui.add_space(12.0);
-        let btn_label = if d.is_batch() {
-            "Установить все"
-        } else {
-            "Установить"
-        };
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(d.can_confirm(), |ui| {
-                if primary_emerald_button(ui, Some(VectorIcon::Plus), btn_label).clicked() {
-                    confirm = true;
+            ui.add_space(12.0);
+            let btn_label = if d.is_batch() {
+                "Установить все"
+            } else {
+                "Установить"
+            };
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(d.can_confirm(), |ui| {
+                    if primary_emerald_button(ui, Some(VectorIcon::Plus), btn_label).clicked() {
+                        confirm = true;
+                    }
+                });
+                if secondary_glass_button(ui, None, "Отмена").clicked() {
+                    cancel = true;
                 }
             });
-            if secondary_glass_button(ui, None, "Отмена").clicked() {
-                cancel = true;
-            }
-        });
-    });
+        },
+    );
+
+    if anim.is_closing {
+        return;
+    }
 
     if let Some(pid) = toggled {
         if let Some(d) = state.install.as_mut() {
@@ -412,57 +489,72 @@ fn install_window(ctx: &Context, state: &mut UiState) {
 }
 
 fn manual_window(ctx: &Context, state: &mut UiState) {
-    if !state.manual.open {
+    let anim = crate::animation::animate_modal_presence(
+        ctx,
+        egui::Id::new("mq_cat_manual_modal"),
+        state.manual.open,
+    );
+    if !anim.should_render {
         return;
     }
     let tokens = Tokens::active(ctx);
     let mut close = false;
     let mut open_url: Option<String> = None;
-    window(ctx, "Эти файлы нужно скачать вручную").show(ctx, |ui| {
-        ui.label(
-            RichText::new(
-                "Автор проекта запретил автоматическую загрузку. Скачайте файлы в браузере: \
-                 они будут найдены в папке загрузок и добавлены автоматически.",
-            )
-            .color(tokens.text_muted),
-        );
-        ui.label(
-            RichText::new(format!("Папка: {}", state.manual.watch_dir_label))
-                .color(tokens.text_muted)
-                .small(),
-        );
-        ui.horizontal(|ui| {
+    crate::animation::show_animated_modal_window(
+        ctx,
+        egui::Id::new("mq_cat_manual_modal_win"),
+        &anim,
+        window(ctx, "Эти файлы нужно скачать вручную"),
+        |ui| {
             ui.label(
-                RichText::new(format!("Осталось: {}", state.manual.remaining()))
-                    .color(tokens.text)
-                    .strong(),
+                RichText::new(
+                    "Автор проекта запретил автоматическую загрузку. Скачайте файлы в браузере: \
+                     они будут найдены в папке загрузок и добавлены автоматически.",
+                )
+                .color(tokens.text_muted),
             );
             ui.label(
-                RichText::new("Перетащите скачанный файл в окно лаунчера")
+                RichText::new(format!("Папка: {}", state.manual.watch_dir_label))
                     .color(tokens.text_muted)
                     .small(),
             );
-        });
-        ui.add_space(8.0);
-        for b in &state.manual.pending {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&b.filename).color(tokens.text));
-                if secondary_glass_button(ui, None, "Открыть страницу").clicked() {
-                    open_url = Some(b.webpage_url.clone());
-                }
+                ui.label(
+                    RichText::new(format!("Осталось: {}", state.manual.remaining()))
+                        .color(tokens.text)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new("Перетащите скачанный файл в окно лаунчера")
+                        .color(tokens.text_muted)
+                        .small(),
+                );
             });
-        }
-        for name in &state.manual.completed {
-            ui.label(RichText::new(format!("Получено: {name}")).color(tokens.accent));
-        }
-        if let Some(m) = &state.manual.message {
-            ui.label(RichText::new(m).color(tokens.accent));
-        }
-        ui.add_space(8.0);
-        if secondary_glass_button(ui, None, "Закрыть").clicked() {
-            close = true;
-        }
-    });
+            ui.add_space(8.0);
+            for b in &state.manual.pending {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&b.filename).color(tokens.text));
+                    if secondary_glass_button(ui, None, "Открыть страницу").clicked()
+                    {
+                        open_url = Some(b.webpage_url.clone());
+                    }
+                });
+            }
+            for name in &state.manual.completed {
+                ui.label(RichText::new(format!("Получено: {name}")).color(tokens.accent));
+            }
+            if let Some(m) = &state.manual.message {
+                ui.label(RichText::new(m).color(tokens.accent));
+            }
+            ui.add_space(8.0);
+            if secondary_glass_button(ui, None, "Закрыть").clicked() {
+                close = true;
+            }
+        },
+    );
+    if anim.is_closing {
+        return;
+    }
     if let Some(url) = open_url {
         if crate::catalog_flow::is_safe_http_url(&url) {
             ctx.open_url(egui::OpenUrl::new_tab(url));
@@ -511,8 +603,15 @@ fn render_job_row(
         );
         match &j.status {
             JobStatus::Running => {
+                let smooth_prog = crate::animation::animate_spring_f32(
+                    ui.ctx(),
+                    egui::Id::new(("mq_cat_job_prog", j.id)),
+                    j.progress(),
+                    crate::animation::SpringConfig::smooth(),
+                )
+                .clamp(0.0, 1.0);
                 ui.add(
-                    egui::ProgressBar::new(j.progress())
+                    egui::ProgressBar::new(smooth_prog)
                         .desired_width(140.0)
                         .text(format!("{}/{}", j.done_files, j.total_files)),
                 );

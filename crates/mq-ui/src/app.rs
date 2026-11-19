@@ -1301,6 +1301,7 @@ impl MqApp {
 
     /// Headless/offscreen frame rendering for visual QA and snapshots.
     pub fn render_frame_for_snapshot(&mut self, ctx: &egui::Context) {
+        crate::animation::begin_animation_frame(ctx);
         let accounts_list = self.state.accounts.list_accounts().to_vec();
         let active_id = self
             .state
@@ -1555,7 +1556,11 @@ impl MqApp {
 
     /// Renders recovery dialog if previous launcher run terminated unexpectedly with an active install journal.
     pub fn render_recovery_dialog(&mut self, ctx: &egui::Context) {
-        let Some(journal) = &self.recovery_journal else {
+        let Some((journal, anim)) = crate::animation::animate_modal_cached(
+            ctx,
+            egui::Id::new("mq_recovery_modal"),
+            self.recovery_journal.clone(),
+        ) else {
             return;
         };
 
@@ -1570,7 +1575,7 @@ impl MqApp {
         let inst_id_str = journal.instance_id.clone();
         let diag_text = journal.format_diagnostic_summary(&self.state.paths);
 
-        egui::Window::new("Восстановление после аварийного завершения")
+        let window = egui::Window::new("Восстановление после аварийного завершения")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -1580,8 +1585,14 @@ impl MqApp {
                     .corner_radius(egui::CornerRadius::same(8))
                     .stroke(egui::Stroke::new(1.0_f32, tokens.border))
                     .inner_margin(egui::Margin::same(20)),
-            )
-            .show(ctx, |ui| {
+            );
+
+        crate::animation::show_animated_modal_window(
+            ctx,
+            egui::Id::new("mq_recovery_modal_win"),
+            &anim,
+            window,
+            |ui| {
                 ui.set_max_width(540.0);
                 ui.vertical(|ui| {
                     ui.label(
@@ -1640,7 +1651,8 @@ impl MqApp {
                         }
                     });
                 });
-            });
+            },
+        );
 
         if action_copy_diag {
             ctx.copy_text(diag_text);
@@ -1688,6 +1700,7 @@ impl MqApp {
 
     /// Internal per-frame rendering logic executed under `catch_unwind`.
     fn render_frame_inner(&mut self, ctx: &egui::Context) {
+        crate::animation::begin_animation_frame(ctx);
         #[cfg(feature = "test-hooks")]
         self.step_test_hooks(ctx);
 
@@ -1827,17 +1840,31 @@ impl MqApp {
                 let bg_painter = ui.painter().with_clip_rect(bg_rect);
                 paint_launcher_background(ctx, &bg_painter, bg_rect, &effective_theme, &tokens);
             }
-            match self.current_tab {
-                NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
-                NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
-                NavTab::Accounts => self.accounts_view.ui(ui, &mut self.state),
-                NavTab::Downloads | NavTab::Performance => self.perf_view.ui(ui, &self.state),
-                NavTab::Settings => self.settings_view.ui(ui, &mut self.state),
-            }
+            crate::animation::render_tab_transition(
+                ui,
+                "mq_main_nav_transition",
+                self.current_tab,
+                self.current_tab.shortcut_index() as i32,
+                false,
+                |ui| match self.current_tab {
+                    NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
+                    NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
+                    NavTab::Accounts => self.accounts_view.ui(ui, &mut self.state),
+                    NavTab::Downloads | NavTab::Performance => self.perf_view.ui(ui, &self.state),
+                    NavTab::Settings => self.settings_view.ui(ui, &mut self.state),
+                },
+            );
         });
 
         // 4. Modal Recovery Dialog (if previous installation terminated unexpectedly)
         self.render_recovery_dialog(ctx);
+
+        // 5. Ephemeral Toast Notifications
+        crate::components::ToastManager::sync_and_render_in_context(
+            ctx,
+            &tokens,
+            &self.state.status_message,
+        );
 
         // Request next frame repaint if an operation is active
         if self.state.active_phase.is_some() || self.state.game_running {

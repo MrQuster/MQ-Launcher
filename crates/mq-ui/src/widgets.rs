@@ -69,6 +69,23 @@ fn lucide_pos(rect: Rect, x: f32, y: f32) -> Pos2 {
     )
 }
 
+/// Paints a geometric [`VectorIcon::ChevronDown`] that smoothly morphs toward pointing up as `open_t` goes `0.0 -> 1.0`.
+pub fn paint_animated_chevron(painter: &Painter, rect: Rect, open_t: f32, color: Color32) {
+    let t = open_t.clamp(0.0, 1.0);
+    let base_size = rect.width().min(rect.height());
+    let stroke_w = crate::state::safe_clamp_f32(base_size * (1.5 / 16.0), 1.25, 2.25);
+    let y_outer = 9.0 + 6.0 * t;
+    let y_mid = 15.0 - 6.0 * t;
+    painter.add(Shape::line(
+        vec![
+            lucide_pos(rect, 6.0, y_outer),
+            lucide_pos(rect, 12.0, y_mid),
+            lucide_pos(rect, 18.0, y_outer),
+        ],
+        Stroke::new(stroke_w, color),
+    ));
+}
+
 /// Paints a geometric [`VectorIcon`] inside `rect` using `color` without any emoji glyphs.
 pub fn paint_vector_icon(painter: &Painter, rect: Rect, icon: VectorIcon, color: Color32) {
     let r = rect.shrink((rect.width().min(rect.height()) * 0.10).max(1.0));
@@ -481,29 +498,34 @@ fn render_styled_button(
         let tokens = Tokens::active(ui.ctx());
         let hovered = response.hovered() && ui.is_enabled();
         let active = response.is_pointer_button_down_on() && ui.is_enabled();
-        let hover_t = ui.ctx().animate_bool_with_time(
+        let anim = crate::animation::animate_interaction(
+            ui.ctx(),
             response.id.with("hover_anim"),
-            hovered || active,
-            0.14,
+            hovered,
+            active,
         );
-        let fill = if active {
-            bg_hover
-        } else {
-            lerp_rgba(bg_idle, bg_hover, hover_t)
-        };
-        let stroke_col = if active {
-            border_hover
-        } else {
-            lerp_rgba(border_idle, border_hover, hover_t)
-        };
+        let hover_t = anim.hover_t;
+        let visual_rect = anim.transform_rect(rect);
+        let fill = blend_color(bg_idle, bg_hover, (hover_t + 0.25 * anim.press_t).min(1.0));
+        let fill = Color32::from_rgba_unmultiplied(
+            fill.r(),
+            fill.g(),
+            fill.b(),
+            bg_idle.a().max(bg_hover.a()),
+        );
+        let stroke_col = lerp_rgba(
+            border_idle,
+            border_hover,
+            (hover_t + 0.35 * anim.press_t).min(1.0),
+        );
 
         let painter = ui.painter();
-        let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+        let btn_radius = style.control_corner_radius(visual_rect.height(), RADIUS_BUTTON);
         if style.refraction_border {
             crate::theme_styles::paint_tinted_glass_pill(
                 ui.ctx(),
                 painter,
-                rect,
+                visual_rect,
                 btn_radius,
                 &style,
                 &tokens,
@@ -511,9 +533,9 @@ fn render_styled_button(
                 hover_t,
             );
         } else {
-            painter.rect_filled(rect, btn_radius, fill);
+            painter.rect_filled(visual_rect, btn_radius, fill);
             painter.rect_stroke(
-                rect,
+                visual_rect,
                 btn_radius,
                 Stroke::new(1.0_f32, stroke_col),
                 StrokeKind::Inside,
@@ -521,7 +543,7 @@ fn render_styled_button(
             paint_glass_surface_overlay(
                 ui.ctx(),
                 painter,
-                rect,
+                visual_rect,
                 btn_radius,
                 &style,
                 &tokens,
@@ -530,17 +552,18 @@ fn render_styled_button(
             );
         }
 
-        let mut cursor_x = rect.left() + BUTTON_PADDING.x;
+        let content_w = icon_side + icon_gap + galley.size().x;
+        let mut cursor_x = visual_rect.center().x - content_w * 0.5;
         if let Some(ic) = icon {
             let icon_rect = Rect::from_center_size(
-                Pos2::new(cursor_x + icon_side * 0.5, rect.center().y),
+                Pos2::new(cursor_x + icon_side * 0.5, visual_rect.center().y),
                 Vec2::splat(icon_side),
             );
             paint_vector_icon(painter, icon_rect, ic, fg_color);
             cursor_x += icon_side + icon_gap;
         }
 
-        let text_pos = Pos2::new(cursor_x, rect.center().y - galley.size().y * 0.5);
+        let text_pos = Pos2::new(cursor_x, visual_rect.center().y - galley.size().y * 0.5);
         painter.galley(text_pos, galley, fg_color);
     }
 
@@ -630,22 +653,24 @@ pub fn accent_button(
     let desired_h = (galley.size().y + BUTTON_PADDING.y * 2.0).max(34.0);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(desired_w, desired_h), Sense::click());
 
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(response.id, response.hovered(), 0.15);
+    let hovered = response.hovered() && ui.is_enabled();
+    let pressed = response.is_pointer_button_down_on() && ui.is_enabled();
+    let anim = crate::animation::animate_interaction(ui.ctx(), response.id, hovered, pressed);
+    let t = anim.hover_t;
 
     if ui.is_rect_visible(rect) {
         let style = ThemeStyleParams::active(ui.ctx());
         let tokens = Tokens::active(ui.ctx());
         let painter = ui.painter();
-        let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
+        let visual_rect = anim.transform_rect(rect);
+        let btn_radius = style.control_corner_radius(visual_rect.height(), RADIUS_BUTTON);
         let bg_fill = blend_color(accent_color, fg, 0.12 * t);
         let border_stroke = Stroke::new(1.0_f32, blend_color(accent_color, fg, 0.25 + 0.2 * t));
         if style.refraction_border {
             crate::theme_styles::paint_tinted_glass_pill(
                 ui.ctx(),
                 painter,
-                rect,
+                visual_rect,
                 btn_radius,
                 &style,
                 &tokens,
@@ -653,12 +678,12 @@ pub fn accent_button(
                 t,
             );
         } else {
-            painter.rect_filled(rect, btn_radius, bg_fill);
-            painter.rect_stroke(rect, btn_radius, border_stroke, StrokeKind::Inside);
+            painter.rect_filled(visual_rect, btn_radius, bg_fill);
+            painter.rect_stroke(visual_rect, btn_radius, border_stroke, StrokeKind::Inside);
             paint_glass_surface_overlay(
                 ui.ctx(),
                 painter,
-                rect,
+                visual_rect,
                 btn_radius,
                 &style,
                 &tokens,
@@ -668,18 +693,18 @@ pub fn accent_button(
         }
 
         let content_w = galley.size().x + icon_w;
-        let mut cursor_x = rect.left() + (rect.width() - content_w) * 0.5;
+        let mut cursor_x = visual_rect.left() + (visual_rect.width() - content_w) * 0.5;
 
         if let Some(ic) = icon {
             let icon_rect = Rect::from_center_size(
-                Pos2::new(cursor_x + 8.0, rect.center().y),
+                Pos2::new(cursor_x + 8.0, visual_rect.center().y),
                 Vec2::splat(16.0),
             );
             paint_vector_icon(painter, icon_rect, ic, fg);
             cursor_x += 16.0 + 8.0;
         }
 
-        let text_pos = Pos2::new(cursor_x, rect.center().y - galley.size().y * 0.5);
+        let text_pos = Pos2::new(cursor_x, visual_rect.center().y - galley.size().y * 0.5);
         painter.galley(text_pos, galley, fg);
     }
 
@@ -707,7 +732,18 @@ pub fn smooth_toggle(ui: &mut Ui, on: &mut bool) -> Response {
         response.mark_changed();
     }
 
-    let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.18);
+    let t = crate::animation::animate_spring_bool(
+        ui.ctx(),
+        response.id,
+        *on,
+        crate::animation::SpringConfig::snappy(),
+    );
+    let press_t = crate::animation::animate_spring_bool(
+        ui.ctx(),
+        response.id.with("toggle_press"),
+        response.is_pointer_button_down_on(),
+        crate::animation::SpringConfig::snappy().with_stiffness(560.0),
+    );
 
     if ui.is_rect_visible(pill_rect) {
         let style = ThemeStyleParams::active(ui.ctx());
@@ -740,11 +776,12 @@ pub fn smooth_toggle(ui: &mut Ui, on: &mut bool) -> Response {
         } else {
             Color32::from_rgb(0xE6, 0xE8, 0xEE)
         };
-        painter.circle_filled(knob_center, 7.5, knob_col);
+        let knob_r = 7.5 * (1.0 - 0.12 * press_t);
+        painter.circle_filled(knob_center, knob_r, knob_col);
         if style.refraction_border {
             painter.circle_stroke(
                 knob_center,
-                7.5,
+                knob_r,
                 Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 195)),
             );
         }
@@ -957,24 +994,25 @@ pub fn hero_action_button(
 
     if ui.is_rect_visible(rect) {
         let style = ThemeStyleParams::active(ui.ctx());
-        let time = ui.input(|i| i.time);
-        let pulse = ((time * 3.2).sin() * 0.5 + 0.5) as f32;
         let hovered = response.hovered() && ui.is_enabled();
         let active = response.is_pointer_button_down_on() && ui.is_enabled();
-        let hover_t = ui.ctx().animate_bool_with_time(
+        let anim = crate::animation::animate_interaction(
+            ui.ctx(),
             response.id.with("hero_hover"),
-            hovered || active,
-            0.14,
+            hovered,
+            active,
         );
+        let hover_t = anim.hover_t;
+        let visual_rect = anim.transform_rect(rect);
         let fill = lerp_rgba(bg, bg_hover, hover_t);
         let fill = crate::theme_styles::with_alpha(fill, style.surface_alpha.max(0.72));
 
         let painter = ui.painter();
-        let btn_radius = style.control_corner_radius(rect.height(), RADIUS_BUTTON);
-        let glow_expand = if hovered { 2.0 } else { 1.0 + pulse * 1.5 };
-        let glow_alpha = if hovered { 0.35 } else { 0.12 + pulse * 0.12 };
+        let btn_radius = style.control_corner_radius(visual_rect.height(), RADIUS_BUTTON);
+        let glow_expand = 1.0 + 1.5 * hover_t * (1.0 - anim.press_t);
+        let glow_alpha = 0.14 + 0.22 * hover_t;
         painter.rect_filled(
-            rect.expand(glow_expand),
+            visual_rect.expand(glow_expand),
             btn_radius,
             accent_color.gamma_multiply(glow_alpha),
         );
@@ -983,7 +1021,7 @@ pub fn hero_action_button(
             crate::theme_styles::paint_tinted_glass_pill(
                 ui.ctx(),
                 painter,
-                rect,
+                visual_rect,
                 btn_radius,
                 &style,
                 &tokens,
@@ -991,9 +1029,9 @@ pub fn hero_action_button(
                 hover_t,
             );
         } else {
-            painter.rect_filled(rect, btn_radius, fill);
+            painter.rect_filled(visual_rect, btn_radius, fill);
             painter.rect_stroke(
-                rect,
+                visual_rect,
                 btn_radius,
                 Stroke::new(1.5_f32, accent_color),
                 StrokeKind::Inside,
@@ -1001,7 +1039,7 @@ pub fn hero_action_button(
             paint_glass_surface_overlay(
                 ui.ctx(),
                 painter,
-                rect,
+                visual_rect,
                 btn_radius,
                 &style,
                 &tokens,
@@ -1010,16 +1048,16 @@ pub fn hero_action_button(
             );
         }
 
-        let mut cursor_x =
-            rect.left() + (rect.width() - (icon_side + icon_gap + galley.size().x)) * 0.5;
+        let mut cursor_x = visual_rect.left()
+            + (visual_rect.width() - (icon_side + icon_gap + galley.size().x)) * 0.5;
         let icon_rect = Rect::from_center_size(
-            Pos2::new(cursor_x + icon_side * 0.5, rect.center().y),
+            Pos2::new(cursor_x + icon_side * 0.5, visual_rect.center().y),
             Vec2::splat(icon_side),
         );
         paint_vector_icon(painter, icon_rect, icon, accent_color);
         cursor_x += icon_side + icon_gap;
 
-        let text_pos = Pos2::new(cursor_x, rect.center().y - galley.size().y * 0.5);
+        let text_pos = Pos2::new(cursor_x, visual_rect.center().y - galley.size().y * 0.5);
         painter.galley(text_pos, galley, fg_color);
     }
     response
@@ -1116,9 +1154,13 @@ pub fn render_download_progress_card(
 
         // Smooth animated progress bar
         let clamped = crate::state::safe_progress_clamp(progress_frac);
-        let smooth_prog =
-            ui.ctx()
-                .animate_value_with_time(ui.id().with("inst_dl_bar"), clamped, 0.15);
+        let smooth_prog = crate::animation::animate_spring_f32(
+            ui.ctx(),
+            ui.id().with("inst_dl_bar"),
+            clamped,
+            crate::animation::SpringConfig::smooth(),
+        )
+        .clamp(0.0, 1.0);
 
         let bar_h = 10.0;
         let (bar_rect, _) =
@@ -1298,9 +1340,13 @@ pub fn render_detailed_install_progress_card(
 
         // 3. Smooth animated progress bar
         let clamped = crate::state::safe_progress_clamp(progress_frac);
-        let smooth_prog =
-            ui.ctx()
-                .animate_value_with_time(ui.id().with("inst_detailed_dl_bar"), clamped, 0.15);
+        let smooth_prog = crate::animation::animate_spring_f32(
+            ui.ctx(),
+            ui.id().with("inst_detailed_dl_bar"),
+            clamped,
+            crate::animation::SpringConfig::smooth(),
+        )
+        .clamp(0.0, 1.0);
 
         let bar_h = 8.0;
         let (bar_rect, _) =

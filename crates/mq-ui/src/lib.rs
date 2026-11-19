@@ -5,6 +5,7 @@
 #![deny(clippy::await_holding_lock)]
 
 pub mod accounts_view;
+pub mod animation;
 pub mod app;
 pub mod catalog_actions;
 pub mod catalog_demo;
@@ -34,6 +35,8 @@ pub mod widgets;
 
 #[allow(unused_imports)]
 pub use accounts_view::*;
+#[allow(unused_imports)]
+pub use animation::*;
 #[allow(unused_imports)]
 pub use app::*;
 #[allow(unused_imports)]
