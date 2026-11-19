@@ -325,6 +325,7 @@ mod tests {
     use crate::accounts_view::AccountsView;
     use crate::catalog_demo::apply_demo_scene;
     use crate::catalog_view::CatalogView;
+    use crate::downloads_view::DownloadsView;
     use crate::instances_view::{InstanceViewMode, InstancesView};
     use crate::perf_view::PerfView;
     use crate::settings_view::{SettingsSection, SettingsView};
@@ -392,6 +393,7 @@ mod tests {
             current_tab: tab,
             instances_view,
             catalog_view: CatalogView::default(),
+            downloads_view: DownloadsView,
             accounts_view: AccountsView::default(),
             perf_view: PerfView,
             settings_view,

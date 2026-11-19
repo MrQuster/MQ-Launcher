@@ -581,6 +581,10 @@ pub struct InstallJob {
     pub target_label: String,
     pub done_files: usize,
     pub total_files: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub mib_per_sec: f64,
+    pub stage_label: Option<String>,
     pub status: JobStatus,
     pub cancel: Arc<AtomicBool>,
     /// Re-sendable request used by "Повторить".
@@ -606,9 +610,18 @@ pub enum RetrySpec {
 impl InstallJob {
     pub fn progress(&self) -> f32 {
         if self.total_files == 0 {
-            0.0
+            if self.bytes_total > 0 {
+                (self.bytes_done as f64 / self.bytes_total as f64).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            }
         } else {
-            (self.done_files as f32 / self.total_files as f32).clamp(0.0, 1.0)
+            let item_frac = (self.done_files as f32 / self.total_files as f32).clamp(0.0, 1.0);
+            if item_frac == 0.0 && self.bytes_total > 0 && self.bytes_done > 0 {
+                (self.bytes_done as f64 / self.bytes_total as f64).clamp(0.0, 0.99) as f32
+            } else {
+                item_frac
+            }
         }
     }
 
@@ -648,6 +661,10 @@ impl JobQueue {
             target_label,
             done_files: 0,
             total_files,
+            bytes_done: 0,
+            bytes_total: 0,
+            mib_per_sec: 0.0,
+            stage_label: None,
             status: JobStatus::Running,
             cancel: cancel.clone(),
             retry,
@@ -659,6 +676,12 @@ impl JobQueue {
         self.jobs.iter_mut().find(|j| j.id == id)
     }
 
+    pub fn set_stage(&mut self, id: u64, stage: impl Into<String>) {
+        if let Some(j) = self.get_mut(id) {
+            j.stage_label = Some(stage.into());
+        }
+    }
+
     pub fn progress(&mut self, id: u64, done: usize, total: usize) {
         if let Some(j) = self.get_mut(id) {
             j.done_files = done;
@@ -666,9 +689,54 @@ impl JobQueue {
         }
     }
 
+    /// Mirrors live `EventBus` phase throughput into matching active catalog/modpack jobs.
+    pub fn update_active_throughput(&mut self, phase: &str, prog: &mq_core::PhaseProgress) {
+        let is_content_phase =
+            matches!(phase, "install_mods" | "install_cfpack" | "install_mrpack");
+        let is_modpack_game_phase = matches!(
+            phase,
+            "install_game" | "assets" | "libraries" | "java" | "client" | "natives"
+        );
+        let stage_text = match phase {
+            "install_mods" => Some("Скачивание контента"),
+            "install_cfpack" | "install_mrpack" => Some("Скачивание файлов сборки"),
+            "assets" => Some("Загрузка ассетов Minecraft"),
+            "libraries" => Some("Загрузка библиотек"),
+            "java" => Some("Установка Java"),
+            "client" => Some("Загрузка клиента Minecraft"),
+            "natives" => Some("Распаковка нативных библиотек"),
+            "install_game" => Some("Установка Minecraft и загрузчика"),
+            _ => None,
+        };
+        for j in &mut self.jobs {
+            if !j.is_active() {
+                continue;
+            }
+            let matches_job = match &j.retry {
+                Some(RetrySpec::Modpack { .. }) => is_content_phase || is_modpack_game_phase,
+                _ => is_content_phase,
+            };
+            if matches_job {
+                let done = (prog.completed_items as usize).min(prog.total_items.max(1) as usize);
+                if prog.total_items > 0 {
+                    j.done_files = done.max(j.done_files.min(prog.total_items as usize));
+                    j.total_files = j.total_files.max(prog.total_items as usize);
+                }
+                j.bytes_done = prog.bytes_done;
+                j.bytes_total = prog.bytes_total.max(j.bytes_total);
+                j.mib_per_sec = prog.mib_per_sec;
+                if let Some(st) = stage_text {
+                    j.stage_label = Some(st.to_string());
+                }
+            }
+        }
+    }
+
     /// Final state of a job; a cancel request wins over a generic error.
     pub fn finish(&mut self, id: u64, result: Result<(), String>) {
         if let Some(j) = self.get_mut(id) {
+            j.mib_per_sec = 0.0;
+            j.stage_label = None;
             j.status = match result {
                 Ok(()) => {
                     j.done_files = j.total_files;
@@ -691,6 +759,10 @@ impl JobQueue {
         j.cancel = Arc::new(AtomicBool::new(false));
         j.status = JobStatus::Running;
         j.done_files = 0;
+        j.bytes_done = 0;
+        j.bytes_total = 0;
+        j.mib_per_sec = 0.0;
+        j.stage_label = None;
         Some((j.cancel.clone(), spec))
     }
 

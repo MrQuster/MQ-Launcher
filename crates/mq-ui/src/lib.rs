@@ -16,6 +16,7 @@ pub mod catalog_state;
 pub mod catalog_view;
 pub mod catalog_worker;
 pub mod components;
+pub mod downloads_view;
 pub mod fonts;
 pub mod hud;
 pub mod i18n;

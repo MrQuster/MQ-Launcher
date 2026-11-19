@@ -6,15 +6,18 @@ use mq_core::GuiBackend;
 
 use crate::accounts_view::AccountsView;
 use crate::catalog_view::CatalogView;
+use crate::downloads_view::{DownloadsAction, DownloadsView};
 use crate::fonts::configure_system_fonts;
 use crate::hud::{is_zero_viewport, render_bottom_hud, BottomHudData};
-use crate::instances_view::InstancesView;
-use crate::perf_view::PerfView;
+use crate::instances_view::{InstanceDetailTab, InstanceViewMode, InstancesView};
+use crate::perf_view::{PerfAction, PerfView};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{
     build_app_icon, render_sidebar_with_state, sidebar_width, NavTab, SidebarAction, SidebarState,
 };
-use crate::state::{UiState, UiWorkerCommand, UiWorkerResponse};
+use crate::state::{
+    DownloadHistoryStatus, StorageStats, UiState, UiWorkerCommand, UiWorkerResponse,
+};
 use crate::theme::{
     apply_theme, paint_launcher_background, solid_hud_frame_with_config,
     solid_sidebar_frame_with_config, Tokens,
@@ -86,11 +89,201 @@ pub struct MqApp {
     pub current_tab: NavTab,
     pub instances_view: InstancesView,
     pub catalog_view: CatalogView,
+    pub downloads_view: DownloadsView,
     pub accounts_view: AccountsView,
     pub perf_view: PerfView,
     pub settings_view: SettingsView,
     pub recovery_journal: Option<mq_core::crash::InstallJournal>,
     pub frame_crash_message: Option<String>,
+}
+
+impl Drop for MqApp {
+    fn drop(&mut self) {
+        if let Some(ref stop) = self.state.telemetry_stop {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn dir_size_and_files(root: &std::path::Path) -> (u64, usize) {
+    if !root.exists() {
+        return (0, 0);
+    }
+    let mut total_bytes = 0u64;
+    let mut total_files = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                total_files = total_files.saturating_add(1);
+                if let Ok(meta) = entry.metadata() {
+                    total_bytes = total_bytes.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    (total_bytes, total_files)
+}
+
+fn scan_storage_stats(paths: &mq_core::MqPaths) -> StorageStats {
+    let (cas_bytes, cas_files) = dir_size_and_files(&paths.cas_dir());
+    let (instances_bytes, _) = dir_size_and_files(&paths.instances_dir());
+    let assets_libs_bytes = dir_size_and_files(&paths.assets_dir())
+        .0
+        .saturating_add(dir_size_and_files(&paths.libraries_dir()).0)
+        .saturating_add(dir_size_and_files(&paths.versions_dir()).0);
+    let (java_bytes, _) = dir_size_and_files(&paths.java_dir());
+
+    let mut temp_dirs: Vec<std::path::PathBuf> = Vec::new();
+    for candidate in [
+        paths.temp_dir(),
+        paths.cache_dir.clone(),
+        paths.data_dir.join("cache"),
+        paths.logs_dir(),
+    ] {
+        let norm = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        if !temp_dirs.contains(&norm) {
+            temp_dirs.push(norm);
+        }
+    }
+    let temp_logs_bytes = temp_dirs
+        .iter()
+        .map(|p| dir_size_and_files(p).0)
+        .fold(0u64, u64::saturating_add);
+
+    let total_bytes = cas_bytes
+        .saturating_add(instances_bytes)
+        .saturating_add(assets_libs_bytes)
+        .saturating_add(java_bytes)
+        .saturating_add(temp_logs_bytes);
+
+    StorageStats {
+        total_bytes,
+        cas_bytes,
+        cas_files,
+        instances_bytes,
+        assets_libs_bytes,
+        java_bytes,
+        temp_logs_bytes,
+        scanned_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+    }
+}
+
+fn clean_dir_tree(
+    root: &std::path::Path,
+    preserve_names: &[&str],
+    only_temp_artifacts: bool,
+) -> (usize, u64) {
+    if !root.is_dir() {
+        return (0, 0);
+    }
+    let mut removed_files = 0usize;
+    let mut freed_bytes = 0u64;
+    let mut dirs_to_prune = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if ft.is_dir() {
+                stack.push(path.clone());
+                if !only_temp_artifacts {
+                    dirs_to_prune.push(path);
+                }
+            } else if ft.is_file() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if preserve_names.iter().any(|p| *p == name_str.as_ref()) {
+                    continue;
+                }
+                let should_remove = if only_temp_artifacts {
+                    name_str.ends_with(".part")
+                        || name_str.contains(".tmp.")
+                        || name_str.contains(".tmp_")
+                } else {
+                    true
+                };
+                if !should_remove {
+                    continue;
+                }
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if std::fs::remove_file(&path).is_ok() {
+                    removed_files = removed_files.saturating_add(1);
+                    freed_bytes = freed_bytes.saturating_add(size);
+                }
+            }
+        }
+    }
+
+    for dir in dirs_to_prune.into_iter().rev() {
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    (removed_files, freed_bytes)
+}
+
+fn clean_temp_cache(paths: &mq_core::MqPaths, skip_active_temp: bool) -> (usize, u64) {
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+
+    if !skip_active_temp {
+        let (r, f) = clean_dir_tree(&paths.temp_dir(), &[], false);
+        removed = removed.saturating_add(r);
+        freed = freed.saturating_add(f);
+    }
+
+    let cache_norm =
+        std::fs::canonicalize(&paths.cache_dir).unwrap_or_else(|_| paths.cache_dir.clone());
+    let data_cache = paths.data_dir.join("cache");
+    let data_cache_norm = std::fs::canonicalize(&data_cache).unwrap_or(data_cache);
+
+    let (r, f) = clean_dir_tree(&paths.cache_dir, &["authlib-injector.jar"], false);
+    removed = removed.saturating_add(r);
+    freed = freed.saturating_add(f);
+
+    if data_cache_norm != cache_norm {
+        let (r, f) = clean_dir_tree(&data_cache_norm, &["authlib-injector.jar"], true);
+        removed = removed.saturating_add(r);
+        freed = freed.saturating_add(f);
+    }
+
+    if !skip_active_temp {
+        for root in [
+            paths.versions_dir(),
+            paths.libraries_dir(),
+            paths.assets_dir(),
+        ] {
+            let (r, f) = clean_dir_tree(&root, &[], true);
+            removed = removed.saturating_add(r);
+            freed = freed.saturating_add(f);
+        }
+    }
+
+    let (r, f) = clean_dir_tree(&paths.config_dir, &[], true);
+    removed = removed.saturating_add(r);
+    freed = freed.saturating_add(f);
+
+    (removed, freed)
 }
 
 /// Spawns a background worker future and monitors it for panics or crashes.
@@ -143,12 +336,84 @@ fn spawn_monitored_task<F>(
 }
 
 impl MqApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, state: UiState) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, mut state: UiState) -> Self {
         apply_theme(&cc.egui_ctx, &state.config.theme);
         configure_system_fonts(&cc.egui_ctx);
         crate::theme::init_wgpu_liquid_glass(cc);
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::init_for_context(&cc.egui_ctx, &state.paths);
+
+        state.gpu_backend_label = if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            let info = rs.adapter.get_info();
+            if info.name.is_empty() {
+                format!("wgpu ({})", info.backend)
+            } else {
+                format!("wgpu ({} · {})", info.backend, info.name)
+            }
+        } else if cc.gl.is_some() {
+            "glow (OpenGL)".to_string()
+        } else {
+            "Software".to_string()
+        };
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.telemetry_stop = Some(std::sync::Arc::clone(&stop));
+        let event_bus = state.event_bus.clone();
+        let resp_tx = state.resp_sender.clone();
+        let egui_ctx = cc.egui_ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("mq-telemetry".to_string())
+            .spawn(move || {
+                let mut sampler = mq_sched::telemetry::CpuSampler::new().ok();
+                let mut first = true;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let sleep_ms = if first { 200 } else { 1000 };
+                    first = false;
+                    for _ in 0..(sleep_ms / 100) {
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+
+                    let mut peak_rss_mib = mq_sched::telemetry::read_peak_rss_mib();
+                    if let Some(sample) = sampler.as_mut().and_then(|s| s.sample().ok()) {
+                        peak_rss_mib = peak_rss_mib.max(sample.peak_rss_mib);
+                        let snap = mq_core::CpuSnapshot {
+                            total_pct: sample.total_pct,
+                            per_core: sample
+                                .per_core_pct
+                                .into_iter()
+                                .enumerate()
+                                .map(|(core_id, usage_pct)| mq_core::CoreCpuLoad {
+                                    core_id,
+                                    usage_pct,
+                                })
+                                .collect(),
+                            rss_mib: sample.rss_mib,
+                        };
+                        event_bus.publish(mq_core::Event::CpuTelemetry(snap));
+                    } else {
+                        let rss_mib = mq_sched::telemetry::read_current_rss_mib();
+                        peak_rss_mib = peak_rss_mib.max(rss_mib);
+                        event_bus.publish(mq_core::Event::CpuTelemetry(mq_core::CpuSnapshot {
+                            total_pct: 0.0,
+                            per_core: Vec::new(),
+                            rss_mib,
+                        }));
+                    }
+                    let open_fds = mq_sched::telemetry::count_open_fds();
+                    let _ = resp_tx.try_send(UiWorkerResponse::TelemetryExtra {
+                        peak_rss_mib,
+                        open_fds,
+                    });
+                    egui_ctx.request_repaint();
+                }
+            });
+
         Self::from_state(state)
     }
 
@@ -164,6 +429,7 @@ impl MqApp {
             current_tab,
             instances_view: InstancesView::default(),
             catalog_view: CatalogView::default(),
+            downloads_view: DownloadsView,
             accounts_view: AccountsView::default(),
             perf_view: PerfView,
             settings_view: SettingsView::default(),
@@ -455,149 +721,13 @@ impl MqApp {
                         });
                     });
                 }
-                UiWorkerCommand::VerifyInstance { instance_id }
-                | UiWorkerCommand::VerifyAndRepairInstance { instance_id } => {
-                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
-                    let resolved_path = inst_dir.join("resolved_version.json");
-                    let paths = self.state.paths.clone();
-                    let net = self.state.net.clone();
-                    let cas = self.state.cas.clone();
-                    let pool = self.state.compute_pool.clone();
-                    let guard = self.state.cancel_epoch.snapshot();
-                    let bus = self.state.event_bus.clone();
-                    let resp_tx = self.state.resp_sender.clone();
-                    let inst_opt = self
-                        .state
-                        .instances
-                        .iter()
-                        .find(|i| i.id == instance_id)
-                        .cloned();
-
-                    let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
-                        instance_id.clone(),
-                    ));
-
-                    spawn_monitored_task(
-                        "verify_instance",
-                        paths.clone(),
-                        instance_id.clone(),
-                        resp_tx.clone(),
-                        async move {
-                            bus.publish(mq_core::Event::PhaseStarted {
-                                phase: "verify".to_string(),
-                                total_items: 100,
-                            });
-
-                            let mut verified_ok = false;
-                            if let Ok(bytes) = std::fs::read(&resolved_path) {
-                                if let Ok(ver) =
-                                    serde_json::from_slice::<mq_meta::ResolvedVersion>(&bytes)
-                                {
-                                    let asset_index_path = paths
-                                        .assets_dir()
-                                        .join("indexes")
-                                        .join(format!("{}.json", ver.asset_index.id));
-                                    if let Ok(idx_bytes) = std::fs::read(&asset_index_path) {
-                                        if let Ok(idx) = serde_json::from_slice::<mq_meta::AssetIndex>(
-                                            &idx_bytes,
-                                        ) {
-                                            let targets =
-                                                mq_install::collect_instance_verify_targets(
-                                                    &paths, &inst_dir, &ver, &idx,
-                                                );
-                                            match mq_install::verify_files_parallel(
-                                                &targets,
-                                                &pool,
-                                                &guard,
-                                                Some(&bus),
-                                            )
-                                            .await
-                                            {
-                                                Ok(report) => {
-                                                    if report.is_clean() {
-                                                        bus.publish(
-                                                            mq_core::Event::PhaseCompleted {
-                                                                phase: "verify".to_string(),
-                                                                elapsed_ms: report.elapsed_ms,
-                                                            },
-                                                        );
-                                                        let _ = resp_tx.send(
-                                                        UiWorkerResponse::InstanceInstallCompleted(
-                                                            instance_id.clone(),
-                                                        ),
-                                                    );
-                                                        verified_ok = true;
-                                                    } else {
-                                                        for corrupt in &report.corrupted_files {
-                                                            let _ = std::fs::remove_file(corrupt);
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    bus.publish(mq_core::Event::TaskError {
-                                                        context: "Проверка файлов".to_string(),
-                                                        message: e.to_string(),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if !verified_ok {
-                                if let Some(inst) = inst_opt {
-                                    let req = mq_install::InstallRequest {
-                                        mc_version: inst.mc_version.clone(),
-                                        loader: inst.loader,
-                                        loader_version: inst.loader_version.clone(),
-                                        instance_dir: inst_dir.clone(),
-                                        mock_base_url: configured_mock_base_url(),
-                                    };
-
-                                    match mq_install::install_game(
-                                        &req,
-                                        &paths,
-                                        &net,
-                                        &cas,
-                                        &pool,
-                                        &guard,
-                                        Some(&bus),
-                                    )
-                                    .await
-                                    {
-                                        Ok(summary) => {
-                                            bus.publish(mq_core::Event::PhaseCompleted {
-                                                phase: "verify_and_repair".to_string(),
-                                                elapsed_ms: summary.elapsed_ms,
-                                            });
-                                            let _ = resp_tx.send(
-                                                UiWorkerResponse::InstanceInstallCompleted(
-                                                    instance_id.clone(),
-                                                ),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            let err_msg =
-                                                format!("Ошибка починки {}: {e}", inst.name);
-                                            bus.publish(mq_core::Event::TaskError {
-                                                context: format!("Починка {}", inst.name),
-                                                message: e.to_string(),
-                                            });
-                                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                                instance_id,
-                                                error: err_msg,
-                                            });
-                                        }
-                                    }
-                                } else {
-                                    let _ = resp_tx.send(
-                                        UiWorkerResponse::InstanceInstallCompleted(instance_id),
-                                    );
-                                }
-                            }
-                        },
-                    );
+                UiWorkerCommand::VerifyInstance { instance_id } => {
+                    self.state.installing_operation = Some("Проверка файлов".to_string());
+                    self.spawn_verify_instance(instance_id);
+                }
+                UiWorkerCommand::VerifyAndRepairInstance { instance_id } => {
+                    self.state.installing_operation = Some("Проверка и починка".to_string());
+                    self.spawn_verify_instance(instance_id);
                 }
                 UiWorkerCommand::ReinstallInstance { instance_id } => {
                     let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
@@ -616,6 +746,8 @@ impl MqApp {
                         .find(|i| i.id == instance_id)
                         .cloned()
                     {
+                        self.state.installing_operation =
+                            Some("Переустановка инстанса".to_string());
                         // Safely remove game binaries and temporary directories while preserving
                         // user saves/, options.txt, resourcepacks/, shaderpacks/, and servers.dat!
                         let _ = std::fs::remove_file(inst_dir.join("client.jar"));
@@ -663,6 +795,9 @@ impl MqApp {
                                         );
                                     }
                                     Err(e) => {
+                                        if guard.is_cancelled() {
+                                            return;
+                                        }
                                         let err_msg =
                                             format!("Ошибка переустановки {}: {e}", inst.name);
                                         bus.publish(mq_core::Event::TaskError {
@@ -691,9 +826,36 @@ impl MqApp {
                 }
                 UiWorkerCommand::CancelDownload => {
                     self.state.cancel_epoch.cancel_and_advance();
-                    self.state.installing_instance = None;
+                    for job in &self.state.jobs.jobs {
+                        if job.is_active() {
+                            job.request_cancel();
+                        }
+                    }
+                    let cancelled_inst = self.state.installing_instance.take();
+                    let op = self
+                        .state
+                        .installing_operation
+                        .take()
+                        .unwrap_or_else(|| "Установка инстанса".to_string());
+                    if let Some(inst_id) = cancelled_inst {
+                        let inst_title = self
+                            .state
+                            .instances
+                            .iter()
+                            .find(|i| i.id == inst_id)
+                            .map_or_else(|| inst_id.as_str().to_string(), |i| i.name.clone());
+                        self.state.record_download_history(
+                            inst_title,
+                            "Инстанс",
+                            format!("{op} · отменено"),
+                            DownloadHistoryStatus::Cancelled,
+                            Some(inst_id),
+                        );
+                        self.state.is_launching = false;
+                    }
                     self.state.active_phase = None;
                     self.state.phase_progress = None;
+                    self.state.install_eta_secs = None;
                     self.state.status_message =
                         Some(("Загрузка отменена пользователем".to_string(), false));
                 }
@@ -714,6 +876,7 @@ impl MqApp {
                         .find(|i| i.id == instance_id)
                         .cloned()
                     {
+                        self.state.installing_operation = Some("Установка инстанса".to_string());
                         let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
                             instance_id.clone(),
                         ));
@@ -752,6 +915,9 @@ impl MqApp {
                                         );
                                     }
                                     Err(e) => {
+                                        if guard.is_cancelled() {
+                                            return;
+                                        }
                                         let err_msg =
                                             format!("Ошибка установки {}: {e}", inst.name);
                                         bus.publish(mq_core::Event::TaskError {
@@ -843,6 +1009,9 @@ impl MqApp {
                                             );
                                         }
                                         Err(e) => {
+                                            if guard.is_cancelled() {
+                                                return;
+                                            }
                                             let err_msg = format!(
                                                 "Ошибка скачивания инстанса {}: {e}",
                                                 inst.name
@@ -1215,11 +1384,18 @@ impl MqApp {
                     let ctx = self.ops_ctx();
                     let resp_tx = self.state.resp_sender.clone();
                     tokio::spawn(async move {
+                        let tx = resp_tx.clone();
                         let result = crate::catalog_ops::run_modpack_job(
                             &ctx,
                             &cancel,
                             &instance_name,
                             &preview,
+                            move |stage| {
+                                let _ = tx.send(UiWorkerResponse::JobStage {
+                                    job_id,
+                                    stage_label: stage.to_string(),
+                                });
+                            },
                         )
                         .await
                         .map(|(id, blocked)| crate::state::JobOutput {
@@ -1257,8 +1433,294 @@ impl MqApp {
                         let _ = resp_tx.send(UiWorkerResponse::ImportArchivePicked(picked));
                     });
                 }
+                UiWorkerCommand::ScanStorageStats => {
+                    self.state.is_scanning_storage = true;
+                    let paths = self.state.paths.clone();
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let stats = tokio::task::spawn_blocking(move || scan_storage_stats(&paths))
+                            .await
+                            .unwrap_or_default();
+                        let _ = resp_tx.send(UiWorkerResponse::StorageStatsReady(stats));
+                    });
+                }
+                UiWorkerCommand::CleanTempCache => {
+                    let paths = self.state.paths.clone();
+                    let resp_tx = self.state.resp_sender.clone();
+                    let skip_active_temp = self.state.active_download_count() > 0;
+                    tokio::spawn(async move {
+                        let (removed_files, freed_bytes) = tokio::task::spawn_blocking(move || {
+                            clean_temp_cache(&paths, skip_active_temp)
+                        })
+                        .await
+                        .unwrap_or((0, 0));
+                        let _ = resp_tx.send(UiWorkerResponse::TempCacheCleaned {
+                            removed_files,
+                            freed_bytes,
+                        });
+                    });
+                }
                 _ => {}
             }
+        }
+    }
+
+    fn spawn_verify_instance(&mut self, instance_id: mq_core::InstanceId) {
+        let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+        let resolved_path = inst_dir.join("resolved_version.json");
+        let paths = self.state.paths.clone();
+        let net = self.state.net.clone();
+        let cas = self.state.cas.clone();
+        let pool = self.state.compute_pool.clone();
+        let guard = self.state.cancel_epoch.snapshot();
+        let bus = self.state.event_bus.clone();
+        let resp_tx = self.state.resp_sender.clone();
+        let inst_opt = self
+            .state
+            .instances
+            .iter()
+            .find(|i| i.id == instance_id)
+            .cloned();
+
+        let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
+            instance_id.clone(),
+        ));
+
+        spawn_monitored_task(
+            "verify_instance",
+            paths.clone(),
+            instance_id.clone(),
+            resp_tx.clone(),
+            async move {
+                bus.publish(mq_core::Event::PhaseStarted {
+                    phase: "verify".to_string(),
+                    total_items: 100,
+                });
+
+                let mut verified_ok = false;
+                if let Ok(bytes) = std::fs::read(&resolved_path) {
+                    if let Ok(ver) = serde_json::from_slice::<mq_meta::ResolvedVersion>(&bytes) {
+                        let asset_index_path = paths
+                            .assets_dir()
+                            .join("indexes")
+                            .join(format!("{}.json", ver.asset_index.id));
+                        if let Ok(idx_bytes) = std::fs::read(&asset_index_path) {
+                            if let Ok(idx) =
+                                serde_json::from_slice::<mq_meta::AssetIndex>(&idx_bytes)
+                            {
+                                let targets = mq_install::collect_instance_verify_targets(
+                                    &paths, &inst_dir, &ver, &idx,
+                                );
+                                match mq_install::verify_files_parallel(
+                                    &targets,
+                                    &pool,
+                                    &guard,
+                                    Some(&bus),
+                                )
+                                .await
+                                {
+                                    Ok(report) => {
+                                        if report.is_clean() {
+                                            bus.publish(mq_core::Event::PhaseCompleted {
+                                                phase: "verify".to_string(),
+                                                elapsed_ms: report.elapsed_ms,
+                                            });
+                                            let _ = resp_tx.send(
+                                                UiWorkerResponse::InstanceInstallCompleted(
+                                                    instance_id.clone(),
+                                                ),
+                                            );
+                                            verified_ok = true;
+                                        } else {
+                                            for corrupt in &report.corrupted_files {
+                                                let _ = std::fs::remove_file(corrupt);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if guard.is_cancelled() {
+                                            return;
+                                        }
+                                        bus.publish(mq_core::Event::TaskError {
+                                            context: "Проверка файлов".to_string(),
+                                            message: e.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if guard.is_cancelled() {
+                    return;
+                }
+
+                if !verified_ok {
+                    if let Some(inst) = inst_opt {
+                        let req = mq_install::InstallRequest {
+                            mc_version: inst.mc_version.clone(),
+                            loader: inst.loader,
+                            loader_version: inst.loader_version.clone(),
+                            instance_dir: inst_dir.clone(),
+                            mock_base_url: configured_mock_base_url(),
+                        };
+
+                        match mq_install::install_game(
+                            &req,
+                            &paths,
+                            &net,
+                            &cas,
+                            &pool,
+                            &guard,
+                            Some(&bus),
+                        )
+                        .await
+                        {
+                            Ok(summary) => {
+                                bus.publish(mq_core::Event::PhaseCompleted {
+                                    phase: "verify_and_repair".to_string(),
+                                    elapsed_ms: summary.elapsed_ms,
+                                });
+                                let _ = resp_tx.send(UiWorkerResponse::InstanceInstallCompleted(
+                                    instance_id.clone(),
+                                ));
+                            }
+                            Err(e) => {
+                                if guard.is_cancelled() {
+                                    return;
+                                }
+                                let err_msg = format!("Ошибка починки {}: {e}", inst.name);
+                                bus.publish(mq_core::Event::TaskError {
+                                    context: format!("Починка {}", inst.name),
+                                    message: e.to_string(),
+                                });
+                                let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                    instance_id,
+                                    error: err_msg,
+                                });
+                            }
+                        }
+                    } else {
+                        let _ =
+                            resp_tx.send(UiWorkerResponse::InstanceInstallCompleted(instance_id));
+                    }
+                }
+            },
+        );
+    }
+
+    fn build_sidebar_state(&self) -> SidebarState {
+        SidebarState {
+            active_downloads: self.state.active_download_count(),
+            update_available: self.settings_view.available_update.is_some(),
+        }
+    }
+
+    fn build_hud_data(&self) -> BottomHudData {
+        let active_jobs: Vec<_> = self
+            .state
+            .jobs
+            .jobs
+            .iter()
+            .filter(|j| j.is_active())
+            .collect();
+        let job_mib_per_sec: f64 = active_jobs
+            .iter()
+            .map(|j| j.mib_per_sec)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .sum();
+
+        let (progress_fraction, files_per_sec, mib_per_sec) =
+            if let Some(p) = &self.state.phase_progress {
+                let frac = if p.total_items > 0 {
+                    Some(crate::state::safe_progress_ratio(
+                        p.completed_items,
+                        p.total_items,
+                    ))
+                } else if p.bytes_total > 0 {
+                    Some(crate::state::safe_progress_ratio(
+                        p.bytes_done,
+                        p.bytes_total,
+                    ))
+                } else {
+                    active_jobs.first().map(|j| j.progress())
+                };
+                let fps = if p.files_per_sec.is_finite() && p.files_per_sec >= 0.0 {
+                    p.files_per_sec
+                } else {
+                    0.0
+                };
+                let mps = if p.mib_per_sec.is_finite() && p.mib_per_sec > 0.0 {
+                    p.mib_per_sec
+                } else {
+                    job_mib_per_sec
+                };
+                (frac, fps, mps)
+            } else if !active_jobs.is_empty() {
+                let done: usize = active_jobs.iter().map(|j| j.done_files).sum();
+                let total: usize = active_jobs.iter().map(|j| j.total_files).sum();
+                let frac = if total > 0 {
+                    Some(crate::state::safe_progress_ratio(done as u64, total as u64))
+                } else {
+                    active_jobs.first().map(|j| j.progress())
+                };
+                (frac, 0.0, job_mib_per_sec)
+            } else {
+                (None, 0.0, 0.0)
+            };
+
+        let phase_tasks = self
+            .state
+            .phase_progress
+            .as_ref()
+            .map(|p| p.active_tasks)
+            .unwrap_or(0);
+        let active_dag_tasks = phase_tasks.max(self.state.active_download_count());
+
+        BottomHudData {
+            active_phase: self.state.active_hud_phase_label(),
+            progress_fraction,
+            files_per_sec,
+            mib_per_sec,
+            active_dag_tasks,
+            cpu_snapshot: self.state.latest_cpu.clone(),
+            watchdog_violations: self.state.watchdog.violation_count(),
+        }
+    }
+
+    fn render_active_tab(&mut self, ui: &mut egui::Ui) {
+        match self.current_tab {
+            NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
+            NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
+            NavTab::Accounts => self.accounts_view.ui(ui, &mut self.state),
+            NavTab::Downloads => {
+                if let Some(action) = self.downloads_view.ui(ui, &mut self.state) {
+                    match action {
+                        DownloadsAction::OpenCatalog => {
+                            self.current_tab = NavTab::Catalog;
+                        }
+                        DownloadsAction::OpenInstance(inst_id) => {
+                            self.state.selected_instance_id = Some(inst_id);
+                            self.instances_view.view_mode = InstanceViewMode::List;
+                            self.current_tab = NavTab::Instances;
+                        }
+                    }
+                }
+            }
+            NavTab::Performance => {
+                if let Some(action) = self.perf_view.ui(ui, &mut self.state) {
+                    match action {
+                        PerfAction::OpenInstanceConsole(inst_id) => {
+                            self.state.selected_instance_id = Some(inst_id);
+                            self.instances_view.view_mode = InstanceViewMode::List;
+                            self.instances_view.current_tab = InstanceDetailTab::Console;
+                            self.current_tab = NavTab::Instances;
+                        }
+                    }
+                }
+            }
+            NavTab::Settings => self.settings_view.ui(ui, &mut self.state),
         }
     }
 
@@ -1324,15 +1786,7 @@ impl MqApp {
         let full_window_glass =
             Self::paint_full_window_glass_backdrop(ctx, &effective_theme, &tokens);
 
-        let sidebar_state = SidebarState {
-            active_downloads: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.active_tasks)
-                .unwrap_or(0),
-            update_available: self.settings_view.available_update.is_some(),
-        };
+        let sidebar_state = self.build_sidebar_state();
 
         SidePanel::left("mq_sidebar")
             .resizable(false)
@@ -1353,34 +1807,7 @@ impl MqApp {
                 );
             });
 
-        let hud_data = BottomHudData {
-            active_phase: self.state.active_phase.clone(),
-            progress_fraction: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| crate::state::safe_progress_ratio(p.completed_items, p.total_items)),
-            files_per_sec: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.files_per_sec)
-                .unwrap_or(0.0),
-            mib_per_sec: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.mib_per_sec)
-                .unwrap_or(0.0),
-            active_dag_tasks: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.active_tasks)
-                .unwrap_or(0),
-            cpu_snapshot: self.state.latest_cpu.clone(),
-            watchdog_violations: self.state.watchdog.violation_count(),
-        };
+        let hud_data = self.build_hud_data();
 
         TopBottomPanel::bottom("mq_hud")
             .frame(solid_hud_frame_with_config(
@@ -1400,13 +1827,7 @@ impl MqApp {
                 let bg_painter = ui.painter().with_clip_rect(bg_rect);
                 paint_launcher_background(ctx, &bg_painter, bg_rect, &effective_theme, &tokens);
             }
-            match self.current_tab {
-                NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
-                NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
-                NavTab::Accounts => self.accounts_view.ui(ui, &mut self.state),
-                NavTab::Downloads | NavTab::Performance => self.perf_view.ui(ui, &self.state),
-                NavTab::Settings => self.settings_view.ui(ui, &mut self.state),
-            }
+            self.render_active_tab(ui);
         });
     }
     #[cfg(feature = "test-hooks")]
@@ -1748,15 +2169,7 @@ impl MqApp {
         let full_window_glass =
             Self::paint_full_window_glass_backdrop(ctx, &effective_theme, &tokens);
 
-        let sidebar_state = SidebarState {
-            active_downloads: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.active_tasks)
-                .unwrap_or(0),
-            update_available: self.settings_view.available_update.is_some(),
-        };
+        let sidebar_state = self.build_sidebar_state();
         SidePanel::left("mq_sidebar")
             .resizable(false)
             .exact_width(sidebar_width(ctx))
@@ -1792,34 +2205,7 @@ impl MqApp {
         }
 
         // 2. Bottom HUD (Bottom)
-        let hud_data = BottomHudData {
-            active_phase: self.state.active_phase.clone(),
-            progress_fraction: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| crate::state::safe_progress_ratio(p.completed_items, p.total_items)),
-            files_per_sec: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.files_per_sec)
-                .unwrap_or(0.0),
-            mib_per_sec: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.mib_per_sec)
-                .unwrap_or(0.0),
-            active_dag_tasks: self
-                .state
-                .phase_progress
-                .as_ref()
-                .map(|p| p.active_tasks)
-                .unwrap_or(0),
-            cpu_snapshot: self.state.latest_cpu.clone(),
-            watchdog_violations: self.state.watchdog.violation_count(),
-        };
+        let hud_data = self.build_hud_data();
 
         TopBottomPanel::bottom("mq_hud")
             .frame(solid_hud_frame_with_config(
@@ -1846,13 +2232,7 @@ impl MqApp {
                 self.current_tab,
                 self.current_tab.shortcut_index() as i32,
                 false,
-                |ui| match self.current_tab {
-                    NavTab::Instances => self.instances_view.ui(ui, &mut self.state),
-                    NavTab::Catalog => self.catalog_view.ui(ui, &mut self.state),
-                    NavTab::Accounts => self.accounts_view.ui(ui, &mut self.state),
-                    NavTab::Downloads | NavTab::Performance => self.perf_view.ui(ui, &self.state),
-                    NavTab::Settings => self.settings_view.ui(ui, &mut self.state),
-                },
+                |ui| self.render_active_tab(ui),
             );
         });
 
@@ -1866,9 +2246,17 @@ impl MqApp {
             &self.state.status_message,
         );
 
-        // Request next frame repaint if an operation is active
-        if self.state.active_phase.is_some() || self.state.game_running {
+        // Request smooth immediate repaints when active, or 1 Hz idle refresh for live telemetry
+        if self.state.active_phase.is_some()
+            || self.state.game_running
+            || self.state.installing_instance.is_some()
+            || self.state.jobs.active_count() > 0
+            || self.state.is_launching
+            || self.state.is_scanning_storage
+        {
             ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(1000));
         }
 
         #[cfg(feature = "test-hooks")]
@@ -1877,6 +2265,7 @@ impl MqApp {
 
     /// Primary entry point for rendering a complete frame with catch_unwind and fallback screen.
     pub fn render_frame(&mut self, ctx: &egui::Context) {
+        let frame_start = std::time::Instant::now();
         let watchdog = self.state.watchdog.clone();
         let _guard = watchdog.guard("mq_frame_update");
 
@@ -1988,6 +2377,9 @@ impl MqApp {
             self.frame_crash_message = Some(panic_msg);
             ctx.request_repaint();
         }
+
+        let elapsed_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        self.state.record_frame_time_ms(elapsed_ms);
     }
 }
 
@@ -2225,5 +2617,83 @@ mod tests {
         );
         let crash_text = std::fs::read_to_string(&crash_latest).expect("read crash log");
         assert!(crash_text.contains("Умышленная ошибка внутри фоновой задачи"));
+    }
+
+    #[test]
+    fn scan_and_clean_storage_stats_preserve_core_data() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = mq_core::MqPaths::with_root(tmp.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+
+        let cas_blob = paths.cas_sha1_path("0123456789abcdef0123456789abcdef01234567");
+        std::fs::create_dir_all(cas_blob.parent().unwrap()).unwrap();
+        std::fs::write(&cas_blob, vec![1u8; 100]).unwrap();
+
+        let inst_file = paths.instance_dir("demo").join("client.jar");
+        std::fs::create_dir_all(inst_file.parent().unwrap()).unwrap();
+        std::fs::write(&inst_file, vec![2u8; 200]).unwrap();
+
+        let lib_file = paths.libraries_dir().join("lib.jar");
+        std::fs::write(&lib_file, vec![3u8; 50]).unwrap();
+
+        let java_file = paths.java_dir().join("bin");
+        std::fs::write(&java_file, vec![4u8; 25]).unwrap();
+
+        let temp_file = paths.temp_dir().join("staged.mrpack");
+        std::fs::write(&temp_file, vec![5u8; 40]).unwrap();
+
+        let icon_file = paths.cache_dir.join("catalog-icons").join("a.png");
+        std::fs::create_dir_all(icon_file.parent().unwrap()).unwrap();
+        std::fs::write(&icon_file, vec![6u8; 30]).unwrap();
+
+        let authlib = paths.authlib_injector_jar();
+        std::fs::create_dir_all(authlib.parent().unwrap()).unwrap();
+        std::fs::write(&authlib, vec![7u8; 15]).unwrap();
+
+        let stats = scan_storage_stats(&paths);
+        assert_eq!(stats.cas_bytes, 100);
+        assert_eq!(stats.cas_files, 1);
+        assert_eq!(stats.instances_bytes, 200);
+        assert_eq!(stats.assets_libs_bytes, 50);
+        assert_eq!(stats.java_bytes, 25);
+        assert_eq!(stats.temp_logs_bytes, 40 + 30 + 15);
+        assert_eq!(stats.total_bytes, 100 + 200 + 50 + 25 + 85);
+
+        let (removed, freed) = clean_temp_cache(&paths, false);
+        assert_eq!(removed, 2);
+        assert_eq!(freed, 70);
+        assert!(!temp_file.exists());
+        assert!(!icon_file.exists());
+        assert!(authlib.is_file(), "authlib-injector.jar must be preserved");
+        assert!(cas_blob.is_file(), "CAS blobs must be preserved");
+        assert!(inst_file.is_file(), "Instance files must be preserved");
+    }
+
+    #[test]
+    fn cancel_download_records_history_and_clears_operation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = mq_core::MqPaths::with_root(tmp.path().to_path_buf());
+        let config = mq_core::AppConfig::default();
+        let pool = std::sync::Arc::new(mq_sched::ComputePool::new(2));
+        let mut state = UiState::new(paths, config, pool).expect("ui state");
+
+        let inst_id = mq_core::InstanceId::new("demo-inst").expect("valid id");
+        state.installing_instance = Some(inst_id.clone());
+        state.installing_operation = Some("Проверка файлов".to_string());
+        let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
+
+        let mut app = MqApp::from_state(state);
+        app.handle_worker_commands();
+
+        assert!(app.state.installing_instance.is_none());
+        assert!(app.state.installing_operation.is_none());
+        assert_eq!(app.state.download_history.len(), 1);
+        assert_eq!(
+            app.state.download_history[0].status,
+            DownloadHistoryStatus::Cancelled
+        );
+        assert!(app.state.download_history[0]
+            .detail
+            .contains("Проверка файлов"));
     }
 }

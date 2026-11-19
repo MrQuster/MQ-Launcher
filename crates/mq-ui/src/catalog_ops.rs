@@ -610,6 +610,7 @@ pub async fn run_modpack_job(
     cancel: &AtomicBool,
     instance_name: &str,
     preview: &ModpackPreview,
+    on_stage: impl Fn(&str),
 ) -> Result<(InstanceId, Vec<BlockedDownload>), String> {
     if cancel.load(Ordering::SeqCst) {
         return Err("Отменено".to_string());
@@ -617,6 +618,7 @@ pub async fn run_modpack_job(
     if preview.mc_version.trim().is_empty() {
         return Err("В манифесте сборки не указана версия Minecraft".to_string());
     }
+    on_stage("Создание инстанса");
     let mgr = mq_instances::InstanceManager::new(ctx.paths.clone());
     let manifest = mgr
         .create_instance(
@@ -637,6 +639,7 @@ pub async fn run_modpack_job(
         .to_string();
 
     let result: Result<Vec<BlockedDownload>, String> = async {
+        on_stage("Скачивание файлов сборки");
         let blocked = if is_mrpack(&name) {
             mq_mods::install_mrpack(
                 &archive,
@@ -670,6 +673,7 @@ pub async fn run_modpack_job(
             return Err("Отменено".to_string());
         }
 
+        on_stage("Установка Minecraft и загрузчика");
         // Install Minecraft, mod loader (Fabric/Quilt/Forge/NeoForge), and compatible Java runtime.
         let req = mq_install::InstallRequest {
             mc_version: preview.mc_version.clone(),

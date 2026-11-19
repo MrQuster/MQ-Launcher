@@ -5,6 +5,15 @@
 
 ---
 
+## [v2.7.2] — 2026-11-19 ("Downloads, Performance & Mod Conflicts")
+
+### Добавлено и улучшено / Added and improved
+- **Вкладка «Загрузки» / Downloads tab (`downloads_view.rs`):** активные установки, очередь модов и сборок с этапами, скоростью и ETA, ручные загрузки, график скорости и история сессии. / Active installs, content/modpack queue with stages, speed and ETA, manual downloads, live speed chart and session history.
+- **Производительность и диагностика / Performance live telemetry & diagnostics (`perf_view.rs`, `hud.rs`):** CPU, память, время кадра, нагрузка по ядрам, запущенные игры, настройки и статистика диска/кэша с очисткой. / CPU, memory, frame time, per-core load, running games, tuning, storage stats and temp cache cleanup.
+- **Конфликты модов / Mod conflict detection (`mq-mods/scanner.rs`):** исправлен разбор Forge 1.7.10–1.12.2 `mcmod.info`, `mods.toml`/NeoForge, Fabric/Quilt (`provides`, `breaks`, optional), Jar-in-Jar и `MANIFEST.MF`; новый тип `IncompatibleMod`; кнопка «Найти в каталоге» для недостающих зависимостей. / Fixed Forge 1.12.2 `mcmod.info`, NeoForge, Fabric/Quilt, JiJ and `MANIFEST.MF` parsing; new `IncompatibleMod`; "Find in catalog" for missing dependencies.
+
+---
+
 ## [v2.7.1] — 2026-11-19 ("Smooth Spring Animations & UI Transitions")
 
 ### Добавлено и улучшено

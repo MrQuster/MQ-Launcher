@@ -25,6 +25,44 @@ use crate::install_types::{InstallError, InstallStage};
 /// Max lines retained in memory for live game log console (10,000 lines).
 pub const MAX_GAME_LOG_LINES: usize = 10000;
 
+/// Max samples retained in rolling live charts (CPU, RAM, frame time, download speed).
+pub const MAX_TELEMETRY_SAMPLES: usize = 60;
+
+/// Max session entries kept in the downloads history list.
+pub const MAX_DOWNLOAD_HISTORY: usize = 50;
+
+/// Outcome of a completed download / installation entry recorded in session history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadHistoryStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// Historical download or installation item shown on the Downloads tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadHistoryEntry {
+    pub title: String,
+    pub category: String,
+    pub detail: String,
+    pub timestamp: String,
+    pub status: DownloadHistoryStatus,
+    pub instance_id: Option<InstanceId>,
+}
+
+/// Disk-usage breakdown across MQ Launcher's data directories.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StorageStats {
+    pub total_bytes: u64,
+    pub cas_bytes: u64,
+    pub cas_files: usize,
+    pub instances_bytes: u64,
+    pub assets_libs_bytes: u64,
+    pub java_bytes: u64,
+    pub temp_logs_bytes: u64,
+    pub scanned_at: String,
+}
+
 /// Background responses delivered back to UI thread without blocking.
 pub enum UiWorkerResponse {
     CatalogResults(crate::catalog_state::CatalogPage),
@@ -49,9 +87,22 @@ pub enum UiWorkerResponse {
         done: usize,
         total: usize,
     },
+    JobStage {
+        job_id: u64,
+        stage_label: String,
+    },
     JobFinished {
         job_id: u64,
         result: Result<JobOutput, String>,
+    },
+    TelemetryExtra {
+        peak_rss_mib: f64,
+        open_fds: usize,
+    },
+    StorageStatsReady(StorageStats),
+    TempCacheCleaned {
+        removed_files: usize,
+        freed_bytes: u64,
     },
     UpdatesChecked {
         request_id: u64,
@@ -219,6 +270,8 @@ pub enum UiWorkerCommand {
         instance_id: InstanceId,
     },
     CancelDownload,
+    ScanStorageStats,
+    CleanTempCache,
     StopGame {
         instance_id: InstanceId,
     },
@@ -253,8 +306,21 @@ pub struct UiState {
 
     // Telemetry & Status
     pub latest_cpu: CpuSnapshot,
+    pub cpu_history: VecDeque<f32>,
+    pub rss_history: VecDeque<f64>,
+    pub peak_rss_mib: f64,
+    pub open_fds: usize,
+    pub frame_time_ms_history: VecDeque<f32>,
+    pub last_frame_ms: f32,
+    pub max_frame_ms: f32,
+    pub gpu_backend_label: String,
+    pub storage_stats: Option<StorageStats>,
+    pub is_scanning_storage: bool,
+    pub telemetry_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub active_phase: Option<String>,
     pub phase_progress: Option<PhaseProgress>,
+    pub download_speed_history: VecDeque<f32>,
+    pub download_history: VecDeque<DownloadHistoryEntry>,
     pub status_message: Option<(String, bool)>, // (msg, is_error)
 
     // Game Console & Execution
@@ -264,6 +330,8 @@ pub struct UiState {
     pub stopped_by_user: HashSet<InstanceId>,
     pub is_launching: bool,
     pub installing_instance: Option<InstanceId>,
+    pub installing_operation: Option<String>,
+    pub last_failed_install_instance: Option<InstanceId>,
     pub install_error: Option<String>,
     pub detailed_install_error: Option<InstallError>,
     pub current_install_stage: InstallStage,
@@ -381,8 +449,21 @@ impl UiState {
                 per_core: Vec::new(),
                 rss_mib: 0.0,
             },
+            cpu_history: VecDeque::with_capacity(MAX_TELEMETRY_SAMPLES),
+            rss_history: VecDeque::with_capacity(MAX_TELEMETRY_SAMPLES),
+            peak_rss_mib: 0.0,
+            open_fds: 0,
+            frame_time_ms_history: VecDeque::with_capacity(MAX_TELEMETRY_SAMPLES),
+            last_frame_ms: 0.0,
+            max_frame_ms: 0.0,
+            gpu_backend_label: "Auto".to_string(),
+            storage_stats: None,
+            is_scanning_storage: false,
+            telemetry_stop: None,
             active_phase: None,
             phase_progress: None,
+            download_speed_history: VecDeque::with_capacity(MAX_TELEMETRY_SAMPLES),
+            download_history: VecDeque::with_capacity(MAX_DOWNLOAD_HISTORY),
             status_message: Some(("MQ Launcher готов к работе".to_string(), false)),
             game_running: false,
             running_instance: None,
@@ -390,6 +471,8 @@ impl UiState {
             stopped_by_user: HashSet::new(),
             is_launching: false,
             installing_instance: None,
+            installing_operation: None,
+            last_failed_install_instance: None,
             install_error: None,
             detailed_install_error: None,
             current_install_stage: InstallStage::Manifest,
@@ -440,8 +523,104 @@ impl UiState {
         })
     }
 
+    /// Number of currently active installations or download tasks (instance installs + catalog jobs).
+    pub fn active_download_count(&self) -> usize {
+        self.jobs.active_count()
+            + usize::from(self.installing_instance.is_some())
+            + usize::from(
+                self.installing_instance.is_none()
+                    && self.jobs.active_count() == 0
+                    && self.active_phase.is_some(),
+            )
+    }
+
+    /// Prepends an entry to `download_history`, bounded at [`MAX_DOWNLOAD_HISTORY`].
+    pub fn record_download_history(
+        &mut self,
+        title: impl Into<String>,
+        category: impl Into<String>,
+        detail: impl Into<String>,
+        status: DownloadHistoryStatus,
+        instance_id: Option<InstanceId>,
+    ) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        if self.download_history.len() >= MAX_DOWNLOAD_HISTORY {
+            self.download_history.pop_back();
+        }
+        self.download_history.push_front(DownloadHistoryEntry {
+            title: title.into(),
+            category: category.into(),
+            detail: detail.into(),
+            timestamp,
+            status,
+            instance_id,
+        });
+    }
+
+    /// Records the elapsed frame duration in milliseconds into the rolling sparkline buffer.
+    pub fn record_frame_time_ms(&mut self, ms: f32) {
+        if !ms.is_finite() || ms < 0.0 {
+            return;
+        }
+        self.last_frame_ms = ms;
+        if ms > self.max_frame_ms {
+            self.max_frame_ms = ms;
+        }
+        push_rolling_sample(&mut self.frame_time_ms_history, ms);
+    }
+
+    /// Human-readable localized phase label for the bottom HUD and Downloads summary.
+    pub fn active_hud_phase_label(&self) -> Option<String> {
+        if let Some(phase) = self.active_phase.as_deref() {
+            let trimmed = phase.trim();
+            if !trimmed.is_empty() {
+                let localized = match trimmed {
+                    "install_mods" => "Скачивание модов",
+                    "install_cfpack" | "install_mrpack" => "Установка сборки",
+                    "verify" => "Проверка файлов",
+                    "verify_and_repair" => "Проверка и починка",
+                    "install_game" => "Установка Minecraft",
+                    "reinstall" => "Переустановка инстанса",
+                    "manifest" => "Манифест версии",
+                    "assets" => "Загрузка ассетов",
+                    "libraries" => "Загрузка библиотек",
+                    "natives" => "Нативные библиотеки",
+                    "java" => "Установка Java",
+                    "client" => "Загрузка клиента",
+                    _ => return Some(self.current_install_stage.full_localized_name().to_string()),
+                };
+                return Some(localized.to_string());
+            }
+        }
+        if let Some(ref inst_id) = self.installing_instance {
+            let name = self
+                .instances
+                .iter()
+                .find(|i| &i.id == inst_id)
+                .map_or_else(|| inst_id.as_str(), |i| i.name.as_str());
+            return Some(format!("Установка: {name}"));
+        }
+        if let Some(job) = self.jobs.jobs.iter().find(|j| j.is_active()) {
+            return Some(format!("Загрузка: {}", job.title));
+        }
+        None
+    }
+
     /// Completes a queue job and, if needed, opens the manual-download dialog.
     pub fn finish_job(&mut self, job_id: u64, result: Result<JobOutput, String>) {
+        let meta = self.jobs.jobs.iter().find(|j| j.id == job_id).map(|j| {
+            (
+                j.title.clone(),
+                j.target_label.clone(),
+                j.total_files,
+                j.is_cancel_requested(),
+                matches!(
+                    j.retry,
+                    Some(crate::catalog_flow::RetrySpec::Modpack { .. })
+                ),
+            )
+        });
+
         match result {
             Ok(out) => {
                 self.jobs.finish(job_id, Ok(()));
@@ -450,12 +629,27 @@ impl UiState {
                     .instance_id
                     .clone()
                     .or_else(|| self.selected_instance_id.clone());
-                if let Some(id) = target_id {
-                    let _ = self
-                        .cmd_sender
-                        .send(UiWorkerCommand::ScanInstanceMods { instance_id: id });
+                if let Some(ref id) = target_id {
+                    let _ = self.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
+                        instance_id: id.clone(),
+                    });
                 }
                 self.status_message = Some(("Установка контента завершена".to_string(), false));
+                if let Some((title, target, total, _, is_modpack)) = meta {
+                    let cat = if is_modpack {
+                        "Сборка"
+                    } else {
+                        "Каталог"
+                    };
+                    let detail = format!("{target} ({total} ф.)");
+                    self.record_download_history(
+                        title,
+                        cat,
+                        detail,
+                        DownloadHistoryStatus::Completed,
+                        target_id.clone(),
+                    );
+                }
                 if let Some(id) = out.instance_id {
                     self.selected_instance_id = Some(id.clone());
                     if !out.blocked.is_empty() {
@@ -466,6 +660,19 @@ impl UiState {
             Err(e) => {
                 self.jobs.finish(job_id, Err(e.clone()));
                 self.status_message = Some((format!("Ошибка установки: {e}"), true));
+                if let Some((title, target, _, was_cancelled, is_modpack)) = meta {
+                    let cat = if is_modpack {
+                        "Сборка"
+                    } else {
+                        "Каталог"
+                    };
+                    let st = if was_cancelled {
+                        DownloadHistoryStatus::Cancelled
+                    } else {
+                        DownloadHistoryStatus::Failed
+                    };
+                    self.record_download_history(title, cat, format!("{target}: {e}"), st, None);
+                }
             }
         }
         if self.jobs.active_count() == 0 && self.installing_instance.is_none() {
@@ -541,6 +748,10 @@ impl UiState {
                     done,
                     total,
                 } => self.jobs.progress(job_id, done, total),
+                UiWorkerResponse::JobStage {
+                    job_id,
+                    stage_label,
+                } => self.jobs.set_stage(job_id, stage_label),
                 UiWorkerResponse::UpdatesChecked { request_id, result } => {
                     if request_id == self.updates.request_id {
                         self.updates.checking = false;
@@ -553,6 +764,33 @@ impl UiState {
                 }
                 UiWorkerResponse::JobFinished { job_id, result } => {
                     self.finish_job(job_id, result);
+                }
+                UiWorkerResponse::TelemetryExtra {
+                    peak_rss_mib,
+                    open_fds,
+                } => {
+                    if peak_rss_mib.is_finite() && peak_rss_mib > self.peak_rss_mib {
+                        self.peak_rss_mib = peak_rss_mib;
+                    }
+                    self.open_fds = open_fds;
+                }
+                UiWorkerResponse::StorageStatsReady(stats) => {
+                    self.storage_stats = Some(stats);
+                    self.is_scanning_storage = false;
+                }
+                UiWorkerResponse::TempCacheCleaned {
+                    removed_files,
+                    freed_bytes,
+                } => {
+                    let freed_str = crate::catalog_flow::format_size(freed_bytes);
+                    self.status_message = Some((
+                        format!("Очищено временных файлов: {removed_files} ({freed_str})"),
+                        false,
+                    ));
+                    if !self.is_scanning_storage {
+                        self.is_scanning_storage = true;
+                        let _ = self.cmd_sender.send(UiWorkerCommand::ScanStorageStats);
+                    }
                 }
                 UiWorkerResponse::ImportArchivePicked(path) => {
                     self.picked_import_path = path;
@@ -629,26 +867,63 @@ impl UiState {
                 }
                 UiWorkerResponse::InstanceInstallStarted(id) => {
                     self.installing_instance = Some(id);
+                    self.last_failed_install_instance = None;
                     self.install_error = None;
                     self.detailed_install_error = None;
                     self.install_retries_count = 0;
                     self.install_eta_secs = None;
+                    self.download_speed_history.clear();
                     self.current_install_stage = InstallStage::Manifest;
                 }
                 UiWorkerResponse::InstanceInstallCompleted(id) => {
                     if self.installing_instance.as_ref() == Some(&id) {
                         self.installing_instance = None;
                     }
+                    let op = self
+                        .installing_operation
+                        .take()
+                        .unwrap_or_else(|| "Установка инстанса".to_string());
+                    let (inst_title, inst_detail) =
+                        self.instances.iter().find(|i| i.id == id).map_or_else(
+                            || (id.as_str().to_string(), op.clone()),
+                            |i| {
+                                (
+                                    i.name.clone(),
+                                    format!("{op} · {} ({})", i.mc_version, i.loader.as_str()),
+                                )
+                            },
+                        );
+                    self.record_download_history(
+                        inst_title,
+                        "Инстанс",
+                        inst_detail,
+                        DownloadHistoryStatus::Completed,
+                        Some(id),
+                    );
                     self.install_eta_secs = None;
                     self.active_phase = None;
                     self.phase_progress = None;
                     self.status_message = Some(("Инстанс успешно установлен".to_string(), false));
                 }
-                UiWorkerResponse::InstanceError {
-                    instance_id: _,
-                    error,
-                } => {
+                UiWorkerResponse::InstanceError { instance_id, error } => {
                     self.installing_instance = None;
+                    self.last_failed_install_instance = Some(instance_id.clone());
+                    let op = self
+                        .installing_operation
+                        .take()
+                        .unwrap_or_else(|| "Установка инстанса".to_string());
+                    let inst_title = self
+                        .instances
+                        .iter()
+                        .find(|i| i.id == instance_id)
+                        .map_or_else(|| instance_id.as_str().to_string(), |i| i.name.clone());
+                    self.record_download_history(
+                        inst_title,
+                        "Инстанс",
+                        format!("{op}: {error}"),
+                        DownloadHistoryStatus::Failed,
+                        Some(instance_id),
+                    );
                     self.is_launching = false;
                     self.install_error = Some(error.clone());
                     let stage = self.current_install_stage;
@@ -712,12 +987,21 @@ impl UiState {
                     self.current_install_stage = InstallStage::from_phase_str(&prog.phase);
                     self.install_eta_secs =
                         calculate_eta_secs(prog.bytes_done, prog.bytes_total, prog.mib_per_sec);
+                    let speed = if prog.mib_per_sec.is_finite() && prog.mib_per_sec >= 0.0 {
+                        prog.mib_per_sec as f32
+                    } else {
+                        0.0
+                    };
+                    push_rolling_sample(&mut self.download_speed_history, speed);
+                    self.jobs.update_active_throughput(&prog.phase, &prog);
                     self.phase_progress = Some(prog);
                 }
                 Event::PhaseCompleted { phase, elapsed_ms } => {
-                    self.active_phase = None;
-                    self.phase_progress = None;
-                    self.install_eta_secs = None;
+                    if self.installing_instance.is_none() && self.jobs.active_count() == 0 {
+                        self.active_phase = None;
+                        self.phase_progress = None;
+                        self.install_eta_secs = None;
+                    }
                     self.status_message = Some((
                         format!("Фаза '{phase}' успешно завершена за {elapsed_ms} мс"),
                         false,
@@ -730,6 +1014,17 @@ impl UiState {
                     self.status_message = Some((format!("Ошибка [{context}]: {message}"), true));
                 }
                 Event::CpuTelemetry(snap) => {
+                    let pct = safe_clamp_f32(snap.total_pct, 0.0, 100.0);
+                    let rss = if snap.rss_mib.is_finite() && snap.rss_mib >= 0.0 {
+                        snap.rss_mib
+                    } else {
+                        0.0
+                    };
+                    push_rolling_sample(&mut self.cpu_history, pct);
+                    push_rolling_sample(&mut self.rss_history, rss);
+                    if rss > self.peak_rss_mib {
+                        self.peak_rss_mib = rss;
+                    }
                     self.latest_cpu = snap;
                 }
                 Event::GameLog(log) => {
@@ -777,6 +1072,15 @@ impl UiState {
         }
         inst_dir.join("resolved_version.json").exists() && inst_dir.join("client.jar").exists()
     }
+}
+
+/// Appends `val` to a rolling telemetry buffer capped at [`MAX_TELEMETRY_SAMPLES`].
+#[inline]
+pub fn push_rolling_sample<T>(deque: &mut VecDeque<T>, val: T) {
+    while deque.len() >= MAX_TELEMETRY_SAMPLES {
+        deque.pop_front();
+    }
+    deque.push_back(val);
 }
 
 /// Clamps `val` between `min` and `max` without panicking under any circumstances:

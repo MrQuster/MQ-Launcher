@@ -56,12 +56,35 @@ fn core_bar_color(tokens: &Tokens, usage_pct: f32) -> Color32 {
     }
 }
 
-fn render_per_core_bars(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens) {
+/// Renders per-core CPU load vertical bars, wrapping neatly into rows when >16 cores are present.
+pub fn render_per_core_bars(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens) {
     let core_count = snap.per_core.len().max(1);
-    let bar_w = 5.0;
-    let gap = 2.0;
-    let chart_h = 20.0;
-    let total_w = (core_count as f32) * bar_w + ((core_count.saturating_sub(1)) as f32) * gap + 6.0;
+    let bar_w = 5.0_f32;
+    let gap = 2.0_f32;
+    let pad_x = 3.0_f32;
+    let pad_y = 2.0_f32;
+    let row_gap = 2.0_f32;
+    const MAX_COLS_PER_ROW: usize = 16;
+
+    let avail_w = ui.available_width();
+    let max_cols_fitting = if avail_w.is_finite() && avail_w > pad_x * 2.0 + bar_w {
+        (((avail_w - pad_x * 2.0 + gap) / (bar_w + gap)).floor() as usize)
+            .clamp(1, MAX_COLS_PER_ROW)
+    } else {
+        MAX_COLS_PER_ROW
+    };
+
+    let rows = core_count.div_ceil(max_cols_fitting).max(1);
+    let cols = core_count.div_ceil(rows).clamp(1, max_cols_fitting);
+    let row_h = match rows {
+        1 => 16.0_f32,
+        2 => 9.0_f32,
+        3 => 7.0_f32,
+        _ => 6.0_f32,
+    };
+
+    let total_w = (cols as f32) * bar_w + ((cols.saturating_sub(1)) as f32) * gap + pad_x * 2.0;
+    let chart_h = (rows as f32) * row_h + ((rows.saturating_sub(1)) as f32) * row_gap + pad_y * 2.0;
 
     let (rect, response) = ui.allocate_exact_size(Vec2::new(total_w, chart_h), Sense::hover());
 
@@ -75,30 +98,27 @@ fn render_per_core_bars(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens) {
             StrokeKind::Inside,
         );
 
-        let inner_top = rect.top() + 2.0;
-        let inner_bottom = rect.bottom() - 2.0;
-        let max_bar_h = (inner_bottom - inner_top).max(1.0);
-
         for idx in 0..core_count {
+            let row = idx / cols;
+            let col = idx % cols;
             let pct = snap
                 .per_core
                 .get(idx)
                 .map(|c| safe_clamp_f32(c.usage_pct, 0.0, 100.0))
                 .unwrap_or(0.0);
 
-            let x0 = rect.left() + 3.0 + (idx as f32) * (bar_w + gap);
-            let track_rect = Rect::from_min_max(
-                Pos2::new(x0, inner_top),
-                Pos2::new(x0 + bar_w, inner_bottom),
-            );
+            let x0 = rect.left() + pad_x + (col as f32) * (bar_w + gap);
+            let y0 = rect.top() + pad_y + (row as f32) * (row_h + row_gap);
+            let y1 = (y0 + row_h).min(rect.bottom() - pad_y).max(y0 + 1.0);
+            let max_bar_h = (y1 - y0).max(1.0);
+
+            let track_rect = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x0 + bar_w, y1));
             painter.rect_filled(track_rect, CornerRadius::same(1), tokens.border);
 
             if pct > 0.5 {
                 let fill_h = safe_clamp_f32(max_bar_h * (pct / 100.0), 1.5, max_bar_h);
-                let fill_rect = Rect::from_min_max(
-                    Pos2::new(x0, inner_bottom - fill_h),
-                    Pos2::new(x0 + bar_w, inner_bottom),
-                );
+                let fill_rect =
+                    Rect::from_min_max(Pos2::new(x0, y1 - fill_h), Pos2::new(x0 + bar_w, y1));
                 painter.rect_filled(
                     fill_rect,
                     CornerRadius::same(1),
@@ -120,13 +140,30 @@ fn render_per_core_bars(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens) {
             );
             if !snap.per_core.is_empty() {
                 ui.separator();
-                for core in &snap.per_core {
-                    ui.label(
-                        RichText::new(format!("cpu{}: {:>5.1}%", core.core_id, core.usage_pct))
-                            .font(FontId::new(11.5, FontFamily::Monospace))
-                            .color(tokens.text_muted),
-                    );
-                }
+                let grid_cols = if snap.per_core.len() > 16 {
+                    4
+                } else if snap.per_core.len() > 8 {
+                    2
+                } else {
+                    1
+                };
+                egui::Grid::new("mq_hud_per_core_tooltip")
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for (i, core) in snap.per_core.iter().enumerate() {
+                            ui.label(
+                                RichText::new(format!(
+                                    "cpu{}: {:>5.1}%",
+                                    core.core_id, core.usage_pct
+                                ))
+                                .font(FontId::new(11.5, FontFamily::Monospace))
+                                .color(tokens.text_muted),
+                            );
+                            if (i + 1) % grid_cols == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
             }
         });
     }
@@ -270,7 +307,7 @@ pub fn show_bottom_hud(ctx: &Context, data: &BottomHudData) {
     }
     let tokens = Tokens::active(ctx);
     TopBottomPanel::bottom("mq_bottom_telemetry_hud")
-        .exact_height(BOTTOM_HUD_HEIGHT)
+        .min_height(BOTTOM_HUD_HEIGHT)
         .frame(solid_hud_frame(&tokens))
         .show(ctx, |ui| {
             render_bottom_hud(ui, data);
@@ -304,6 +341,8 @@ mod tests {
             ("app.rs", include_str!("app.rs")),
             ("install_types.rs", include_str!("install_types.rs")),
             ("instances_view.rs", include_str!("instances_view.rs")),
+            ("downloads_view.rs", include_str!("downloads_view.rs")),
+            ("perf_view.rs", include_str!("perf_view.rs")),
         ];
 
         for (name, content) in sources {
@@ -388,5 +427,38 @@ mod tests {
             assert!(is_zero_viewport(ctx));
             show_bottom_hud(ctx, &data);
         });
+    }
+
+    #[test]
+    fn per_core_bars_wrap_for_more_than_16_cores() {
+        let ctx = Context::default();
+        for core_count in [24usize, 32, 64] {
+            let per_core = (0..core_count)
+                .map(|core_id| CoreCpuLoad {
+                    core_id,
+                    usage_pct: ((core_id * 17) % 101) as f32,
+                })
+                .collect();
+            let data = BottomHudData {
+                active_phase: None,
+                progress_fraction: None,
+                files_per_sec: 0.0,
+                mib_per_sec: 0.0,
+                active_dag_tasks: 0,
+                cpu_snapshot: CpuSnapshot {
+                    total_pct: 37.5,
+                    per_core,
+                    rss_mib: 128.0,
+                },
+                watchdog_violations: 0,
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1180.0, 740.0))),
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                show_bottom_hud(ctx, &data);
+            });
+        }
     }
 }

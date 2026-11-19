@@ -3293,6 +3293,8 @@ impl InstancesView {
                     }
                 }
 
+                let mut search_dep_in_catalog: Option<String> = None;
+
                 if let Some((ref report_inst, ref report)) = state.preflight_report {
                     if report_inst == inst_id && !report.issues.is_empty() {
                         ui.add_space(6.0);
@@ -3312,34 +3314,89 @@ impl InstancesView {
                             .color(tokens.text)
                             .strong(),
                         );
-                        for issue in &report_clone.issues {
-                            let msg = match issue {
+                        for (idx, issue) in report_clone.issues.iter().enumerate() {
+                            match issue {
                                 mq_mods::PreflightIssue::MissingDependency {
                                     mod_id,
+                                    file_name,
                                     required_dep,
-                                    ..
-                                } => format!("• Нет зависимости «{required_dep}» для «{mod_id}»"),
+                                } => {
+                                    ui.push_id(("preflight_missing", idx), |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "• Мод «{mod_id}» ({file_name}) требует зависимость «{required_dep}»"
+                                                ))
+                                                .color(tokens.text_muted)
+                                                .small(),
+                                            );
+                                            if secondary_glass_button(
+                                                ui,
+                                                Some(VectorIcon::Search),
+                                                "Найти в каталоге",
+                                            )
+                                            .clicked()
+                                            {
+                                                search_dep_in_catalog = Some(required_dep.clone());
+                                            }
+                                        });
+                                    });
+                                }
+                                mq_mods::PreflightIssue::IncompatibleMod {
+                                    mod_id,
+                                    file_name,
+                                    conflicting_mod,
+                                } => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "• Несовместимость: мод «{mod_id}» ({file_name}) конфликтует с «{conflicting_mod}»"
+                                        ))
+                                        .color(tokens.danger)
+                                        .small(),
+                                    );
+                                }
                                 mq_mods::PreflightIssue::DuplicateModId { mod_id, files } => {
-                                    format!("• Дубликат «{mod_id}»: {}", files.join(", "))
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "• Дубликат «{mod_id}»: {}",
+                                            files.join(", ")
+                                        ))
+                                        .color(tokens.text_muted)
+                                        .small(),
+                                    );
                                 }
                                 mq_mods::PreflightIssue::WrongLoader {
                                     mod_id,
                                     mod_loader,
                                     instance_loader,
                                     ..
-                                } => format!(
-                                    "• Чужой загрузчик у «{mod_id}»: {mod_loader:?} вместо {instance_loader:?}"
-                                ),
+                                } => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "• Несовместимый загрузчик у «{mod_id}»: {} вместо {}",
+                                            mod_loader.as_str(),
+                                            instance_loader.as_str()
+                                        ))
+                                        .color(tokens.text_muted)
+                                        .small(),
+                                    );
+                                }
                                 mq_mods::PreflightIssue::WrongMcVersion {
                                     mod_id,
                                     required_mc,
                                     instance_mc,
                                     ..
-                                } => format!(
-                                    "• Неверная версия MC у «{mod_id}»: требуется {required_mc} (инстанс {instance_mc})"
-                                ),
-                            };
-                            ui.label(RichText::new(msg).color(tokens.text_muted).small());
+                                } => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "• Неверная версия MC у «{mod_id}»: требуется {required_mc} (инстанс {instance_mc})"
+                                        ))
+                                        .color(tokens.text_muted)
+                                        .small(),
+                                    );
+                                }
+                            }
                         }
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
@@ -3454,12 +3511,12 @@ impl InstancesView {
                         .strong(),
                     );
                 });
-                for c in &state.mod_conflicts {
+                for (idx, c) in state.mod_conflicts.iter().enumerate() {
                     match c {
                         mq_mods::ModConflict::DuplicateModId { mod_id, files } => {
                             ui.label(
                                 RichText::new(format!(
-                                    "Дубликат ID '{mod_id}' в файлах: {}",
+                                    "• Дубликат ID «{mod_id}» в файлах: {}",
                                     files.join(", ")
                                 ))
                                 .color(tokens.danger),
@@ -3467,20 +3524,71 @@ impl InstancesView {
                         }
                         mq_mods::ModConflict::MissingDependency {
                             mod_id,
+                            file_name,
                             required_dep,
-                            ..
+                        } => {
+                            ui.push_id(("mod_conflict_missing", idx), |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "• Мод «{mod_id}» ({file_name}) требует отсутствующую зависимость «{required_dep}»"
+                                        ))
+                                        .color(tokens.warning),
+                                    );
+                                    if secondary_glass_button(
+                                        ui,
+                                        Some(VectorIcon::Search),
+                                        "Найти в каталоге",
+                                    )
+                                    .clicked()
+                                    {
+                                        search_dep_in_catalog = Some(required_dep.clone());
+                                    }
+                                });
+                            });
+                        }
+                        mq_mods::ModConflict::IncompatibleMod {
+                            mod_id,
+                            file_name,
+                            conflicting_mod,
                         } => {
                             ui.label(
                                 RichText::new(format!(
-                                    "Мод '{mod_id}' требует отсутствующую зависимость '{required_dep}'"
+                                    "• Несовместимые моды: «{mod_id}» ({file_name}) конфликтует с «{conflicting_mod}»"
                                 ))
-                                .color(tokens.warning),
+                                .color(tokens.danger),
                             );
                         }
                     }
                 }
             });
                     ui.add_space(6.0);
+                }
+
+                if let Some(dep_query) = search_dep_in_catalog {
+                    let now = std::time::Instant::now();
+                    state.selected_instance_id = Some(inst_id.clone());
+                    state.catalog.query = dep_query;
+                    state.catalog.page = 0;
+                    if let Some((mc_version, loader)) = state
+                        .instances
+                        .iter()
+                        .find(|i| &i.id == inst_id)
+                        .map(|i| (i.mc_version.clone(), i.loader))
+                    {
+                        state.catalog.sync_for_instance(
+                            crate::catalog_state::CatalogTab::Mods,
+                            &mc_version,
+                            loader,
+                            now,
+                        );
+                    }
+                    state.catalog.mark_page_changed(now, false);
+                    self.synced_catalog_context =
+                        Some((inst_id.clone(), crate::catalog_state::CatalogTab::Mods));
+                    self.content_sub_mode = ContentSubMode::Catalog;
+                    ui.ctx().request_repaint();
                 }
 
                 let lock = Self::cached_lock(ui.ctx(), &state.paths.instance_dir(inst_id.as_str()));

@@ -824,6 +824,11 @@ pub enum ModConflict {
         file_name: String,
         required_dep: String,
     },
+    IncompatibleMod {
+        mod_id: String,
+        file_name: String,
+        conflicting_mod: String,
+    },
 }
 
 /// Summary report produced by scanning an instance's local `mods/` folder.

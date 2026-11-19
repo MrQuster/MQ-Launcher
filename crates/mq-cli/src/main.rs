@@ -1916,6 +1916,16 @@ async fn cmd_mods(args: ModsArgs, paths: MqPaths, threads: Option<usize>) -> Res
                                 mod_id, file_name, required_dep
                             );
                         }
+                        ModConflict::IncompatibleMod {
+                            mod_id,
+                            file_name,
+                            conflicting_mod,
+                        } => {
+                            println!(
+                                "  Мод '{}' ({}) несовместим с модом '{}'",
+                                mod_id, file_name, conflicting_mod
+                            );
+                        }
                     }
                 }
             }
@@ -3255,6 +3265,7 @@ async fn build_snapshot_app(
             "accounts" | "05-accounts" => mq_ui::NavTab::Accounts,
             "settings-matte" | "06-settings-matte" | "settings" => mq_ui::NavTab::Settings,
             "settings-light" | "07-settings-light" => mq_ui::NavTab::Settings,
+            "downloads" => mq_ui::NavTab::Downloads,
             "perf" | "performance" => mq_ui::NavTab::Performance,
             _ => mq_ui::NavTab::Instances,
         };
@@ -3296,6 +3307,7 @@ async fn build_snapshot_app(
             current_tab: tab,
             instances_view,
             catalog_view: mq_ui::CatalogView::default(),
+            downloads_view: mq_ui::downloads_view::DownloadsView,
             accounts_view,
             perf_view: mq_ui::PerfView,
             settings_view,
@@ -3329,6 +3341,7 @@ async fn build_snapshot_app(
             "instances" => mq_ui::NavTab::Instances,
             "detail" => mq_ui::NavTab::Instances,
             "catalog" => mq_ui::NavTab::Catalog,
+            "downloads" => mq_ui::NavTab::Downloads,
             "accounts" => mq_ui::NavTab::Accounts,
             "perf" | "performance" => mq_ui::NavTab::Performance,
             "settings" => mq_ui::NavTab::Settings,
@@ -3340,6 +3353,7 @@ async fn build_snapshot_app(
             current_tab: tab,
             instances_view: mq_ui::InstancesView::default(),
             catalog_view: mq_ui::CatalogView::default(),
+            downloads_view: mq_ui::downloads_view::DownloadsView,
             accounts_view: mq_ui::AccountsView::default(),
             perf_view: mq_ui::PerfView,
             settings_view: mq_ui::SettingsView::default(),
