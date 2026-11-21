@@ -5,6 +5,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
 use mq_core::{AccountId, MqError, MqPaths, MqResult};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -102,7 +103,7 @@ impl AccountStore {
                 fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
             }
 
-            fs::rename(&tmp_path, &target_path)?;
+            rename_with_retry(&tmp_path, &target_path)?;
 
             #[cfg(unix)]
             {
@@ -114,7 +115,7 @@ impl AccountStore {
         })();
 
         if let Err(err) = write_res {
-            let _ = fs::remove_file(&tmp_path);
+            let _ = remove_file_with_retry(&tmp_path);
             return Err(MqError::Io(err));
         }
 
@@ -485,5 +486,14 @@ mod tests {
         assert_eq!(reloaded.active_account().map(|a| a.id), Some(ely_id));
 
         assert!(!reloaded.remove_account("OfflineBuilder"));
+
+        // Verify saving an updated store cleanly overwrites existing accounts.json.
+        reloaded
+            .save(&paths)
+            .expect("overwrite existing accounts.json");
+        let after_overwrite =
+            AccountStore::load_or_default(&paths).expect("reload overwritten accounts.json");
+        assert_eq!(after_overwrite, reloaded);
+        assert_eq!(after_overwrite.list_accounts().len(), 2);
     }
 }

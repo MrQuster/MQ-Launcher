@@ -257,6 +257,7 @@ struct SpringF32State {
 /// Initializes cleanly at rest on first insertion and requests repaints only while moving.
 pub fn animate_spring_f32(ctx: &Context, id: Id, target: f32, cfg: SpringConfig) -> f32 {
     let target = if target.is_finite() { target } else { 0.0 };
+    let pass_nr = ctx.cumulative_pass_nr();
     if animations_disabled(ctx) {
         ctx.data_mut(|d| {
             d.insert_temp(
@@ -264,14 +265,13 @@ pub fn animate_spring_f32(ctx: &Context, id: Id, target: f32, cfg: SpringConfig)
                 SpringF32State {
                     value: target,
                     velocity: 0.0,
-                    last_pass: ctx.cumulative_pass_nr(),
+                    last_pass: pass_nr,
                 },
             );
         });
         return target;
     }
 
-    let pass_nr = ctx.cumulative_pass_nr();
     let dt = frame_dt(ctx);
     let mut still_moving = false;
     let out = ctx.data_mut(|d| {
@@ -323,6 +323,7 @@ struct SpringVec2State {
 pub fn animate_spring_vec2(ctx: &Context, id: Id, target: Vec2, cfg: SpringConfig) -> Vec2 {
     let tx = if target.x.is_finite() { target.x } else { 0.0 };
     let ty = if target.y.is_finite() { target.y } else { 0.0 };
+    let pass_nr = ctx.cumulative_pass_nr();
     if animations_disabled(ctx) {
         ctx.data_mut(|d| {
             d.insert_temp(
@@ -332,14 +333,13 @@ pub fn animate_spring_vec2(ctx: &Context, id: Id, target: Vec2, cfg: SpringConfi
                     y: ty,
                     vx: 0.0,
                     vy: 0.0,
-                    last_pass: ctx.cumulative_pass_nr(),
+                    last_pass: pass_nr,
                 },
             );
         });
         return Vec2::new(tx, ty);
     }
 
-    let pass_nr = ctx.cumulative_pass_nr();
     let dt = frame_dt(ctx);
     let mut still_moving = false;
     let out = ctx.data_mut(|d| {
@@ -395,6 +395,7 @@ pub fn animate_spring_rect(ctx: &Context, id: Id, target: Rect, cfg: SpringConfi
     if !target.is_positive() {
         return target;
     }
+    let pass_nr = ctx.cumulative_pass_nr();
     if animations_disabled(ctx) {
         ctx.data_mut(|d| {
             d.insert_temp(
@@ -408,14 +409,13 @@ pub fn animate_spring_rect(ctx: &Context, id: Id, target: Rect, cfg: SpringConfi
                     v_min_y: 0.0,
                     v_max_x: 0.0,
                     v_max_y: 0.0,
-                    last_pass: ctx.cumulative_pass_nr(),
+                    last_pass: pass_nr,
                 },
             );
         });
         return target;
     }
 
-    let pass_nr = ctx.cumulative_pass_nr();
     let dt = frame_dt(ctx);
     let mut still_moving = false;
     let out = ctx.data_mut(|d| {
@@ -503,6 +503,7 @@ pub fn animate_eased_f32(
     easing: fn(f32) -> f32,
 ) -> f32 {
     let target = if target.is_finite() { target } else { 0.0 };
+    let pass_nr = ctx.cumulative_pass_nr();
     if animations_disabled(ctx) || duration_secs <= 0.001 {
         ctx.data_mut(|d| {
             d.insert_temp(
@@ -512,14 +513,13 @@ pub fn animate_eased_f32(
                     to: target,
                     current: target,
                     progress: 1.0,
-                    last_pass: ctx.cumulative_pass_nr(),
+                    last_pass: pass_nr,
                 },
             );
         });
         return target;
     }
 
-    let pass_nr = ctx.cumulative_pass_nr();
     let dt = frame_dt(ctx);
     let mut still_moving = false;
     let out = ctx.data_mut(|d| {
@@ -1411,6 +1411,30 @@ mod tests {
                     ui.label("Tab 2");
                 });
             });
+            assert!(!is_any_animation_active(ctx));
+        });
+    }
+
+    #[test]
+    fn disabled_animations_never_deadlock_or_panic() {
+        let ctx = Context::default();
+        ctx.style_mut(|s| s.animation_time = 0.0);
+
+        let rect = Rect::from_min_size(Pos2::new(12.0, 24.0), Vec2::new(120.0, 36.0));
+        let vec = Vec2::new(32.0, 48.0);
+        let _ = ctx.run(make_input(0.0), |ctx| {
+            begin_animation_frame(ctx);
+            let f = animate_spring_f32(ctx, Id::new("disabled_f32"), 0.75, SpringConfig::snappy());
+            let v = animate_spring_vec2(ctx, Id::new("disabled_vec2"), vec, SpringConfig::snappy());
+            let r = animate_spring_rect(ctx, Id::new("disabled_rect"), rect, SpringConfig::rect());
+            let e = animate_eased_f32(ctx, Id::new("disabled_eased"), 0.5, 0.25, ease_out_cubic);
+            let e_zero =
+                animate_eased_f32(ctx, Id::new("disabled_eased_zero"), 0.9, 0.0, ease_out_quad);
+            assert!((f - 0.75).abs() < 1e-5);
+            assert_eq!(v, vec);
+            assert_eq!(r, rect);
+            assert!((e - 0.5).abs() < 1e-5);
+            assert!((e_zero - 0.9).abs() < 1e-5);
             assert!(!is_any_animation_active(ctx));
         });
     }

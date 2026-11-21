@@ -73,21 +73,71 @@ pub fn normalize_arch(raw: &str) -> &str {
     }
 }
 
+/// Returns the Mojang `${arch}` bitness token (`"32"` for x86, `"64"` for x86_64/arm64).
+pub fn arch_bitness_token(os_arch: &str) -> &'static str {
+    match normalize_arch(os_arch) {
+        "x86" => "32",
+        _ => "64",
+    }
+}
+
+/// Expands a Mojang native classifier template (e.g. `"natives-windows-${arch}"`) into
+/// prioritized candidate classifier keys matching Mojang / LWJGL manifests (`"64"`/`"32"`,
+/// `"x64"`, `"x86_64"`, `"arm64"`, raw `os_arch`, and unexpanded fallback).
+pub fn expand_native_classifier_candidates(template: &str, os_arch: &str) -> Vec<String> {
+    if !template.contains("${arch}") {
+        return vec![template.to_string()];
+    }
+    let norm = normalize_arch(os_arch);
+    let bitness = arch_bitness_token(os_arch);
+    let short_arch = match norm {
+        "x86_64" => "x64",
+        other => other,
+    };
+
+    let mut candidates = Vec::with_capacity(5);
+    for token in [bitness, short_arch, norm, os_arch] {
+        let expanded = template.replace("${arch}", token);
+        if !candidates.contains(&expanded) {
+            candidates.push(expanded);
+        }
+    }
+    let raw = template.to_string();
+    if !candidates.contains(&raw) {
+        candidates.push(raw);
+    }
+    candidates
+}
+
 /// Evaluates whether an OS version pattern matches the given actual version string.
-/// Handles Mojang patterns like `^10\\.`, `10\\..*`, and simple version prefixes/regex.
+/// Handles Mojang patterns like `^10\\.`, `^10\\.0$`, `10\\..*`, and simple version prefixes/regex.
 pub fn os_version_matches(pattern: &str, actual: &str) -> bool {
     let clean_pat = pattern.trim();
     if clean_pat.is_empty() {
         return true;
     }
     let unescaped = clean_pat.replace("\\.", ".");
-    if let Some(prefix) = unescaped.strip_prefix('^') {
-        let prefix_clean = prefix.trim_end_matches(".*").trim_end_matches('*');
+    let anchored_start = unescaped.starts_with('^');
+    let anchored_end = unescaped.ends_with('$');
+    let core = unescaped.strip_prefix('^').unwrap_or(&unescaped);
+    let core = core.strip_suffix('$').unwrap_or(core);
+
+    if anchored_start && anchored_end {
+        if let Some(prefix) = core.strip_suffix(".*") {
+            actual.starts_with(prefix)
+        } else {
+            actual == core
+        }
+    } else if anchored_start {
+        let prefix_clean = core.trim_end_matches(".*").trim_end_matches('*');
         actual.starts_with(prefix_clean)
-    } else if let Some(prefix) = unescaped.strip_suffix(".*") {
+    } else if anchored_end {
+        let suffix_clean = core.trim_start_matches(".*").trim_start_matches('*');
+        actual.ends_with(suffix_clean)
+    } else if let Some(prefix) = core.strip_suffix(".*") {
         actual.starts_with(prefix)
     } else {
-        actual == unescaped || actual.contains(&unescaped)
+        actual == core || actual.contains(core)
     }
 }
 
@@ -279,5 +329,32 @@ mod tests {
 
         let linux = RuleContext::linux_x86_64();
         assert!(!evaluate_rules(Some(&rules), &linux));
+    }
+
+    #[test]
+    fn windows_arch_and_exact_version_rules_match_accurately() {
+        let x64_rules: Vec<RawRule> = serde_json::from_str(
+            r#"[{ "action": "allow", "os": { "name": "windows", "arch": "x64" } }]"#,
+        )
+        .expect("parse x64 rules");
+        let x86_rules: Vec<RawRule> = serde_json::from_str(
+            r#"[{ "action": "allow", "os": { "name": "windows", "arch": "x86" } }]"#,
+        )
+        .expect("parse x86 rules");
+
+        let win64 = RuleContext::windows_x86_64();
+        let win32 = RuleContext::windows_x86();
+        let win_arm = RuleContext::windows_arm64();
+
+        assert!(evaluate_rules(Some(&x64_rules), &win64));
+        assert!(!evaluate_rules(Some(&x64_rules), &win32));
+        assert!(!evaluate_rules(Some(&x64_rules), &win_arm));
+
+        assert!(evaluate_rules(Some(&x86_rules), &win32));
+        assert!(!evaluate_rules(Some(&x86_rules), &win64));
+
+        assert!(os_version_matches("^10\\.0$", "10.0"));
+        assert!(!os_version_matches("^10\\.0$", "10.0.19041"));
+        assert!(os_version_matches("^10\\.", "10.0.22631"));
     }
 }

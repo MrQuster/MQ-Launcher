@@ -14,9 +14,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
 use mq_core::{ModLoaderKind, MqError, MqPaths, MqResult, Sha1Digest};
+
+static ATOMIC_MOVE_SEQ: AtomicU64 = AtomicU64::new(1);
 use mq_net::{DownloadSpec, NetEngine};
 use mq_sched::{ComputePool, EpochGuard};
 use serde::{Deserialize, Serialize};
@@ -440,7 +444,7 @@ pub async fn install_curseforge_modpack(
                 if verify_file_sha1_and_sha512(&cas_path, &filename, Some(exp_sha1), None).is_ok() {
                     already_verified = true;
                 } else {
-                    let _ = fs::remove_file(&cas_path);
+                    let _ = remove_file_with_retry(&cas_path);
                 }
             }
         }
@@ -683,9 +687,10 @@ impl BlockedDownloadsWatcher {
         atomic_move_file(candidate_path, &dest_path)?;
 
         // Update `.mq-lock.json`
-        let kind = if item.target_rel_path.starts_with("resourcepacks/") {
+        let norm_rel = item.target_rel_path.replace('\\', "/");
+        let kind = if norm_rel.starts_with("resourcepacks/") {
             ProjectKind::ResourcePack
-        } else if item.target_rel_path.starts_with("shaderpacks/") {
+        } else if norm_rel.starts_with("shaderpacks/") {
             ProjectKind::Shader
         } else {
             ProjectKind::Mod
@@ -766,21 +771,37 @@ impl BlockedDownloadsWatcher {
     }
 }
 
-/// Atomically moves `src` to `dst`, falling back to a temporary file + `rename` + `remove_file`
-/// if `src` and `dst` reside on different filesystems (`EXDEV`).
+/// Atomically moves `src` to `dst`, retrying transient Windows locks and falling back to a unique
+/// temporary file + `rename_with_retry` + `remove_file_with_retry` across drives (`EXDEV`).
 fn atomic_move_file(src: &Path, dst: &Path) -> MqResult<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    if fs::rename(src, dst).is_ok() {
+    if dst.exists() && dst != src {
+        let _ = remove_file_with_retry(dst);
+    }
+    if rename_with_retry(src, dst).is_ok() {
         return Ok(());
     }
 
-    let tmp_dst = dst.with_extension("mq-atomic.tmp");
-    fs::copy(src, &tmp_dst)?;
-    fs::rename(&tmp_dst, dst)?;
-    let _ = fs::remove_file(src);
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let fname = dst.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let seq = ATOMIC_MOVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_dst = parent.join(format!(
+        ".{fname}.{}.{seq}.mq-atomic.tmp",
+        std::process::id()
+    ));
+
+    if let Err(err) = fs::copy(src, &tmp_dst) {
+        let _ = remove_file_with_retry(&tmp_dst);
+        return Err(MqError::Io(err));
+    }
+    if let Err(err) = rename_with_retry(&tmp_dst, dst) {
+        let _ = remove_file_with_retry(&tmp_dst);
+        return Err(MqError::Io(err));
+    }
+    let _ = remove_file_with_retry(src);
     Ok(())
 }
 
@@ -1137,5 +1158,23 @@ mod tests {
             entry_40.sha1.as_deref(),
             Some(blocked_sha1.to_hex().as_str())
         );
+    }
+
+    #[test]
+    fn atomic_move_file_overwrites_existing_readonly_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("downloaded.jar");
+        let dst = tmp.path().join("mods").join("existing.jar");
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+
+        fs::write(&src, b"new-mod-bytes").unwrap();
+        fs::write(&dst, b"stale-readonly-bytes").unwrap();
+        let mut perms = fs::metadata(&dst).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&dst, perms).unwrap();
+
+        atomic_move_file(&src, &dst).expect("atomic_move_file must overwrite read-only dst");
+        assert!(!src.exists());
+        assert_eq!(fs::read(&dst).unwrap(), b"new-mod-bytes");
     }
 }

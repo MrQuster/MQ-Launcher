@@ -5,12 +5,13 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use mq_core::fs_util::strip_windows_verbatim_prefix;
 use mq_core::{ModLoaderKind, MqError, MqPaths, MqResult};
 use mq_meta::{
     fetch_forge_recommended_version, fetch_neoforge_loader_versions, forge_installer_url,
     maven_coord_to_artifact, merge_inherits_from, neoforge_installer_url, normalize_forge_version,
     parse_forge_install_profile, parse_loader_profile, ForgeInstallProfile, ResolvedLibrary,
-    ResolvedVersion,
+    ResolvedVersion, RuleContext,
 };
 
 /// Prepared Forge installation artifacts extracted from the Forge installer JAR.
@@ -22,10 +23,21 @@ pub struct PreparedForge {
     pub extracted_data_files: HashMap<String, PathBuf>,
 }
 
-/// Validates that `rel` is a safe relative archive path (no `..`, root, or drive prefix).
+/// Validates that `raw` is a safe relative archive path (no `..`, root, NUL, or Windows drive prefix).
 fn validate_safe_rel_path(raw: &str) -> MqResult<PathBuf> {
+    if raw.is_empty() || raw.contains('\0') || raw.starts_with('/') || raw.starts_with('\\') {
+        return Err(MqError::ZipSlip {
+            entry: raw.to_owned(),
+        });
+    }
+    if raw.len() >= 2 && raw.as_bytes()[0].is_ascii_alphabetic() && raw.as_bytes()[1] == b':' {
+        return Err(MqError::ZipSlip {
+            entry: raw.to_owned(),
+        });
+    }
+    let normalized = raw.replace('\\', "/");
     let mut out = PathBuf::new();
-    for comp in Path::new(raw).components() {
+    for comp in Path::new(&normalized).components() {
         match comp {
             Component::Normal(seg) => out.push(seg),
             Component::CurDir => {}
@@ -219,10 +231,11 @@ async fn prepare_installer_loader(
         .collect();
 
     for name in entry_names {
-        if name.ends_with('/') {
+        let normalized = name.replace('\\', "/");
+        if normalized.ends_with('/') {
             continue;
         }
-        if let Some(rel_after_maven) = name.strip_prefix("maven/") {
+        if let Some(rel_after_maven) = normalized.strip_prefix("maven/") {
             if rel_after_maven.is_empty() {
                 continue;
             }
@@ -252,13 +265,14 @@ async fn prepare_installer_loader(
             }
             let data = read_zip_entry_bytes(&mut archive, archive_rel)?;
             fs::write(&dest, &data)?;
-            extracted_data_files.insert(val.to_owned(), dest);
+            extracted_data_files.insert(val.to_owned(), strip_windows_verbatim_prefix(&dest));
         }
     }
 
+    let rule_ctx = RuleContext::current();
     let mut installer_libraries = Vec::with_capacity(install_profile.libraries.len());
     for raw_lib in &install_profile.libraries {
-        installer_libraries.push(raw_lib.to_resolved_library_for_loader(ModLoaderKind::Forge)?);
+        installer_libraries.push(raw_lib.to_resolved_library_for_context(loader, &rule_ctx)?);
     }
 
     Ok(PreparedForge {
@@ -312,10 +326,10 @@ fn read_jar_main_class(jar_path: &Path) -> MqResult<String> {
 }
 
 /// Resolves a `[group:artifact:version[:classifier][@ext]]` bracketed Maven coordinate
-/// into an absolute path inside `libs_dir` using native OS separators.
+/// into an absolute path inside `libs_dir` using native OS separators and without Windows `\\?\`.
 fn resolve_maven_bracketed_path(coord: &str, libs_dir: &Path) -> MqResult<PathBuf> {
     let art = maven_coord_to_artifact(coord, None, None, 0)?;
-    let mut path = libs_dir.to_path_buf();
+    let mut path = strip_windows_verbatim_prefix(libs_dir);
     for seg in art.path.split('/') {
         if !seg.is_empty() {
             path.push(seg);
@@ -335,18 +349,28 @@ fn resolve_processor_arg(
     forge: &PreparedForge,
 ) -> MqResult<String> {
     let mut s = raw_arg.to_owned();
+    let clean_mc_jar = strip_windows_verbatim_prefix(minecraft_jar);
+    let clean_instance_dir = strip_windows_verbatim_prefix(instance_dir);
+    let clean_installer_jar = strip_windows_verbatim_prefix(installer_jar);
+    let clean_libs_dir = strip_windows_verbatim_prefix(libs_dir);
 
     // Built-in Forge processor variables
     let builtins: [(&str, String); 6] = [
         ("{SIDE}", "client".to_owned()),
         (
             "{MINECRAFT_JAR}",
-            minecraft_jar.to_string_lossy().into_owned(),
+            clean_mc_jar.to_string_lossy().into_owned(),
         ),
         ("{MINECRAFT_VERSION}", mc_version.to_owned()),
-        ("{ROOT}", instance_dir.to_string_lossy().into_owned()),
-        ("{INSTALLER}", installer_jar.to_string_lossy().into_owned()),
-        ("{LIBRARY_DIR}", libs_dir.to_string_lossy().into_owned()),
+        ("{ROOT}", clean_instance_dir.to_string_lossy().into_owned()),
+        (
+            "{INSTALLER}",
+            clean_installer_jar.to_string_lossy().into_owned(),
+        ),
+        (
+            "{LIBRARY_DIR}",
+            clean_libs_dir.to_string_lossy().into_owned(),
+        ),
     ];
     for (token, replacement) in builtins {
         if s.contains(token) {
@@ -364,18 +388,16 @@ fn resolve_processor_arg(
         let resolved_val =
             if raw_val.starts_with('[') && raw_val.ends_with(']') && raw_val.len() > 2 {
                 let coord = &raw_val[1..raw_val.len() - 1];
-                resolve_maven_bracketed_path(coord, libs_dir)?
+                resolve_maven_bracketed_path(coord, &clean_libs_dir)?
                     .to_string_lossy()
                     .into_owned()
             } else if raw_val.starts_with('/') {
-                forge
-                    .extracted_data_files
-                    .get(raw_val)
-                    .ok_or_else(|| {
-                        MqError::Archive(format!(
-                            "missing extracted Forge data file '{raw_val}' for key '{key}'"
-                        ))
-                    })?
+                let extracted = forge.extracted_data_files.get(raw_val).ok_or_else(|| {
+                    MqError::Archive(format!(
+                        "missing extracted Forge data file '{raw_val}' for key '{key}'"
+                    ))
+                })?;
+                strip_windows_verbatim_prefix(extracted)
                     .to_string_lossy()
                     .into_owned()
             } else if raw_val.starts_with('\'') && raw_val.ends_with('\'') && raw_val.len() >= 2 {
@@ -390,7 +412,7 @@ fn resolve_processor_arg(
     let trimmed = s.trim();
     if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() > 2 {
         let coord = &trimmed[1..trimmed.len() - 1];
-        return Ok(resolve_maven_bracketed_path(coord, libs_dir)?
+        return Ok(resolve_maven_bracketed_path(coord, &clean_libs_dir)?
             .to_string_lossy()
             .into_owned());
     }
@@ -407,7 +429,11 @@ pub async fn run_forge_processors(
     minecraft_jar: &Path,
     forge: &PreparedForge,
 ) -> MqResult<()> {
-    let libs_dir = paths.libraries_dir();
+    let clean_java_path = strip_windows_verbatim_prefix(java_path);
+    let libs_dir = strip_windows_verbatim_prefix(&paths.libraries_dir());
+    let clean_instance_dir = strip_windows_verbatim_prefix(instance_dir);
+    let clean_mc_jar = strip_windows_verbatim_prefix(minecraft_jar);
+    let clean_installer_jar = strip_windows_verbatim_prefix(&forge.installer_jar_path);
     let sep = mq_core::platform::classpath_separator();
 
     for (idx, proc) in forge.install_profile.processors.iter().enumerate() {
@@ -440,9 +466,9 @@ pub async fn run_forge_processors(
             resolved_args.push(resolve_processor_arg(
                 raw_arg,
                 mc_version,
-                instance_dir,
-                minecraft_jar,
-                &forge.installer_jar_path,
+                &clean_instance_dir,
+                &clean_mc_jar,
+                &clean_installer_jar,
                 &libs_dir,
                 forge,
             )?);
@@ -455,7 +481,15 @@ pub async fn run_forge_processors(
             "running Forge installer processor"
         );
 
-        let output = tokio::process::Command::new(java_path)
+        let mut cmd = tokio::process::Command::new(&clean_java_path);
+        cmd.stdin(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.arg("-Dfile.encoding=UTF-8");
+        }
+        let output = cmd
             .arg("-cp")
             .arg(&classpath)
             .arg(&main_class)
@@ -465,14 +499,14 @@ pub async fn run_forge_processors(
             .map_err(|e| {
                 MqError::Archive(format!(
                     "failed to spawn Java ({}) for Forge processor {}: {e}",
-                    java_path.display(),
+                    clean_java_path.display(),
                     proc.jar
                 ))
             })?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+            let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
             let tail_err: String = stderr
                 .chars()
                 .rev()
@@ -510,8 +544,15 @@ mod tests {
     fn resolves_processor_args_and_rejects_zip_slip() {
         assert!(validate_safe_rel_path("../evil.jar").is_err());
         assert!(validate_safe_rel_path("/abs/evil.jar").is_err());
+        assert!(validate_safe_rel_path(r"C:\Windows\evil.jar").is_err());
+        assert!(validate_safe_rel_path(r"\evil.jar").is_err());
+        assert!(validate_safe_rel_path(r"foo\..\evil.jar").is_err());
         assert_eq!(
             validate_safe_rel_path("net/minecraftforge/forge.jar").unwrap(),
+            PathBuf::from("net/minecraftforge/forge.jar")
+        );
+        assert_eq!(
+            validate_safe_rel_path(r"net\minecraftforge\forge.jar").unwrap(),
             PathBuf::from("net/minecraftforge/forge.jar")
         );
 

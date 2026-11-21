@@ -9,6 +9,10 @@ use url::Url;
 
 use crate::assets::ClientLoggingConfig;
 use crate::models::{ArtifactDownload, JavaVersionSpec, ResolvedLibrary, RuleContext};
+use crate::rules::{
+    arch_bitness_token, expand_native_classifier_candidates, normalize_arch, normalize_os_name,
+    os_version_matches,
+};
 
 /// Default base URL for the official Fabric Meta v2 API.
 pub const FABRIC_META_BASE_URL: &str = "https://meta.fabricmc.net";
@@ -402,15 +406,26 @@ impl RawLoaderLibrary {
         (group, artifact, classifier)
     }
 
-    /// Converts this raw profile library entry into a [`ResolvedLibrary`] with default repository fallback.
+    /// Converts this raw profile library entry into a [`ResolvedLibrary`] with default repository fallback
+    /// for the current host OS and CPU architecture.
     pub fn to_resolved_library(&self) -> MqResult<ResolvedLibrary> {
-        self.to_resolved_library_for_loader(ModLoaderKind::Vanilla)
+        self.to_resolved_library_for_context(ModLoaderKind::Vanilla, &RuleContext::current())
     }
 
-    /// Converts this raw profile library entry into a [`ResolvedLibrary`] using the appropriate loader repository.
+    /// Converts this raw profile library entry into a [`ResolvedLibrary`] using the appropriate loader repository
+    /// for the current host OS and CPU architecture.
     pub fn to_resolved_library_for_loader(
         &self,
         loader: ModLoaderKind,
+    ) -> MqResult<ResolvedLibrary> {
+        self.to_resolved_library_for_context(loader, &RuleContext::current())
+    }
+
+    /// Converts this raw profile library entry into a [`ResolvedLibrary`] for an explicit [`RuleContext`].
+    pub fn to_resolved_library_for_context(
+        &self,
+        loader: ModLoaderKind,
+        ctx: &RuleContext,
     ) -> MqResult<ResolvedLibrary> {
         let default_repo = default_repo_for_coordinate(&self.name, loader);
         let effective_repo = match self.url.as_deref().map(str::trim) {
@@ -426,9 +441,25 @@ impl RawLoaderLibrary {
             self.size.unwrap_or(0),
         )?;
 
-        let is_native_linux_coord = self.name.contains(":natives-linux")
-            || self.name.ends_with(":natives-linux")
-            || self.name.contains("natives-linux@");
+        let target_os = normalize_os_name(&ctx.os_name);
+        let is_native_for_target_os = match target_os {
+            "windows" => {
+                self.name.contains(":natives-windows") || self.name.contains("natives-windows@")
+            }
+            "osx" => {
+                self.name.contains(":natives-macos")
+                    || self.name.contains("natives-macos@")
+                    || self.name.contains(":natives-osx")
+                    || self.name.contains("natives-osx@")
+            }
+            _ => self.name.contains(":natives-linux") || self.name.contains("natives-linux@"),
+        };
+
+        let native_template_for_os = self.natives.as_ref().and_then(|m| {
+            m.iter()
+                .find(|(k, _)| normalize_os_name(k).eq_ignore_ascii_case(target_os))
+                .map(|(_, v)| v.as_str())
+        });
 
         let (artifact, native_linux) = match &self.downloads {
             Some(downloads) => {
@@ -446,20 +477,39 @@ impl RawLoaderLibrary {
                     Some(coord_artifact.clone())
                 };
 
-                let native_clf = self
-                    .natives
-                    .as_ref()
-                    .and_then(|m| m.get("linux").cloned())
-                    .unwrap_or_else(|| "natives-linux".to_string());
+                let classifier_candidates: Vec<String> = match native_template_for_os {
+                    Some(template) => expand_native_classifier_candidates(template, &ctx.os_arch),
+                    None if self.natives.is_some() => Vec::new(),
+                    None => match target_os {
+                        "windows" => expand_native_classifier_candidates(
+                            "natives-windows-${arch}",
+                            &ctx.os_arch,
+                        )
+                        .into_iter()
+                        .chain(std::iter::once("natives-windows".to_string()))
+                        .collect(),
+                        "osx" => vec!["natives-macos".to_string(), "natives-osx".to_string()],
+                        _ => expand_native_classifier_candidates(
+                            "natives-linux-${arch}",
+                            &ctx.os_arch,
+                        )
+                        .into_iter()
+                        .chain(std::iter::once("natives-linux".to_string()))
+                        .collect(),
+                    },
+                };
 
-                let native = if let Some(raw_nat) = downloads
-                    .classifiers
-                    .get(&native_clf)
-                    .or_else(|| downloads.classifiers.get("natives-linux"))
-                {
+                let matched_classifier = classifier_candidates.iter().find_map(|cand| {
+                    downloads
+                        .classifiers
+                        .get(cand)
+                        .map(|raw| (cand.as_str(), raw))
+                });
+
+                let native = if let Some((matched_clf, raw_nat)) = matched_classifier {
                     let fallback_native = maven_coord_to_artifact(
                         &format!(
-                            "{}:{native_clf}",
+                            "{}:{matched_clf}",
                             self.name.split('@').next().unwrap_or(&self.name)
                         ),
                         effective_repo,
@@ -474,7 +524,7 @@ impl RawLoaderLibrary {
                         None,
                         None,
                     )?)
-                } else if is_native_linux_coord {
+                } else if is_native_for_target_os {
                     primary.clone()
                 } else {
                     None
@@ -483,21 +533,23 @@ impl RawLoaderLibrary {
                 (primary, native)
             }
             None => {
-                if let Some(natives_map) = &self.natives {
-                    let native_clf = natives_map
-                        .get("linux")
-                        .cloned()
-                        .unwrap_or_else(|| "natives-linux".to_string());
-                    let clean = self.name.split('@').next().unwrap_or(&self.name);
-                    let native_coord = format!("{clean}:{native_clf}");
-                    let native_artifact = maven_coord_to_artifact(
-                        &native_coord,
-                        effective_repo,
-                        self.sha1,
-                        self.size.unwrap_or(0),
-                    )?;
-                    (None, Some(native_artifact))
-                } else if is_native_linux_coord {
+                if self.natives.is_some() {
+                    if let Some(template) = native_template_for_os {
+                        let expanded_clf =
+                            template.replace("${arch}", arch_bitness_token(&ctx.os_arch));
+                        let clean = self.name.split('@').next().unwrap_or(&self.name);
+                        let native_coord = format!("{clean}:{expanded_clf}");
+                        let native_artifact = maven_coord_to_artifact(
+                            &native_coord,
+                            effective_repo,
+                            self.sha1,
+                            self.size.unwrap_or(0),
+                        )?;
+                        (None, Some(native_artifact))
+                    } else {
+                        (None, None)
+                    }
+                } else if is_native_for_target_os {
                     (Some(coord_artifact.clone()), Some(coord_artifact))
                 } else {
                     (Some(coord_artifact), None)
@@ -567,14 +619,30 @@ fn rules_allow(rules: &[RawLoaderRule], ctx: &RuleContext) -> bool {
         return true;
     }
 
+    let ctx_os = normalize_os_name(&ctx.os_name);
+    let ctx_arch = normalize_arch(&ctx.os_arch);
+
     let mut allowed = false;
     for rule in rules {
         let os_matches = match &rule.os {
             None => true,
             Some(os) => {
-                let name_ok = os.name.as_deref().is_none_or(|n| n == ctx.os_name);
-                let arch_ok = os.arch.as_deref().is_none_or(|a| a == ctx.os_arch);
-                name_ok && arch_ok
+                let name_ok = os
+                    .name
+                    .as_deref()
+                    .is_none_or(|n| normalize_os_name(n).eq_ignore_ascii_case(ctx_os));
+                let arch_ok = os
+                    .arch
+                    .as_deref()
+                    .is_none_or(|a| normalize_arch(a).eq_ignore_ascii_case(ctx_arch));
+                let ver_ok = match os.version.as_deref() {
+                    None => true,
+                    Some(pat) => ctx
+                        .os_version
+                        .as_deref()
+                        .is_some_and(|actual| os_version_matches(pat, actual)),
+                };
+                name_ok && arch_ok && ver_ok
             }
         };
 
@@ -584,7 +652,7 @@ fn rules_allow(rules: &[RawLoaderRule], ctx: &RuleContext) -> bool {
             .all(|(key, expected)| ctx.features.get(key).copied().unwrap_or(false) == *expected);
 
         if os_matches && features_match {
-            allowed = rule.action == "allow";
+            allowed = rule.action.trim().eq_ignore_ascii_case("allow");
         }
     }
 
@@ -609,11 +677,23 @@ fn flatten_arguments(entries: &[RawArgumentEntry], ctx: &RuleContext) -> Vec<Str
     out
 }
 
-/// Parses a Fabric, Quilt, Forge, or NeoForge profile JSON string into a [`LoaderProfile`].
+/// Parses a Fabric, Quilt, Forge, or NeoForge profile JSON string into a [`LoaderProfile`]
+/// evaluated against the current host [`RuleContext`].
 pub fn parse_loader_profile(
     json: &str,
     loader_kind: ModLoaderKind,
     loader_version: Option<String>,
+) -> MqResult<LoaderProfile> {
+    parse_loader_profile_for_context(json, loader_kind, loader_version, &RuleContext::current())
+}
+
+/// Parses a Fabric, Quilt, Forge, or NeoForge profile JSON string into a [`LoaderProfile`]
+/// evaluated against an explicit [`RuleContext`].
+pub fn parse_loader_profile_for_context(
+    json: &str,
+    loader_kind: ModLoaderKind,
+    loader_version: Option<String>,
+    rule_ctx: &RuleContext,
 ) -> MqResult<LoaderProfile> {
     let raw: RawLoaderProfile = serde_json::from_str(json)?;
 
@@ -634,12 +714,10 @@ pub fn parse_loader_profile(
         .map(|s| s.trim().to_owned())
         .unwrap_or_default();
 
-    let rule_ctx = RuleContext::default();
-
     let (jvm_arguments, game_arguments) = match &raw.arguments {
         Some(args) => (
-            flatten_arguments(&args.jvm, &rule_ctx),
-            flatten_arguments(&args.game, &rule_ctx),
+            flatten_arguments(&args.jvm, rule_ctx),
+            flatten_arguments(&args.game, rule_ctx),
         ),
         None => {
             let legacy_game = raw
@@ -654,11 +732,14 @@ pub fn parse_loader_profile(
     let mut libraries = Vec::with_capacity(raw.libraries.len());
     for raw_lib in &raw.libraries {
         if let Some(rules) = &raw_lib.rules {
-            if !rules_allow(rules, &rule_ctx) {
+            if !rules_allow(rules, rule_ctx) {
                 continue;
             }
         }
-        libraries.push(raw_lib.to_resolved_library_for_loader(loader_kind)?);
+        let resolved = raw_lib.to_resolved_library_for_context(loader_kind, rule_ctx)?;
+        if resolved.artifact.is_some() || resolved.native_linux.is_some() {
+            libraries.push(resolved);
+        }
     }
 
     let normalized_loader_version = loader_version
@@ -1603,7 +1684,8 @@ mod tests {
                 {
                     "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209",
                     "natives": {
-                        "linux": "natives-linux"
+                        "linux": "natives-linux",
+                        "windows": "natives-windows-${arch}"
                     },
                     "extract": {
                         "exclude": ["META-INF/"]
@@ -1612,23 +1694,52 @@ mod tests {
             ]
         }"#;
 
-        let forge = parse_loader_profile(forge_json, ModLoaderKind::Forge, None)
-            .expect("parse forge profile");
+        let forge_linux = parse_loader_profile_for_context(
+            forge_json,
+            ModLoaderKind::Forge,
+            None,
+            &RuleContext::linux_x86_64(),
+        )
+        .expect("parse forge profile on linux");
 
-        assert_eq!(forge.loader, ModLoaderKind::Forge);
-        assert_eq!(forge.main_class, "net.minecraft.launchwrapper.Launch");
-        assert_eq!(forge.java_version.as_ref().unwrap().major_version, 8);
-        assert!(forge.logging.is_some());
-        assert_eq!(forge.libraries.len(), 1);
+        assert_eq!(forge_linux.loader, ModLoaderKind::Forge);
+        assert_eq!(forge_linux.main_class, "net.minecraft.launchwrapper.Launch");
+        assert_eq!(forge_linux.java_version.as_ref().unwrap().major_version, 8);
+        assert!(forge_linux.logging.is_some());
+        assert_eq!(forge_linux.libraries.len(), 1);
 
-        let lwjgl = &forge.libraries[0];
-        assert!(lwjgl.native_linux.is_some());
+        let lwjgl_linux = &forge_linux.libraries[0];
+        assert!(lwjgl_linux.native_linux.is_some());
         assert_eq!(
-            lwjgl.native_linux.as_ref().unwrap().path,
+            lwjgl_linux.native_linux.as_ref().unwrap().path,
             "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-linux.jar"
         );
-        assert_eq!(lwjgl.extract_exclude, vec!["META-INF/"]);
-        assert!(!lwjgl.include_in_classpath);
+        assert_eq!(lwjgl_linux.extract_exclude, vec!["META-INF/"]);
+        assert!(!lwjgl_linux.include_in_classpath);
+
+        let forge_win64 = parse_loader_profile_for_context(
+            forge_json,
+            ModLoaderKind::Forge,
+            None,
+            &RuleContext::windows_x86_64(),
+        )
+        .expect("parse forge profile on windows x64");
+        assert_eq!(
+            forge_win64.libraries[0].native_linux.as_ref().unwrap().path,
+            "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-windows-64.jar"
+        );
+
+        let forge_win32 = parse_loader_profile_for_context(
+            forge_json,
+            ModLoaderKind::Forge,
+            None,
+            &RuleContext::windows_x86(),
+        )
+        .expect("parse forge profile on windows x86");
+        assert_eq!(
+            forge_win32.libraries[0].native_linux.as_ref().unwrap().path,
+            "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-windows-32.jar"
+        );
     }
 
     #[test]

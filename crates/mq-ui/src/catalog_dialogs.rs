@@ -165,6 +165,15 @@ fn project_window(ctx: &Context, state: &mut UiState) {
     }
 }
 
+fn render_external_link(ui: &mut Ui, label: &str, url: &str, tokens: &Tokens) {
+    let resp = ui
+        .add(egui::Link::new(RichText::new(label).color(tokens.accent)))
+        .on_hover_text(url);
+    if resp.clicked() && crate::catalog_flow::is_safe_http_url(url) {
+        let _ = crate::opener::open_that(url);
+    }
+}
+
 fn render_block(ui: &mut Ui, block: &MdBlock, tokens: &Tokens) {
     match block {
         MdBlock::Heading { text, .. } => {
@@ -174,7 +183,7 @@ fn render_block(ui: &mut Ui, block: &MdBlock, tokens: &Tokens) {
         MdBlock::Paragraph { text, links } => {
             ui.label(RichText::new(text).color(tokens.text));
             for (label, url) in links {
-                ui.hyperlink_to(label, url);
+                render_external_link(ui, label, url, tokens);
             }
         }
         MdBlock::ListItem { text } => {
@@ -190,13 +199,15 @@ fn render_block(ui: &mut Ui, block: &MdBlock, tokens: &Tokens) {
             ui.separator();
         }
         MdBlock::Image { alt, url } => {
-            ui.hyperlink_to(
+            render_external_link(
+                ui,
                 if alt.is_empty() {
                     "Изображение"
                 } else {
                     alt
                 },
                 url,
+                tokens,
             );
         }
     }
@@ -557,7 +568,9 @@ fn manual_window(ctx: &Context, state: &mut UiState) {
     }
     if let Some(url) = open_url {
         if crate::catalog_flow::is_safe_http_url(&url) {
-            ctx.open_url(egui::OpenUrl::new_tab(url));
+            if let Err(err) = crate::opener::open_that(&url) {
+                state.status_message = Some((format!("Не удалось открыть ссылку: {err}"), true));
+            }
         }
     }
     if close {

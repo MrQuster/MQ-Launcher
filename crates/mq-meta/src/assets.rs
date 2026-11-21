@@ -194,11 +194,11 @@ pub fn asset_index_file_path(assets_dir: &Path, index_id: &str) -> PathBuf {
         .join(format!("{}.json", index_id.trim()))
 }
 
-/// Saves raw asset index JSON bytes byte-for-byte to `<indexes_dir>/<id>.json` without any mutation.
+/// Saves raw asset index JSON bytes byte-for-byte to `<indexes_dir>/<id>.json` atomically.
 pub fn save_asset_index_raw(indexes_dir: &Path, id: &str, raw_json: &str) -> MqResult<PathBuf> {
     fs::create_dir_all(indexes_dir)?;
     let path = indexes_dir.join(format!("{}.json", id.trim()));
-    fs::write(&path, raw_json.as_bytes())?;
+    mq_core::platform::atomic_write(&path, raw_json.as_bytes())?;
     Ok(path)
 }
 
@@ -393,7 +393,7 @@ pub fn reconstruct_virtual_assets(asset_index: &AssetIndex, assets_dir: &Path) -
             continue;
         }
 
-        let dst = virtual_base.join(&obj.name);
+        let dst = mq_core::resolve_safe_path(&virtual_base, &obj.name)?;
         if let Some(p) = dst.parent() {
             fs::create_dir_all(p)?;
         }
@@ -431,7 +431,7 @@ pub fn reconstruct_resource_assets(
             continue;
         }
 
-        let dst = resources_base.join(&obj.name);
+        let dst = mq_core::resolve_safe_path(&resources_base, &obj.name)?;
         if let Some(p) = dst.parent() {
             fs::create_dir_all(p)?;
         }

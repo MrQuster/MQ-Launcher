@@ -193,7 +193,8 @@ async fn analyze_mods_directory(
             continue;
         }
         let fname = entry.file_name().to_string_lossy().to_string();
-        if fname.ends_with(".jar") || fname.ends_with(".jar.disabled") {
+        let lower = fname.to_ascii_lowercase();
+        if lower.ends_with(".jar") || lower.ends_with(".jar.disabled") {
             candidate_paths.push(p);
         }
     }
@@ -704,13 +705,14 @@ fn read_zip_entry_bytes<R: Read + Seek>(
             return Some(buf);
         }
     }
-    // Case-insensitive and `./`-trimmed fallback lookup
+    // Case-insensitive, separator-normalized (`\` -> `/`), and `./`-trimmed fallback lookup
     let len = archive.len();
     for i in 0..len {
         let Ok(entry) = archive.by_index(i) else {
             continue;
         };
-        let norm = entry.name().trim_start_matches("./");
+        let norm_owned = entry.name().replace('\\', "/");
+        let norm = norm_owned.trim_start_matches("./").trim_start_matches('/');
         if candidates
             .iter()
             .any(|cand| norm.eq_ignore_ascii_case(cand))
@@ -890,7 +892,8 @@ fn parse_fabric_mod_json(bytes: &[u8]) -> Option<(LoaderDescriptor, Vec<String>)
     if let Some(jars) = val.get("jars").and_then(|v| v.as_array()) {
         for j in jars {
             if let Some(path) = j.get("file").and_then(|v| v.as_str()) {
-                let p = path.trim().trim_start_matches("./");
+                let norm = path.trim().replace('\\', "/");
+                let p = norm.trim_start_matches("./").trim_start_matches('/');
                 if !p.is_empty() {
                     extra_jar_paths.push(p.to_string());
                 }
@@ -1073,12 +1076,14 @@ fn parse_quilt_mod_json(bytes: &[u8]) -> Option<(LoaderDescriptor, Vec<String>)>
     if let Some(jars) = ql.get("jars").and_then(|v| v.as_array()) {
         for j in jars {
             if let Some(s) = j.as_str() {
-                let p = s.trim().trim_start_matches("./");
+                let norm = s.trim().replace('\\', "/");
+                let p = norm.trim_start_matches("./").trim_start_matches('/');
                 if !p.is_empty() {
                     extra_jar_paths.push(p.to_string());
                 }
             } else if let Some(s) = j.get("file").and_then(|v| v.as_str()) {
-                let p = s.trim().trim_start_matches("./");
+                let norm = s.trim().replace('\\', "/");
+                let p = norm.trim_start_matches("./").trim_start_matches('/');
                 if !p.is_empty() {
                     extra_jar_paths.push(p.to_string());
                 }
@@ -1490,7 +1495,8 @@ fn parse_jarjar_metadata(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
     if let Some(arr) = val.get("jars").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(p) = item.get("path").and_then(|v| v.as_str()) {
-                let norm = p.trim().trim_start_matches("./");
+                let norm_owned = p.trim().replace('\\', "/");
+                let norm = norm_owned.trim_start_matches("./").trim_start_matches('/');
                 if !norm.is_empty() {
                     paths.push(norm.to_string());
                 }
@@ -1537,10 +1543,14 @@ fn collect_embedded_jij_ids<R: Read + Seek>(
         let Ok(entry) = archive.by_index(i) else {
             continue;
         };
-        if entry.is_dir() {
+        if entry.is_dir() || entry.name().ends_with('/') || entry.name().ends_with('\\') {
             continue;
         }
-        let norm = entry.name().trim_start_matches("./").to_string();
+        let norm_owned = entry.name().replace('\\', "/");
+        let norm = norm_owned
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
         let norm_lower = norm.to_ascii_lowercase();
         let is_jij_dir = (norm_lower.starts_with("meta-inf/jars/")
             || norm_lower.starts_with("meta-inf/jarjar/"))
@@ -1659,7 +1669,7 @@ fn analyze_single_jar(path: &Path) -> MqResult<AnalyzedJar> {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let enabled = file_name.ends_with(".jar");
+    let enabled = file_name.to_ascii_lowercase().ends_with(".jar");
 
     let file = File::open(path)?;
     let metadata = file.metadata()?;
@@ -2200,10 +2210,11 @@ pub fn sync_directory_manual_entries(
             continue;
         }
         let fname = entry.file_name().to_string_lossy().to_string();
-        if fname.ends_with(".jar")
-            || fname.ends_with(".jar.disabled")
-            || fname.ends_with(".zip")
-            || fname.ends_with(".zip.disabled")
+        let lower = fname.to_ascii_lowercase();
+        if lower.ends_with(".jar")
+            || lower.ends_with(".jar.disabled")
+            || lower.ends_with(".zip")
+            || lower.ends_with(".zip.disabled")
         {
             paths.push((fname, p));
         }
@@ -3471,5 +3482,69 @@ side="BOTH"
         assert!(!satisfies_mc_version_constraint("2.0.0", "1.x"));
         assert!(satisfies_mc_version_constraint("1.20.6", "^1.20.1"));
         assert!(!satisfies_mc_version_constraint("2.0.0", "^1.20.1"));
+    }
+
+    #[tokio::test]
+    async fn scans_jar_with_windows_backslash_meta_inf_and_embedded_jij_entries() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = ComputePool::new(2);
+        let cancel = mq_sched::CancelEpoch::new();
+        let guard = cancel.snapshot();
+
+        // Build an embedded JiJ jar in memory
+        let mut embedded_buf = Vec::new();
+        {
+            let mut ezw = ZipWriter::new(Cursor::new(&mut embedded_buf));
+            let opts = SimpleFileOptions::default();
+            ezw.start_file("fabric.mod.json", opts).unwrap();
+            ezw.write_all(br#"{"id":"embedded_win_lib","version":"1.0.0"}"#)
+                .unwrap();
+            ezw.finish().unwrap();
+        }
+
+        // Build outer JAR with Windows backslash ZIP paths & uppercase `.JAR` filename
+        let outer_jar = dir.path().join("WinPackedMod.JAR");
+        {
+            let file = File::create(&outer_jar).unwrap();
+            let mut zw = ZipWriter::new(file);
+            let opts = SimpleFileOptions::default();
+            zw.start_file(r"META-INF\mods.toml", opts).unwrap();
+            zw.write_all(
+                br#"
+modLoader="javafml"
+loaderVersion="[47,)"
+[[mods]]
+modId="win_packed_mod"
+version="2.0.0"
+displayName="Win Packed Mod"
+[[dependencies.win_packed_mod]]
+modId="embedded_win_lib"
+mandatory=true
+"#,
+            )
+            .unwrap();
+            zw.start_file(r"META-INF\jars\embedded_win_lib-1.0.0.jar", opts)
+                .unwrap();
+            zw.write_all(&embedded_buf).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let report = scan_mods_directory(dir.path(), &pool, &guard)
+            .await
+            .expect("scan mods dir");
+        assert_eq!(report.mods.len(), 1);
+        assert!(report.mods[0].enabled);
+        assert_eq!(report.mods[0].mod_id, "win_packed_mod");
+        assert_eq!(report.mods[0].name, "Win Packed Mod");
+        assert_eq!(report.mods[0].loader, Some(ModLoaderKind::Forge));
+        assert!(
+            report.conflicts.is_empty(),
+            "embedded JiJ under META-INF\\jars\\ must satisfy dependency without false missing-dep conflict: {:?}",
+            report.conflicts
+        );
     }
 }

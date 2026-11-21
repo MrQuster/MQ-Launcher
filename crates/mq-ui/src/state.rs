@@ -695,7 +695,9 @@ impl UiState {
             open: true,
             instance_label: instance_id.to_string(),
             pending: blocked.clone(),
-            watch_dir_label: watch_dir.display().to_string(),
+            watch_dir_label: crate::opener::strip_windows_verbatim_prefix(
+                &watch_dir.display().to_string(),
+            ),
             ..Default::default()
         };
         self.manual_watcher = Some(Arc::new(parking_lot::Mutex::new(

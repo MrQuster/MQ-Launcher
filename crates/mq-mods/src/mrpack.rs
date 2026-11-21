@@ -12,6 +12,8 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use mq_core::fs_util::remove_file_with_retry;
+use mq_core::platform::atomic_write;
 use mq_core::{
     resolve_safe_path, Event, EventBus, ModLoaderKind, MqError, MqPaths, MqResult, Sha1Digest,
     Sha512Digest,
@@ -202,7 +204,7 @@ impl MrpackInstalledState {
         fs::create_dir_all(instance_dir)?;
         let path = instance_dir.join(MRPACK_STATE_FILE);
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)?;
+        atomic_write(&path, json.as_bytes())?;
         Ok(())
     }
 }
@@ -274,7 +276,7 @@ fn collect_zip_prefix_rel_paths(
                 mrpack_path.display()
             ))
         })?;
-        if entry.is_dir() || entry.name().ends_with('/') {
+        if entry.is_dir() || entry.name().ends_with('/') || entry.name().ends_with('\\') {
             continue;
         }
         let norm = entry.name().replace('\\', "/");
@@ -533,7 +535,7 @@ async fn install_or_update_mrpack_inner(
             if !in_new_pack {
                 if is_unchanged {
                     // Unmodified file from old modpack version: delete it and remove from lockfile.
-                    let _ = fs::remove_file(&disk_path);
+                    let _ = remove_file_with_retry(&disk_path);
                     if let Some(fname) = disk_path.file_name().and_then(|s| s.to_str()) {
                         if let Some((key, _)) = lockfile
                             .find_by_filename(fname)
@@ -646,7 +648,7 @@ async fn install_or_update_mrpack_inner(
             {
                 continue;
             }
-            let _ = fs::remove_file(cas_path);
+            let _ = remove_file_with_retry(cas_path);
         }
 
         let mut spec = DownloadSpec::with_urls(

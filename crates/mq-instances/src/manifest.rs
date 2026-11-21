@@ -6,11 +6,40 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry, validate_windows_safe_filename};
+use mq_core::platform::atomic_write;
 use mq_core::{InstanceId, ModLoaderKind, MqError, MqPaths, MqResult};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 static RESOLVED_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Produces an [`InstanceId`] directory slug that is guaranteed safe on BOTH Unix and Windows:
+/// - Strips/replaces invalid Windows characters (`< > : " / \ | ? *`, control chars)
+/// - Strips trailing dots/spaces
+/// - Never collides with Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`,
+///   `LPT1..9`, with or without dot extensions like `con.1`).
+pub fn windows_safe_instance_id(display_name: &str) -> InstanceId {
+    let base = InstanceId::sanitize_slug(display_name);
+    let trimmed = base.as_str().trim_matches(|c: char| c == '.' || c == ' ');
+    let candidate = if trimmed.is_empty() {
+        "instance".to_owned()
+    } else {
+        trimmed.to_owned()
+    };
+
+    if validate_windows_safe_filename(&candidate) {
+        if let Ok(id) = InstanceId::new(&candidate) {
+            return id;
+        }
+    }
+
+    // Rewrite reserved device names (e.g. `con`, `nul`, `com1`, `prn.1`) so the stem before
+    // any `.` is no longer reserved on Windows.
+    let safe_stem = candidate.replace('.', "-");
+    let suffixed = format!("{safe_stem}-instance");
+    InstanceId::new(&suffixed).unwrap_or_else(|_| InstanceId::sanitize_slug("instance"))
+}
 
 /// Default minimum JVM heap allocation in MiB (`-Xms1024M`).
 pub const DEFAULT_MEMORY_MIN_MB: u32 = 1024;
@@ -118,7 +147,7 @@ impl InstanceManifest {
         loader_version: Option<String>,
     ) -> Self {
         let name_str = name.into().trim().to_owned();
-        let id = InstanceId::sanitize_slug(&name_str);
+        let id = windows_safe_instance_id(&name_str);
         Self {
             id,
             name: name_str,
@@ -220,12 +249,12 @@ impl InstanceManifest {
             file.write_all(&bytes)?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&tmp_path, &target_path)?;
+            rename_with_retry(&tmp_path, &target_path)?;
             Ok(())
         })();
 
         if let Err(err) = write_res {
-            let _ = fs::remove_file(&tmp_path);
+            let _ = remove_file_with_retry(&tmp_path);
             return Err(MqError::Io(err));
         }
 
@@ -248,13 +277,13 @@ impl InstanceManifest {
         Ok(parsed)
     }
 
-    /// Persists this manifest to `<dir>/instance.toml`.
+    /// Persists this manifest atomically to `<dir>/instance.toml`.
     pub fn save_to_dir(&self, dir: &std::path::Path) -> MqResult<()> {
         let manifest_path = dir.join(INSTANCE_MANIFEST_FILE);
         let toml_str = toml::to_string_pretty(self).map_err(|e| {
             MqError::Internal(format!("failed to serialize instance manifest: {e}"))
         })?;
-        fs::write(manifest_path, toml_str)?;
+        atomic_write(&manifest_path, toml_str.as_bytes())?;
         Ok(())
     }
 }

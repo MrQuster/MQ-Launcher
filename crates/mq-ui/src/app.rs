@@ -1763,6 +1763,9 @@ impl MqApp {
 
     /// Headless/offscreen frame rendering for visual QA and snapshots.
     pub fn render_frame_for_snapshot(&mut self, ctx: &egui::Context) {
+        if is_zero_viewport(ctx) {
+            return;
+        }
         crate::animation::begin_animation_frame(ctx);
         let accounts_list = self.state.accounts.list_accounts().to_vec();
         let active_id = self
@@ -2119,13 +2122,10 @@ impl MqApp {
         }
     }
 
-    /// Internal per-frame rendering logic executed under `catch_unwind`.
-    fn render_frame_inner(&mut self, ctx: &egui::Context) {
-        crate::animation::begin_animation_frame(ctx);
-        #[cfg(feature = "test-hooks")]
-        self.step_test_hooks(ctx);
-
-        // Drain background worker events
+    /// Drains async worker events, pending UI commands, and single-instance `.mrpack` IPC.
+    /// Runs even when the window is minimized (`0x0` viewport on Windows) so downloads,
+    /// launches, and external `.mrpack` open requests never stall while minimized.
+    fn drain_background_and_ipc(&mut self, ctx: &egui::Context) {
         self.state.drain_events();
         self.handle_worker_commands();
 
@@ -2141,9 +2141,20 @@ impl MqApp {
                     self.state.import_local_pack(path);
                 }
                 self.current_tab = NavTab::Catalog;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
+    }
+
+    /// Internal per-frame rendering logic executed under `catch_unwind`.
+    fn render_frame_inner(&mut self, ctx: &egui::Context) {
+        crate::animation::begin_animation_frame(ctx);
+        #[cfg(feature = "test-hooks")]
+        self.step_test_hooks(ctx);
+
+        // Drain background worker events and IPC
+        self.drain_background_and_ipc(ctx);
 
         // 1. Sidebar (Left)
         let accounts_list = self.state.accounts.list_accounts().to_vec();
@@ -2269,8 +2280,13 @@ impl MqApp {
         let watchdog = self.state.watchdog.clone();
         let _guard = watchdog.guard("mq_frame_update");
 
-        // Safe 0x0 handling on tiling WMs like Hyprland
+        // Safe 0x0 handling when minimized on Windows or collapsed on tiling WMs like Hyprland:
+        // keep draining background events/IPC so downloads and `.mrpack` requests continue,
+        // but skip egui layout and GPU rendering completely until the viewport is non-zero.
         if is_zero_viewport(ctx) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.drain_background_and_ipc(ctx);
+            }));
             return;
         }
 
@@ -2405,29 +2421,141 @@ impl eframe::App for MqApp {
     }
 }
 
-/// Launches the desktop GUI window.
-pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error> {
-    let options = eframe::NativeOptions {
+fn build_wgpu_configuration() -> egui_wgpu::WgpuConfiguration {
+    let setup = egui_wgpu::WgpuSetupCreateNew {
+        device_descriptor: std::sync::Arc::new(|adapter| {
+            let adapter_limits = adapter.limits();
+            let mut required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::downlevel_defaults()
+            };
+            required_limits.max_texture_dimension_2d =
+                adapter_limits.max_texture_dimension_2d.min(8192);
+            required_limits.max_texture_dimension_1d = adapter_limits
+                .max_texture_dimension_1d
+                .min(required_limits.max_texture_dimension_1d);
+            required_limits.max_buffer_size = adapter_limits
+                .max_buffer_size
+                .min(required_limits.max_buffer_size);
+            wgpu::DeviceDescriptor {
+                label: Some("mq egui wgpu device"),
+                required_features: wgpu::Features::default(),
+                required_limits,
+                memory_hints: wgpu::MemoryHints::default(),
+            }
+        }),
+        ..Default::default()
+    };
+
+    egui_wgpu::WgpuConfiguration {
+        wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
+        on_surface_error: std::sync::Arc::new(|err| match err {
+            wgpu::SurfaceError::Outdated => {
+                // Normal while minimized or mid-resize on Windows; skipping avoids 0x0 reconfigure panics.
+                egui_wgpu::SurfaceErrorAction::SkipFrame
+            }
+            wgpu::SurfaceError::Lost => {
+                // Recover cleanly after Windows lockscreen (Win+L), RDP reconnect, or GPU reset.
+                tracing::warn!("wgpu surface lost; recreating swap chain");
+                egui_wgpu::SurfaceErrorAction::RecreateSurface
+            }
+            other => {
+                tracing::warn!("Dropped wgpu frame with surface error: {other}");
+                egui_wgpu::SurfaceErrorAction::SkipFrame
+            }
+        }),
+        ..Default::default()
+    }
+}
+
+fn should_enable_window_transparency(theme: &mq_core::ThemeConfig) -> bool {
+    if cfg!(target_os = "windows") {
+        // Keep opaque Windows frames on standard DWM composition unless a transparent theme is active.
+        ThemeStyleParams::from_config(theme).compositor_transparent
+    } else {
+        true
+    }
+}
+
+fn build_native_options(renderer: eframe::Renderer, transparent: bool) -> eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MQ Launcher")
             .with_inner_size([1180.0, 740.0])
             .with_min_inner_size([960.0, 600.0])
-            .with_transparent(true)
+            .with_transparent(transparent)
             .with_decorations(true)
             .with_icon(build_app_icon()),
-        renderer: match backend {
-            GuiBackend::Vulkan => eframe::Renderer::Wgpu,
-            GuiBackend::Gl => eframe::Renderer::Glow,
-            GuiBackend::Auto => eframe::Renderer::Wgpu,
-        },
+        renderer,
+        wgpu_options: build_wgpu_configuration(),
         ..Default::default()
-    };
+    }
+}
 
+fn run_native_attempt(
+    state_slot: &std::cell::RefCell<Option<UiState>>,
+    renderer: eframe::Renderer,
+    transparent: bool,
+) -> Result<(), eframe::Error> {
+    let options = build_native_options(renderer, transparent);
     eframe::run_native(
         "MQ Launcher",
         options,
-        Box::new(|cc| Ok(Box::new(MqApp::new(cc, state)))),
+        Box::new(move |cc| {
+            let st = state_slot.borrow_mut().take().ok_or_else(
+                || -> Box<dyn std::error::Error + Send + Sync> {
+                    "UI state already consumed by an earlier backend attempt".into()
+                },
+            )?;
+            Ok(Box::new(MqApp::new(cc, st)))
+        }),
     )
+}
+
+/// Launches the desktop GUI window, automatically falling back from `wgpu` to OpenGL (`glow`)
+/// in `GuiBackend::Auto` when DX12/Vulkan initialization fails (e.g., Windows VMs, RDP, legacy GPUs).
+pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error> {
+    let want_transparent = should_enable_window_transparency(&state.config.theme);
+    let state_slot = std::cell::RefCell::new(Some(state));
+
+    match backend {
+        GuiBackend::Vulkan => {
+            run_native_attempt(&state_slot, eframe::Renderer::Wgpu, want_transparent)
+        }
+        GuiBackend::Gl => {
+            match run_native_attempt(&state_slot, eframe::Renderer::Glow, want_transparent) {
+                Ok(()) => Ok(()),
+                Err(err) if want_transparent && state_slot.borrow().is_some() => {
+                    tracing::warn!(
+                        "OpenGL (glow) failed with transparent surface ({err}); retrying opaque surface"
+                    );
+                    run_native_attempt(&state_slot, eframe::Renderer::Glow, false)
+                }
+                Err(err) => Err(err),
+            }
+        }
+        GuiBackend::Auto => {
+            match run_native_attempt(&state_slot, eframe::Renderer::Wgpu, want_transparent) {
+                Ok(()) => Ok(()),
+                Err(wgpu_err) if state_slot.borrow().is_some() => {
+                    tracing::warn!(
+                        "WGPU backend initialization failed ({wgpu_err}); falling back to OpenGL (glow)"
+                    );
+                    match run_native_attempt(&state_slot, eframe::Renderer::Glow, false) {
+                        Ok(()) => Ok(()),
+                        Err(glow_err) => {
+                            tracing::error!(
+                                "Both WGPU ({wgpu_err}) and OpenGL fallback ({glow_err}) failed"
+                            );
+                            Err(glow_err)
+                        }
+                    }
+                }
+                Err(wgpu_err) => Err(wgpu_err),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2695,5 +2823,52 @@ mod tests {
         assert!(app.state.download_history[0]
             .detail
             .contains("Проверка файлов"));
+    }
+
+    #[test]
+    fn minimized_zero_viewport_drains_commands_without_panicking() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = mq_core::MqPaths::with_root(tmp.path().to_path_buf());
+        let config = mq_core::AppConfig::default();
+        let pool = std::sync::Arc::new(mq_sched::ComputePool::new(2));
+        let mut state = UiState::new(paths, config, pool).expect("ui state");
+
+        let inst_id = mq_core::InstanceId::new("min-test").expect("valid id");
+        state.installing_instance = Some(inst_id);
+        let _ = state.cmd_sender.send(UiWorkerCommand::CancelDownload);
+
+        let mut app = MqApp::from_state(state);
+        let ctx = egui::Context::default();
+        let zero_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::ZERO,
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(zero_input, |ctx| {
+            app.render_frame(ctx);
+            app.render_frame_for_snapshot(ctx);
+        });
+
+        assert!(app.frame_crash_message.is_none());
+        assert!(
+            app.state.installing_instance.is_none(),
+            "background commands must still drain while minimized at 0x0"
+        );
+    }
+
+    #[test]
+    fn native_options_include_icon_and_wgpu_config() {
+        let opts = build_native_options(eframe::Renderer::Wgpu, false);
+        assert!(opts.viewport.icon.is_some());
+        assert_eq!(opts.viewport.transparent, Some(false));
+        assert!(should_enable_window_transparency(
+            &mq_core::ThemeConfig::preset_liquid_glass()
+        ));
+        assert_eq!(
+            should_enable_window_transparency(&mq_core::ThemeConfig::preset_matte_dark()),
+            !cfg!(target_os = "windows")
+        );
     }
 }

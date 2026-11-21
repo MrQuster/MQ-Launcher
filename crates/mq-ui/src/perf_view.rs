@@ -394,12 +394,15 @@ fn render_header(ui: &mut Ui, state: &UiState, tokens: &Tokens) {
     }
 
     ui.add_space(2.0);
+    let telemetry_subtitle = if cfg!(target_os = "windows") {
+        "Телеметрия процессора (Win32), памяти, времени кадра, активных экземпляров игры и дискового пространства."
+    } else {
+        "Телеметрия процессора (/proc/stat), памяти, времени кадра, активных экземпляров игры и дискового пространства."
+    };
     ui.label(
-        RichText::new(
-            "Телеметрия процессора (/proc/stat), памяти, времени кадра, активных экземпляров игры и дискового пространства.",
-        )
-        .color(tokens.text_muted)
-        .small(),
+        RichText::new(telemetry_subtitle)
+            .color(tokens.text_muted)
+            .small(),
     );
 }
 
@@ -470,6 +473,8 @@ fn render_kpi_cards(ui: &mut Ui, state: &UiState, tokens: &Tokens, style: &Theme
                         "Средняя: {:.1}% · Пик: {:.1}%",
                         cpu_summary.avg, cpu_summary.max
                     )
+                } else if cfg!(target_os = "windows") {
+                    "Ожидание снимка CPU".to_string()
                 } else {
                     "Ожидание снимка /proc/stat".to_string()
                 };
@@ -1041,13 +1046,19 @@ fn render_per_core_section(
         |ui| {
             ui.set_width(ui.available_width());
 
+            let cores_title = if cfg!(target_os = "windows") {
+                "Загрузка логических ядер (CPU)"
+            } else {
+                "Загрузка логических ядер (/proc/stat)"
+            };
+
             if ui.available_width() >= 560.0 {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                     paint_vector_icon(ui.painter(), r, VectorIcon::Cpu, tokens.accent);
                     ui.label(
-                        RichText::new("Загрузка логических ядер (/proc/stat)")
+                        RichText::new(cores_title)
                             .color(tokens.text)
                             .strong()
                             .size(14.0),
@@ -1075,7 +1086,7 @@ fn render_per_core_section(
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                     paint_vector_icon(ui.painter(), r, VectorIcon::Cpu, tokens.accent);
                     ui.label(
-                        RichText::new("Загрузка логических ядер (/proc/stat)")
+                        RichText::new(cores_title)
                             .color(tokens.text)
                             .strong()
                             .size(14.0),
@@ -1686,21 +1697,37 @@ fn render_tuning_section(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
                 ui.label(RichText::new("Системная обёртка запуска:").color(tokens.text));
-                if tuning_choice_chip(
-                    ui,
-                    tokens,
-                    style,
-                    state.config.default_wrapper.is_none(),
-                    "Без обёртки",
-                ) {
-                    state.config.default_wrapper = None;
-                    auto_save = true;
-                }
-                for cmd in ["gamemoderun", "mangohud", "prime-run"] {
-                    let active = state.config.default_wrapper.as_deref() == Some(cmd);
-                    if tuning_choice_chip(ui, tokens, style, active, cmd) {
-                        state.config.default_wrapper = Some(cmd.to_string());
+                if cfg!(target_os = "windows") {
+                    if state.config.default_wrapper.is_some()
+                        && tuning_choice_chip(ui, tokens, style, false, "Сбросить обёртку")
+                    {
+                        state.config.default_wrapper = None;
                         auto_save = true;
+                    }
+                    ui.label(
+                        RichText::new(
+                            "На Windows системные Linux-обёртки (gamemoderun, mangohud, prime-run) не требуются; используйте Windows Game Mode.",
+                        )
+                        .color(tokens.text_muted)
+                        .small(),
+                    );
+                } else {
+                    if tuning_choice_chip(
+                        ui,
+                        tokens,
+                        style,
+                        state.config.default_wrapper.is_none(),
+                        "Без обёртки",
+                    ) {
+                        state.config.default_wrapper = None;
+                        auto_save = true;
+                    }
+                    for cmd in ["gamemoderun", "mangohud", "prime-run"] {
+                        let active = state.config.default_wrapper.as_deref() == Some(cmd);
+                        if tuning_choice_chip(ui, tokens, style, active, cmd) {
+                            state.config.default_wrapper = Some(cmd.to_string());
+                            auto_save = true;
+                        }
                     }
                 }
             });
@@ -1711,11 +1738,20 @@ fn render_tuning_section(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
                 ui.label(RichText::new("Графический бэкенд:").color(tokens.text));
-                for (backend, label) in [
-                    (GuiBackend::Auto, "Авто (Vulkan -> OpenGL)"),
-                    (GuiBackend::Vulkan, "Vulkan (WGPU)"),
-                    (GuiBackend::Gl, "OpenGL (Glow)"),
-                ] {
+                let backend_choices = if cfg!(target_os = "windows") {
+                    [
+                        (GuiBackend::Auto, "Авто (DX12 / Vulkan -> OpenGL)"),
+                        (GuiBackend::Vulkan, "DX12 / Vulkan (WGPU)"),
+                        (GuiBackend::Gl, "OpenGL (Glow)"),
+                    ]
+                } else {
+                    [
+                        (GuiBackend::Auto, "Авто (Vulkan -> OpenGL)"),
+                        (GuiBackend::Vulkan, "Vulkan (WGPU)"),
+                        (GuiBackend::Gl, "OpenGL (Glow)"),
+                    ]
+                };
+                for (backend, label) in backend_choices {
                     if tuning_choice_chip(
                         ui,
                         tokens,

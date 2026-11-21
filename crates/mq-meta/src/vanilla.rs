@@ -10,7 +10,10 @@ use crate::models::{
     ArtifactDownload, AssetIndexPointer, JavaVersionSpec, ResolvedLibrary, ResolvedVersion,
     RuleContext, VersionManifest, VersionManifestEntry,
 };
-use crate::rules::{evaluate_rules, normalize_arch, normalize_os_name, RawRule};
+use crate::rules::{
+    arch_bitness_token, evaluate_rules, expand_native_classifier_candidates, normalize_os_name,
+    RawRule,
+};
 
 /// Official Mojang v2 version manifest endpoint.
 pub const MOJANG_VERSION_MANIFEST_URL: &str =
@@ -339,13 +342,6 @@ fn evaluate_argument_entries(
     out
 }
 
-fn arch_bitness_token(arch: &str) -> &'static str {
-    match normalize_arch(arch) {
-        "x86" => "32",
-        _ => "64",
-    }
-}
-
 fn resolve_artifact_download(
     raw: &VanillaRawArtifact,
     coord: &str,
@@ -415,30 +411,38 @@ fn resolve_native_classifier(
         return Ok(None);
     };
 
-    let Some(ref downloads) = raw_lib.downloads else {
-        return Ok(None);
-    };
+    let candidates = expand_native_classifier_candidates(template, &ctx.os_arch);
 
-    let candidates = [
-        template.replace("${arch}", &ctx.os_arch),
-        template.replace("${arch}", normalize_arch(&ctx.os_arch)),
-        template.replace("${arch}", arch_bitness_token(&ctx.os_arch)),
-        template.to_string(),
-    ];
-
-    for key in &candidates {
-        if let Some(raw_cls_art) = downloads.classifiers.get(key) {
-            let resolved = resolve_artifact_download(
-                raw_cls_art,
-                &raw_lib.name,
-                Some(key),
-                raw_lib.url.as_deref(),
-            )?;
-            return Ok(Some(resolved));
+    if let Some(ref downloads) = raw_lib.downloads {
+        for key in &candidates {
+            if let Some(raw_cls_art) = downloads.classifiers.get(key) {
+                let resolved = resolve_artifact_download(
+                    raw_cls_art,
+                    &raw_lib.name,
+                    Some(key),
+                    raw_lib.url.as_deref(),
+                )?;
+                return Ok(Some(resolved));
+            }
         }
+        return Ok(None);
     }
 
-    Ok(None)
+    // Legacy library without a `downloads` block: synthesize Maven artifact path for the expanded classifier.
+    let expanded_clf = template.replace("${arch}", arch_bitness_token(&ctx.os_arch));
+    let raw_synth = VanillaRawArtifact {
+        path: None,
+        url: String::new(),
+        sha1: None,
+        size: 0,
+    };
+    let resolved = resolve_artifact_download(
+        &raw_synth,
+        &raw_lib.name,
+        Some(&expanded_clf),
+        raw_lib.url.as_deref(),
+    )?;
+    Ok(Some(resolved))
 }
 
 fn resolve_library(
@@ -1729,5 +1733,108 @@ mod tests {
             vec!["-Dparent.prop=true", "-Dchild.prop=true"]
         );
         assert_eq!(merged.game_arguments, vec!["--parentGame", "--childGame"]);
+    }
+
+    #[test]
+    fn parses_windows_natives_and_arch_placeholder_excluding_linux_and_macos() {
+        let win_json = r#"{
+            "id": "1.12.2",
+            "mainClass": "net.minecraft.client.main.Main",
+            "minecraftArguments": "--username ${auth_player_name}",
+            "libraries": [
+                {
+                    "name": "org.lwjgl:lwjgl:3.3.3:natives-linux",
+                    "downloads": {
+                        "artifact": {
+                            "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar",
+                            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar"
+                        }
+                    },
+                    "rules": [{ "action": "allow", "os": { "name": "linux" } }]
+                },
+                {
+                    "name": "org.lwjgl:lwjgl:3.3.3:natives-macos",
+                    "downloads": {
+                        "artifact": {
+                            "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-macos.jar",
+                            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-macos.jar"
+                        }
+                    },
+                    "rules": [{ "action": "allow", "os": { "name": "osx" } }]
+                },
+                {
+                    "name": "org.lwjgl:lwjgl:3.3.3:natives-windows",
+                    "downloads": {
+                        "artifact": {
+                            "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar",
+                            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar"
+                        }
+                    },
+                    "rules": [{ "action": "allow", "os": { "name": "windows" } }]
+                },
+                {
+                    "name": "tv.twitch:twitch-platform:6.5",
+                    "downloads": {
+                        "classifiers": {
+                            "natives-windows-32": {
+                                "path": "tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-windows-32.jar",
+                                "url": "https://libraries.minecraft.net/tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-windows-32.jar"
+                            },
+                            "natives-windows-64": {
+                                "path": "tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-windows-64.jar",
+                                "url": "https://libraries.minecraft.net/tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-windows-64.jar"
+                            },
+                            "natives-linux": {
+                                "path": "tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-linux.jar",
+                                "url": "https://libraries.minecraft.net/tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-linux.jar"
+                            }
+                        }
+                    },
+                    "extract": { "exclude": ["META-INF/"] },
+                    "natives": {
+                        "linux": "natives-linux",
+                        "windows": "natives-windows-${arch}"
+                    }
+                },
+                {
+                    "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4",
+                    "natives": {
+                        "windows": "natives-windows-${arch}"
+                    },
+                    "extract": { "exclude": ["META-INF/"] }
+                }
+            ]
+        }"#;
+
+        let win64 = parse_vanilla_version(win_json, &RuleContext::windows_x86_64())
+            .expect("parse windows x64");
+        let names64: Vec<&str> = win64.libraries.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names64,
+            vec![
+                "org.lwjgl:lwjgl:3.3.3:natives-windows",
+                "tv.twitch:twitch-platform:6.5",
+                "org.lwjgl.lwjgl:lwjgl-platform:2.9.4",
+            ]
+        );
+        assert_eq!(
+            win64.libraries[1].native_linux.as_ref().unwrap().path,
+            "tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-windows-64.jar"
+        );
+        assert_eq!(
+            win64.libraries[2].native_linux.as_ref().unwrap().path,
+            "org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-windows-64.jar"
+        );
+
+        let win32 = parse_vanilla_version(win_json, &RuleContext::windows_x86())
+            .expect("parse windows x86");
+        assert_eq!(
+            win32.libraries[1].native_linux.as_ref().unwrap().path,
+            "tv/twitch/twitch-platform/6.5/twitch-platform-6.5-natives-windows-32.jar"
+        );
+        assert_eq!(
+            win32.libraries[2].native_linux.as_ref().unwrap().path,
+            "org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-windows-32.jar"
+        );
     }
 }

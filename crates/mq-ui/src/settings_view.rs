@@ -648,10 +648,11 @@ impl SettingsView {
                             )
                             .changed()
                         {
-                            state.config.theme.backdrop_path = if bg_path.trim().is_empty() {
+                            let cleaned = crate::opener::clean_user_path(&bg_path);
+                            state.config.theme.backdrop_path = if cleaned.is_empty() {
                                 None
                             } else {
-                                Some(bg_path.trim().to_string())
+                                Some(cleaned)
                             };
                             should_save = true;
                         }
@@ -870,10 +871,11 @@ impl SettingsView {
                         )
                         .clicked()
                         {
-                            let target_path = if self.theme_export_path.trim().is_empty() {
+                            let cleaned = crate::opener::clean_user_path(&self.theme_export_path);
+                            let target_path = if cleaned.is_empty() {
                                 state.paths.theme_file()
                             } else {
-                                std::path::PathBuf::from(self.theme_export_path.trim())
+                                std::path::PathBuf::from(cleaned)
                             };
                             if state.config.theme.save_to_file(&target_path).is_ok() {
                                 state.status_message = Some((
@@ -893,10 +895,11 @@ impl SettingsView {
                         )
                         .clicked()
                         {
-                            let target_path = if self.theme_export_path.trim().is_empty() {
+                            let cleaned = crate::opener::clean_user_path(&self.theme_export_path);
+                            let target_path = if cleaned.is_empty() {
                                 state.paths.theme_file()
                             } else {
-                                std::path::PathBuf::from(self.theme_export_path.trim())
+                                std::path::PathBuf::from(cleaned)
                             };
                             if let Ok(loaded) = ThemeConfig::load_from_file(&target_path) {
                                 state.config.theme = loaded;
@@ -1051,39 +1054,49 @@ impl SettingsView {
                 );
                 ui.add_space(4.0);
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .selectable_label(state.config.default_wrapper.is_none(), "Без обёртки")
                         .clicked()
                     {
                         state.config.default_wrapper = None;
                     }
-                    if ui
-                        .selectable_label(
-                            state.config.default_wrapper.as_deref() == Some("gamemoderun"),
-                            "gamemoderun",
-                        )
-                        .clicked()
-                    {
-                        state.config.default_wrapper = Some("gamemoderun".to_string());
-                    }
-                    if ui
-                        .selectable_label(
-                            state.config.default_wrapper.as_deref() == Some("mangohud"),
-                            "mangohud",
-                        )
-                        .clicked()
-                    {
-                        state.config.default_wrapper = Some("mangohud".to_string());
-                    }
-                    if ui
-                        .selectable_label(
-                            state.config.default_wrapper.as_deref() == Some("prime-run"),
-                            "prime-run",
-                        )
-                        .clicked()
-                    {
-                        state.config.default_wrapper = Some("prime-run".to_string());
+                    if cfg!(target_os = "windows") {
+                        ui.label(
+                            RichText::new(
+                                "Linux-пресеты (gamemoderun, mangohud, prime-run) скрыты на Windows.",
+                            )
+                            .color(tokens.text_muted)
+                            .small(),
+                        );
+                    } else {
+                        if ui
+                            .selectable_label(
+                                state.config.default_wrapper.as_deref() == Some("gamemoderun"),
+                                "gamemoderun",
+                            )
+                            .clicked()
+                        {
+                            state.config.default_wrapper = Some("gamemoderun".to_string());
+                        }
+                        if ui
+                            .selectable_label(
+                                state.config.default_wrapper.as_deref() == Some("mangohud"),
+                                "mangohud",
+                            )
+                            .clicked()
+                        {
+                            state.config.default_wrapper = Some("mangohud".to_string());
+                        }
+                        if ui
+                            .selectable_label(
+                                state.config.default_wrapper.as_deref() == Some("prime-run"),
+                                "prime-run",
+                            )
+                            .clicked()
+                        {
+                            state.config.default_wrapper = Some("prime-run".to_string());
+                        }
                     }
                 });
 
@@ -1463,16 +1476,17 @@ impl SettingsView {
 
                 ui.label(RichText::new("Графический бэкенд (GUI)").strong());
                 ui.add_space(4.0);
+                let (auto_label, wgpu_label) = if cfg!(target_os = "windows") {
+                    ("Авто (DX12 / Vulkan -> OpenGL)", "DX12 / Vulkan (WGPU)")
+                } else {
+                    ("Авто (Vulkan -> OpenGL)", "Vulkan (WGPU)")
+                };
                 ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut state.config.ui_backend,
-                        GuiBackend::Auto,
-                        "Авто (Vulkan -> OpenGL)",
-                    );
+                    ui.selectable_value(&mut state.config.ui_backend, GuiBackend::Auto, auto_label);
                     ui.selectable_value(
                         &mut state.config.ui_backend,
                         GuiBackend::Vulkan,
-                        "Vulkan (WGPU)",
+                        wgpu_label,
                     );
                     ui.selectable_value(
                         &mut state.config.ui_backend,
@@ -1510,7 +1524,12 @@ impl SettingsView {
 
                     let is_packaged = mq_update::UpdateManager::is_packaged_install();
                     if is_packaged {
-                        ui.label(RichText::new("Лаунчер установлен через системный пакетный менеджер (/usr/). Для обновления используйте пакетный менеджер вашей системы.").color(tokens.warning));
+                        let pkg_notice = if cfg!(target_os = "windows") {
+                            "Лаунчер установлен через системный каталог / менеджер пакетов (например, winget или Program Files). Для обновления используйте менеджер пакетов или установщик."
+                        } else {
+                            "Лаунчер установлен через системный пакетный менеджер (/usr/). Для обновления используйте пакетный менеджер вашей системы."
+                        };
+                        ui.label(RichText::new(pkg_notice).color(tokens.warning));
                         ui.add_space(8.0);
                         if secondary_glass_button(ui, Some(VectorIcon::Globe), "Открыть страницу релизов на GitHub").clicked() {
                             let _ = crate::opener::open_that("https://github.com/MrQuster/mq/releases");
@@ -1591,10 +1610,9 @@ impl SettingsView {
                             }
                         }
 
-                        // Check if rollback is available (<exe>.old exists)
+                        // Check if rollback is available (`<exe>.old` on Windows/Linux or `<stem>.old`)
                         if let Ok(exe) = std::env::current_exe() {
-                            let old = exe.with_extension("old");
-                            if old.exists() {
+                            if rollback_backup_exists(&exe) {
                                 ui.add_space(8.0);
                                 ui.separator();
                                 ui.add_space(8.0);
@@ -1752,16 +1770,24 @@ impl SettingsView {
                 ui.add_space(14.0);
 
                 // Two-column compact Liquid Glass info tiles (Serpantinum AboutTab style)
+                let backend_display = if state.gpu_backend_label.trim().is_empty() {
+                    format!("{:?}", state.config.ui_backend)
+                } else {
+                    state.gpu_backend_label.trim().to_string()
+                };
+                let data_dir_display = crate::opener::strip_windows_verbatim_prefix(
+                    &state.paths.data_dir.display().to_string(),
+                );
                 let tiles: [(&str, String); 6] = [
                     ("Версия", format!("v{}", env!("CARGO_PKG_VERSION"))),
-                    ("Графический бэкенд", format!("{:?}", state.config.ui_backend)),
+                    ("Графический бэкенд", backend_display.clone()),
                     (
                         "ОС / Архитектура",
                         format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH),
                     ),
                     ("Автор", "MrQuster".to_string()),
                     ("Лицензия", "MIT License".to_string()),
-                    ("Каталог данных", state.paths.data_dir.display().to_string()),
+                    ("Каталог данных", data_dir_display),
                 ];
 
                 let render_tile = |ui: &mut Ui, idx: usize, label: &str, value: &str| {
@@ -1843,10 +1869,11 @@ impl SettingsView {
                     .clicked()
                     {
                         let diag = format!(
-                            "MQ Launcher v{}\nOS: {} ({})\nGUI Backend: {:?}\nPaths: Data={:?}, Instances={:?}",
+                            "MQ Launcher v{}\nOS: {} ({})\nGUI Backend: {} (config: {:?})\nPaths: Data={:?}, Instances={:?}",
                             env!("CARGO_PKG_VERSION"),
                             std::env::consts::OS,
                             std::env::consts::ARCH,
+                            backend_display,
                             state.config.ui_backend,
                             state.paths.data_dir,
                             state.paths.instances_dir(),
@@ -1863,5 +1890,37 @@ impl SettingsView {
                 self.render_uninstall_card(ui, state, &tokens);
             },
         );
+    }
+}
+
+fn rollback_backup_exists(exe: &std::path::Path) -> bool {
+    if exe.with_extension("old").exists() {
+        return true;
+    }
+    exe.file_name().is_some_and(|name| {
+        let mut appended = name.to_os_string();
+        appended.push(".old");
+        exe.with_file_name(appended).exists()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollback_backup_detects_both_windows_exe_old_and_unix_old() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let win_exe = tmp.path().join("mq.exe");
+        assert!(!rollback_backup_exists(&win_exe));
+
+        let win_backup = tmp.path().join("mq.exe.old");
+        std::fs::write(&win_backup, b"old").expect("write mq.exe.old");
+        assert!(rollback_backup_exists(&win_exe));
+
+        std::fs::remove_file(&win_backup).expect("remove mq.exe.old");
+        let legacy_backup = tmp.path().join("mq.old");
+        std::fs::write(&legacy_backup, b"old").expect("write mq.old");
+        assert!(rollback_backup_exists(&win_exe));
     }
 }

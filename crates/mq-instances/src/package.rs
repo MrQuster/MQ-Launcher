@@ -7,12 +7,16 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
-use mq_core::{resolve_safe_path, InstanceId, ModLoaderKind, MqError, MqResult};
+use mq_core::fs_util::{remove_dir_all_with_retry, remove_file_with_retry};
+use mq_core::platform::atomic_write;
+use mq_core::{resolve_safe_path, ModLoaderKind, MqError, MqResult};
 use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use crate::manifest::{InstanceManifest, INSTANCE_MANIFEST_FILE, INSTANCE_SUBDIRS};
+use crate::manifest::{
+    windows_safe_instance_id, InstanceManifest, INSTANCE_MANIFEST_FILE, INSTANCE_SUBDIRS,
+};
 
 /// Maximum number of entries allowed when importing an instance archive (`32,768`).
 const MAX_IMPORT_ZIP_ENTRIES: usize = 32_768;
@@ -400,7 +404,7 @@ pub fn import_instance_archive_detailed(
         .and_then(|s| s.to_str())
         .unwrap_or("ImportedInstance");
     let target_name = override_name.unwrap_or(default_name);
-    let slug = InstanceId::sanitize_slug(target_name);
+    let slug = windows_safe_instance_id(target_name);
 
     let dest_dir = instances_root.join(slug.as_str());
     if dest_dir.exists() {
@@ -575,6 +579,9 @@ pub fn import_instance_archive_detailed(
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            if out_path.exists() {
+                let _ = remove_file_with_retry(&out_path);
+            }
 
             let mut out_file = File::create(&out_path)?;
             let mut entry_written = 0u64;
@@ -589,7 +596,7 @@ pub fn import_instance_archive_detailed(
                 if entry_written > MAX_IMPORT_ENTRY_BYTES || *total_written > MAX_IMPORT_TOTAL_BYTES
                 {
                     drop(out_file);
-                    let _ = fs::remove_dir_all(&dest_dir);
+                    let _ = remove_dir_all_with_retry(&dest_dir);
                     return Err(MqError::Archive(format!(
                         "zip-bomb detected while extracting '{raw_name}': size limit exceeded"
                     )));
@@ -599,7 +606,7 @@ pub fn import_instance_archive_detailed(
                         || (entry_written / comp_size) > MAX_IMPORT_COMPRESSION_RATIO)
                 {
                     drop(out_file);
-                    let _ = fs::remove_dir_all(&dest_dir);
+                    let _ = remove_dir_all_with_retry(&dest_dir);
                     return Err(MqError::Archive(format!(
                         "zip-bomb detected while extracting '{raw_name}': compression ratio limit exceeded"
                     )));
@@ -638,7 +645,10 @@ pub fn import_instance_archive_detailed(
                 .and_then(|s| serde_json::from_str::<CfMiniManifest>(&s).ok())
                 .and_then(|m| m.overrides)
                 .unwrap_or_else(|| "overrides".to_owned());
-            let clean_pref = format!("{}/", cf_overrides_prefix.trim_matches('/'));
+            let clean_pref = format!(
+                "{}/",
+                cf_overrides_prefix.replace('\\', "/").trim_matches('/')
+            );
             extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
                 eff.strip_prefix(clean_pref.as_str()).map(str::to_owned)
             })?;
@@ -671,7 +681,7 @@ pub fn import_instance_archive_detailed(
         if let Ok(cfg_content) = fs::read_to_string(&mmc_cfg_path) {
             let res = sanitize_and_parse_instance_cfg(&cfg_content);
             ignored_dangerous_hooks.extend(res.ignored_hooks.iter().cloned());
-            let _ = fs::write(&mmc_cfg_path, &res.sanitized_content);
+            let _ = atomic_write(&mmc_cfg_path, res.sanitized_content.as_bytes());
             parsed_mmc_cfg = Some(res);
         }
     }

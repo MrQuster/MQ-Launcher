@@ -1203,7 +1203,10 @@ impl DownloadsView {
 
         if let Some(url) = open_url {
             if is_safe_http_url(&url) {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                if let Err(err) = crate::opener::open_that(&url) {
+                    state.status_message =
+                        Some((format!("Не удалось открыть ссылку: {err}"), true));
+                }
             } else {
                 state.status_message =
                     Some(("Некорректный URL для ручной загрузки".to_string(), true));

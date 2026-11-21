@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use directories::BaseDirs;
 
 use crate::error::{MqError, MqResult};
+use crate::fs_util::{clear_readonly_attribute, strip_windows_verbatim_prefix};
 
 const APP_DIR_NAME: &str = "mq";
 
@@ -35,7 +36,8 @@ impl MqPaths {
         }
 
         if let Ok(exe) = env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
+            let clean_exe = strip_windows_verbatim_prefix(&exe);
+            if let Some(exe_dir) = clean_exe.parent() {
                 if let Some(portable) = Self::portable_paths(exe_dir) {
                     return Ok(portable);
                 }
@@ -64,8 +66,9 @@ impl MqPaths {
 
     /// Returns portable paths rooted at `<exe_dir>/data` when `portable.flag` exists in `exe_dir`.
     pub fn portable_paths(exe_dir: &Path) -> Option<Self> {
-        if exe_dir.join("portable.flag").is_file() {
-            Some(Self::with_root(exe_dir.join("data")))
+        let clean_dir = strip_windows_verbatim_prefix(exe_dir);
+        if clean_dir.join("portable.flag").is_file() {
+            Some(Self::with_root(clean_dir.join("data")))
         } else {
             None
         }
@@ -118,7 +121,7 @@ impl MqPaths {
     /// - `config_dir = <root>/config`
     /// - `cache_dir = <root>/cache`
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
-        let root = root.into();
+        let root = strip_windows_verbatim_prefix(&root.into());
         Self {
             config_dir: root.join("config"),
             cache_dir: root.join("cache"),
@@ -411,7 +414,7 @@ pub fn resolve_safe_path(base: &Path, untrusted_rel: &str) -> MqResult<PathBuf> 
         }
     }
 
-    Ok(base.join(clean_rel))
+    Ok(strip_windows_verbatim_prefix(&base.join(clean_rel)))
 }
 
 fn remove_matching_files_in_dir(dir: &Path, predicate: &dyn Fn(&str) -> bool) -> usize {
@@ -423,8 +426,11 @@ fn remove_matching_files_in_dir(dir: &Path, predicate: &dyn Fn(&str) -> bool) ->
         let path = entry.path();
         if path.is_file() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if predicate(name) && fs::remove_file(&path).is_ok() {
-                    removed += 1;
+                if predicate(name) {
+                    clear_readonly_attribute(&path);
+                    if fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
                 }
             }
         }
@@ -443,8 +449,11 @@ fn remove_matching_files_recursive(dir: &Path, predicate: &dyn Fn(&str) -> bool)
             removed += remove_matching_files_recursive(&path, predicate);
         } else if path.is_file() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if predicate(name) && fs::remove_file(&path).is_ok() {
-                    removed += 1;
+                if predicate(name) {
+                    clear_readonly_attribute(&path);
+                    if fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
                 }
             }
         }
@@ -664,5 +673,18 @@ mod tests {
             "stale .tmp in config_dir must be removed"
         );
         assert!(valid_cfg.exists(), "valid config.toml must be preserved");
+    }
+
+    #[test]
+    fn with_root_strips_windows_verbatim_prefix_and_preserves_cyrillic_spaces() {
+        let verbatim = PathBuf::from(r"\\?\C:\Users\Иван Петров\AppData\Local\MQ");
+        let paths = MqPaths::with_root(verbatim);
+        assert_eq!(
+            paths.data_dir,
+            PathBuf::from(r"C:\Users\Иван Петров\AppData\Local\MQ")
+        );
+        assert!(!paths.data_dir.to_string_lossy().starts_with(r"\\?\"));
+        assert!(!paths.config_dir.to_string_lossy().starts_with(r"\\?\"));
+        assert!(!paths.cache_dir.to_string_lossy().starts_with(r"\\?\"));
     }
 }

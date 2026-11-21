@@ -8,12 +8,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
+use mq_core::fs_util::{
+    remove_dir_all_with_retry, remove_file_with_retry, rename_with_retry,
+    validate_windows_safe_filename,
+};
 use mq_core::{AppConfig, InstanceId, ModLoaderKind, MqError, MqPaths, MqResult};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::manifest::{
-    InstanceManifest, INSTANCE_MANIFEST_FILE, INSTANCE_SUBDIRS, RESOLVED_VERSION_FILE,
+    windows_safe_instance_id, InstanceManifest, INSTANCE_MANIFEST_FILE, INSTANCE_SUBDIRS,
+    RESOLVED_VERSION_FILE,
 };
 
 static MANIFEST_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -133,6 +138,12 @@ impl InstanceManager {
                 "Minecraft version must not be empty".to_owned(),
             ));
         }
+        if !validate_windows_safe_filename(manifest.id.as_str()) {
+            return Err(MqError::Metadata(format!(
+                "instance id '{}' is not a valid Windows-safe directory name",
+                manifest.id
+            )));
+        }
 
         let inst_dir = manifest.instance_dir(&self.paths);
         if inst_dir.exists() {
@@ -185,9 +196,13 @@ impl InstanceManager {
             return Ok(found.clone());
         }
 
-        // 3. Also check if sanitized slug matches an existing instance ID.
+        // 3. Also check if sanitized or Windows-safe slug matches an existing instance ID.
         let sanitized = InstanceId::sanitize_slug(query);
-        if let Some(found) = all.into_iter().find(|m| m.id == sanitized) {
+        let safe_sanitized = windows_safe_instance_id(query);
+        if let Some(found) = all
+            .into_iter()
+            .find(|m| m.id == sanitized || m.id == safe_sanitized)
+        {
             return Ok(found);
         }
 
@@ -214,12 +229,12 @@ impl InstanceManager {
             file.write_all(serialized.as_bytes())?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&tmp_path, &manifest_path)?;
+            rename_with_retry(&tmp_path, &manifest_path)?;
             Ok(())
         })();
 
         if let Err(err) = write_res {
-            let _ = fs::remove_file(&tmp_path);
+            let _ = remove_file_with_retry(&tmp_path);
             return Err(MqError::Io(err));
         }
 
@@ -276,7 +291,7 @@ impl InstanceManager {
         }
 
         let src_manifest = self.load_instance(src_id_or_name)?;
-        let new_id = InstanceId::sanitize_slug(trimmed_new_name);
+        let new_id = windows_safe_instance_id(trimmed_new_name);
         if new_id == src_manifest.id {
             return Err(MqError::InstanceAlreadyExists(new_id.to_string()));
         }
@@ -326,13 +341,15 @@ impl InstanceManager {
         if let Ok(manifest) = self.load_instance(id_or_name) {
             let inst_dir = manifest.instance_dir(&self.paths);
             if inst_dir.exists() {
-                fs::remove_dir_all(&inst_dir)?;
+                clear_readonly_recursive(&inst_dir);
+                remove_dir_all_with_retry(&inst_dir)?;
             }
             return Ok(());
         }
         let fallback_dir = self.paths.instance_dir(id_or_name);
         if fallback_dir.exists() && fallback_dir.is_dir() {
-            fs::remove_dir_all(&fallback_dir)?;
+            clear_readonly_recursive(&fallback_dir);
+            remove_dir_all_with_retry(&fallback_dir)?;
             return Ok(());
         }
         Err(MqError::InstanceNotFound(id_or_name.to_owned()))
@@ -407,7 +424,7 @@ fn clone_tree_hardlink_or_copy(src_dir: &Path, dst_dir: &Path) -> MqResult<()> {
             clone_tree_hardlink_or_copy(&src_path, &dst_path)?;
         } else if file_type.is_file() {
             if dst_path.exists() {
-                let _ = fs::remove_file(&dst_path);
+                let _ = remove_file_with_retry(&dst_path);
             }
             if fs::hard_link(&src_path, &dst_path).is_err() {
                 fs::copy(&src_path, &dst_path)?;
@@ -416,4 +433,26 @@ fn clone_tree_hardlink_or_copy(src_dir: &Path, dst_dir: &Path) -> MqResult<()> {
     }
 
     Ok(())
+}
+
+/// Clears read-only attributes across files in a directory tree before removal so Windows
+/// `remove_dir_all` does not fail with `ERROR_ACCESS_DENIED` on read-only mod/world files.
+fn clear_readonly_recursive(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.file_type().is_dir() {
+                clear_readonly_recursive(&path);
+            }
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                #[allow(clippy::permissions_set_readonly_false)]
+                perms.set_readonly(false);
+                let _ = fs::set_permissions(&path, perms);
+            }
+        }
+    }
 }

@@ -1,4 +1,5 @@
-//! Linux system font loader with full Cyrillic + Latin proportional and monospace discovery,
+//! Cross-platform system font loader with full Cyrillic + Latin proportional and monospace
+//! discovery on Windows (`%WINDIR%\Fonts`, `%LOCALAPPDATA%\Microsoft\Windows\Fonts`) and Linux,
 //! falling back gracefully to built-in `egui` fonts when running in minimal environments.
 
 use std::env;
@@ -11,7 +12,10 @@ use egui::{Context, FontData, FontDefinitions, FontFamily};
 /// Ordered proportional font candidates across Windows and Linux distributions.
 pub const PROPORTIONAL_FONT_CANDIDATES: &[&str] = &[
     "C:\\Windows\\Fonts\\segoeui.ttf",
+    "C:\\Windows\\Fonts\\segoeuib.ttf",
     "C:\\Windows\\Fonts\\arial.ttf",
+    "C:\\Windows\\Fonts\\tahoma.ttf",
+    "C:\\Windows\\Fonts\\calibri.ttf",
     "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
     "/usr/share/fonts/TTF/Inter-Regular.ttf",
     "/usr/share/fonts/inter/Inter-Regular.ttf",
@@ -25,14 +29,32 @@ pub const PROPORTIONAL_FONT_CANDIDATES: &[&str] = &[
 /// Ordered monospace font candidates across Windows and Linux distributions.
 pub const MONOSPACE_FONT_CANDIDATES: &[&str] = &[
     "C:\\Windows\\Fonts\\consola.ttf",
+    "C:\\Windows\\Fonts\\CascadiaMono.ttf",
     "C:\\Windows\\Fonts\\cascadiamono.ttf",
     "C:\\Windows\\Fonts\\lucon.ttf",
+    "C:\\Windows\\Fonts\\cour.ttf",
     "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
     "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
     "/usr/share/fonts/IosevkaNerdFont/IosevkaNerdFontMono-Regular.ttf",
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
     "/usr/share/fonts/gnu-free/FreeMono.otf",
+];
+
+const WINDOWS_PROPORTIONAL_FILES: &[&str] = &[
+    "segoeui.ttf",
+    "segoeuib.ttf",
+    "arial.ttf",
+    "tahoma.ttf",
+    "calibri.ttf",
+];
+
+const WINDOWS_MONOSPACE_FILES: &[&str] = &[
+    "consola.ttf",
+    "CascadiaMono.ttf",
+    "cascadiamono.ttf",
+    "lucon.ttf",
+    "cour.ttf",
 ];
 
 const SYSTEM_PROPORTIONAL_KEY: &str = "mq_system_proportional";
@@ -76,6 +98,62 @@ impl LoadedFontSummary {
             .unwrap_or("egui-builtin-monospace");
         format!("proportional={prop}, monospace={mono}")
     }
+}
+
+fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if !out.contains(&path) {
+        out.push(path);
+    }
+}
+
+/// Builds ordered Cyrillic-capable Windows proportional font candidate paths from
+/// `%WINDIR%\Fonts` (or `%SystemRoot%\Fonts`, defaulting to `C:\Windows\Fonts`) and
+/// per-user fonts under `%LOCALAPPDATA%\Microsoft\Windows\Fonts`.
+pub fn discover_windows_proportional_fonts(
+    windir: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let sys_fonts = windir
+        .map(|d| d.join("Fonts"))
+        .unwrap_or_else(|| PathBuf::from("C:\\Windows\\Fonts"));
+    for file in WINDOWS_PROPORTIONAL_FILES {
+        push_unique(&mut out, sys_fonts.join(file));
+    }
+    if let Some(local) = local_app_data {
+        let user_fonts = local.join("Microsoft").join("Windows").join("Fonts");
+        for file in WINDOWS_PROPORTIONAL_FILES {
+            push_unique(&mut out, user_fonts.join(file));
+        }
+    }
+    out
+}
+
+/// Builds ordered Windows monospace font candidate paths from `%LOCALAPPDATA%\Microsoft\Windows\Fonts`
+/// and `%WINDIR%\Fonts` (`consola.ttf`, `CascadiaMono.ttf`, `lucon.ttf`, `cour.ttf`).
+pub fn discover_windows_monospace_fonts(
+    windir: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(local) = local_app_data {
+        let user_fonts = local.join("Microsoft").join("Windows").join("Fonts");
+        for file in [
+            "JetBrainsMono-Regular.ttf",
+            "CascadiaMono.ttf",
+            "cascadiamono.ttf",
+            "consola.ttf",
+        ] {
+            push_unique(&mut out, user_fonts.join(file));
+        }
+    }
+    let sys_fonts = windir
+        .map(|d| d.join("Fonts"))
+        .unwrap_or_else(|| PathBuf::from("C:\\Windows\\Fonts"));
+    for file in WINDOWS_MONOSPACE_FILES {
+        push_unique(&mut out, sys_fonts.join(file));
+    }
+    out
 }
 
 fn discover_user_jetbrains_mono() -> Vec<PathBuf> {
@@ -133,14 +211,38 @@ where
     None
 }
 
-/// Probes Linux system font paths and builds [`FontDefinitions`] with Cyrillic + Latin
+/// Probes OS system font paths and builds [`FontDefinitions`] with Cyrillic + Latin
 /// proportional and monospace fonts inserted at priority index `0`, preserving built-in
 /// `egui` fonts as fallbacks.
 pub fn build_font_definitions() -> (FontDefinitions, LoadedFontSummary) {
     let mut defs = FontDefinitions::default();
     let mut summary = LoadedFontSummary::default();
 
-    if let Some((path, bytes)) = load_first_available_font(PROPORTIONAL_FONT_CANDIDATES) {
+    let (prop_candidates, mono_candidates) = if cfg!(target_os = "windows") {
+        let windir = env::var_os("WINDIR")
+            .or_else(|| env::var_os("SystemRoot"))
+            .map(PathBuf::from);
+        let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        (
+            discover_windows_proportional_fonts(windir.as_deref(), local_app_data.as_deref()),
+            discover_windows_monospace_fonts(windir.as_deref(), local_app_data.as_deref()),
+        )
+    } else {
+        let prop: Vec<PathBuf> = PROPORTIONAL_FONT_CANDIDATES
+            .iter()
+            .filter(|p| p.starts_with('/'))
+            .map(PathBuf::from)
+            .collect();
+        let mut mono = discover_user_jetbrains_mono();
+        for &static_path in MONOSPACE_FONT_CANDIDATES {
+            if static_path.starts_with('/') {
+                push_unique(&mut mono, PathBuf::from(static_path));
+            }
+        }
+        (prop, mono)
+    };
+
+    if let Some((path, bytes)) = load_first_available_font(&prop_candidates) {
         defs.font_data.insert(
             SYSTEM_PROPORTIONAL_KEY.to_owned(),
             Arc::new(FontData::from_owned(bytes)),
@@ -150,14 +252,6 @@ pub fn build_font_definitions() -> (FontDefinitions, LoadedFontSummary) {
             .or_default()
             .insert(0, SYSTEM_PROPORTIONAL_KEY.to_owned());
         summary.proportional_path = Some(path);
-    }
-
-    let mut mono_candidates: Vec<PathBuf> = discover_user_jetbrains_mono();
-    for &static_path in MONOSPACE_FONT_CANDIDATES {
-        let p = PathBuf::from(static_path);
-        if !mono_candidates.contains(&p) {
-            mono_candidates.push(p);
-        }
     }
 
     if let Some((path, bytes)) = load_first_available_font(&mono_candidates) {
@@ -227,12 +321,65 @@ mod tests {
         if std::env::var_os("CI").is_none() {
             assert!(
                 summary.has_system_proportional(),
-                "expected system proportional font on Linux host"
+                "expected system proportional font on desktop host"
             );
             assert!(
                 summary.has_system_monospace(),
-                "expected system monospace font on Linux host"
+                "expected system monospace font on desktop host"
             );
         }
+    }
+
+    #[test]
+    fn windows_font_discovery_resolves_windir_and_localappdata_in_priority_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let windir = tmp.path().join("WinRoot");
+        let local = tmp.path().join("LocalAppData");
+        let sys_fonts = windir.join("Fonts");
+        let user_fonts = local.join("Microsoft").join("Windows").join("Fonts");
+        fs::create_dir_all(&sys_fonts).expect("sys fonts dir");
+        fs::create_dir_all(&user_fonts).expect("user fonts dir");
+
+        let prop_list = discover_windows_proportional_fonts(Some(&windir), Some(&local));
+        let prop_names: Vec<&str> = prop_list
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .collect();
+        assert_eq!(
+            &prop_names[..5],
+            &[
+                "segoeui.ttf",
+                "segoeuib.ttf",
+                "arial.ttf",
+                "tahoma.ttf",
+                "calibri.ttf"
+            ]
+        );
+        assert!(prop_list[0].starts_with(&sys_fonts));
+
+        let mono_list = discover_windows_monospace_fonts(Some(&windir), Some(&local));
+        assert!(mono_list[0].starts_with(&user_fonts));
+        assert!(mono_list
+            .iter()
+            .any(|p| p == &sys_fonts.join("consola.ttf")));
+        assert!(mono_list
+            .iter()
+            .any(|p| p == &sys_fonts.join("CascadiaMono.ttf")));
+        assert!(mono_list.iter().any(|p| p == &sys_fonts.join("lucon.ttf")));
+        assert!(mono_list.iter().any(|p| p == &sys_fonts.join("cour.ttf")));
+
+        // Verify load_first_available_font picks first valid >=64 byte file
+        let dummy_ttf = vec![0x42_u8; 128];
+        fs::write(sys_fonts.join("tahoma.ttf"), &dummy_ttf).expect("write tahoma");
+        let (loaded_prop, bytes) =
+            load_first_available_font(&prop_list).expect("should find tahoma");
+        assert_eq!(loaded_prop, sys_fonts.join("tahoma.ttf"));
+        assert_eq!(bytes.len(), 128);
+
+        fs::write(user_fonts.join("CascadiaMono.ttf"), &dummy_ttf).expect("write cascadia");
+        fs::write(sys_fonts.join("consola.ttf"), &dummy_ttf).expect("write consola");
+        let (loaded_mono, _) =
+            load_first_available_font(&mono_list).expect("should find user CascadiaMono first");
+        assert_eq!(loaded_mono, user_fonts.join("CascadiaMono.ttf"));
     }
 }

@@ -7,12 +7,21 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MqError, MqResult};
+use crate::fs_util::{remove_file_with_retry, rename_with_retry};
 use crate::paths::MqPaths;
 use crate::secret::SecretString;
+
+static CONFIG_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn config_tmp_path(target: &Path) -> std::path::PathBuf {
+    let seq = CONFIG_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    target.with_extension(format!("tmp.{}.{seq}", std::process::id()))
+}
 
 /// Primary environment variable for the CurseForge Core API v1 key (used when no user key is set in config/keyring).
 pub const ENV_CURSEFORGE_API_KEY: &str = "MQ_CURSEFORGE_API_KEY";
@@ -494,7 +503,7 @@ impl ThemeConfig {
             fs::create_dir_all(parent)?;
         }
         let serialized = toml::to_string_pretty(self)?;
-        let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp_path = config_tmp_path(path);
         let write_res = (|| -> std::io::Result<()> {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -504,11 +513,11 @@ impl ThemeConfig {
             file.write_all(serialized.as_bytes())?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&tmp_path, path)?;
+            rename_with_retry(&tmp_path, path)?;
             Ok(())
         })();
         if let Err(err) = write_res {
-            let _ = fs::remove_file(&tmp_path);
+            let _ = remove_file_with_retry(&tmp_path);
             return Err(MqError::Io(err));
         }
         Ok(())
@@ -669,7 +678,7 @@ impl AppConfig {
             .filter(|s| !s.is_empty())
         else {
             if secret_path.exists() {
-                let _ = fs::remove_file(&secret_path);
+                let _ = remove_file_with_retry(&secret_path);
             }
             return Ok(());
         };
@@ -678,7 +687,7 @@ impl AppConfig {
             fs::create_dir_all(parent)?;
         }
 
-        let tmp_path = secret_path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp_path = config_tmp_path(&secret_path);
         let write_res = (|| -> std::io::Result<()> {
             let mut opts = OpenOptions::new();
             opts.write(true).create(true).truncate(true);
@@ -699,7 +708,7 @@ impl AppConfig {
             file.sync_all()?;
             drop(file);
 
-            fs::rename(&tmp_path, &secret_path)?;
+            rename_with_retry(&tmp_path, &secret_path)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -709,7 +718,7 @@ impl AppConfig {
         })();
 
         if let Err(err) = write_res {
-            let _ = fs::remove_file(&tmp_path);
+            let _ = remove_file_with_retry(&tmp_path);
             return Err(MqError::Io(err));
         }
         Ok(())
@@ -725,7 +734,7 @@ impl AppConfig {
         }
 
         let serialized = toml::to_string_pretty(self)?;
-        let tmp_path = config_path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp_path = config_tmp_path(&config_path);
 
         let write_res = (|| -> std::io::Result<()> {
             let mut opts = OpenOptions::new();
@@ -748,7 +757,7 @@ impl AppConfig {
             file.sync_all()?;
             drop(file);
 
-            fs::rename(&tmp_path, &config_path)?;
+            rename_with_retry(&tmp_path, &config_path)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -758,7 +767,7 @@ impl AppConfig {
         })();
 
         if let Err(err) = write_res {
-            let _ = fs::remove_file(&tmp_path);
+            let _ = remove_file_with_retry(&tmp_path);
             return Err(MqError::Io(err));
         }
 
@@ -1104,5 +1113,33 @@ mod tests {
         assert_eq!(builtin.len(), 60);
         assert!(builtin.starts_with("$2a$10$"));
         assert!(AppConfig::default().effective_cf_api_key().is_some());
+    }
+
+    #[test]
+    fn repeated_atomic_config_overwrites_preserve_latest_state() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path());
+
+        let mut cfg = AppConfig {
+            default_memory_max_mb: 4096,
+            ..Default::default()
+        };
+        cfg.save(&paths).expect("initial save");
+
+        cfg.default_memory_max_mb = 8192;
+        cfg.theme.apply_preset(ThemePreset::Nord);
+        cfg.curseforge_api_key = Some(SecretString::new("cf_updated_key_999"));
+        cfg.save(&paths).expect("second overwrite save");
+
+        let reloaded = AppConfig::load_or_default(&paths).expect("reload overwritten config");
+        assert_eq!(reloaded.default_memory_max_mb, 8192);
+        assert_eq!(reloaded.theme.preset, ThemePreset::Nord);
+        assert_eq!(
+            reloaded
+                .curseforge_api_key
+                .as_ref()
+                .map(SecretString::expose_secret),
+            Some("cf_updated_key_999")
+        );
     }
 }

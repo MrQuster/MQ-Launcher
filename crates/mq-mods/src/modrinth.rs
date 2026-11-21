@@ -1378,9 +1378,7 @@ fn now_unix_ms() -> u64 {
 }
 
 fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, bytes)?;
-    fs::rename(&tmp_path, path)
+    mq_core::platform::atomic_write(path, bytes)
 }
 
 #[derive(Debug, Deserialize)]

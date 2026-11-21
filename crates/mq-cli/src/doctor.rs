@@ -686,7 +686,11 @@ pub fn export_diagnostic_report_sanitized(
         StepStatus::Fail => "ОШИБКИ УСТАНОВКИ [FAIL]",
     };
 
-    let _ = writeln!(out, "### MQ Launcher v2.2.0 — Отчёт диагностики установки");
+    let _ = writeln!(
+        out,
+        "### MQ Launcher v{} — Отчёт диагностики установки",
+        env!("CARGO_PKG_VERSION")
+    );
     let _ = writeln!(out, "- **Версия игры:** {}", report.version);
     let _ = writeln!(out, "- **Модлоадер:** {}", report.loader);
     let _ = writeln!(
@@ -834,16 +838,26 @@ pub async fn run_install_doctor(
     let mut logger = InstallLogCollector::new();
 
     // 0. Gather system environment snapshot
-    let os_name = std::fs::read_to_string("/etc/os-release")
-        .ok()
-        .and_then(|c| {
-            c.lines().find(|l| l.starts_with("PRETTY_NAME=")).map(|l| {
-                l.trim_start_matches("PRETTY_NAME=")
-                    .trim_matches('"')
-                    .to_string()
+    let os_name = {
+        #[cfg(target_os = "linux")]
+        let linux_pretty = std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|c| {
+                c.lines().find(|l| l.starts_with("PRETTY_NAME=")).map(|l| {
+                    l.trim_start_matches("PRETTY_NAME=")
+                        .trim_matches('"')
+                        .to_string()
+                })
             })
-        })
-        .unwrap_or_else(|| mq_core::platform::os_name().to_string());
+            .filter(|s| !s.is_empty());
+        #[cfg(not(target_os = "linux"))]
+        let linux_pretty: Option<String> = None;
+
+        linux_pretty
+            .or_else(|| sysinfo::System::long_os_version().filter(|s| !s.trim().is_empty()))
+            .or_else(|| sysinfo::System::name().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| mq_core::platform::os_name().to_string())
+    };
 
     let arch = std::env::consts::ARCH.to_string();
     let num_cpus = std::thread::available_parallelism()
@@ -1229,7 +1243,15 @@ pub async fn run_install_doctor(
                 error_reason: Some(fail_msg.clone()),
                 details: vec![
                     format!("Обнаружено установленных JVM: {}", runtimes.len()),
-                    format!("Установите JRE: 'mq java download --version {req_major}' или системный пакет jdk{req_major}-openjdk"),
+                    if cfg!(target_os = "windows") {
+                        format!(
+                            "Установите JRE: 'mq java download --version {req_major}' или Adoptium Temurin JRE {req_major}"
+                        )
+                    } else {
+                        format!(
+                            "Установите JRE: 'mq java download --version {req_major}' или системный пакет jdk{req_major}-openjdk"
+                        )
+                    },
                 ],
             });
             logger.error(InstallStage::JavaRuntime, fail_msg, None);
@@ -1767,7 +1789,10 @@ pub async fn run_install_doctor(
 /// CLI runner for `mq doctor --install <version>`.
 pub async fn cmd_doctor_install(version: &str, args: &DoctorArgs, _paths: &MqPaths) -> Result<()> {
     println!("================================================================================");
-    println!("          MQ LAUNCHER v2.2.0 — ДИАГНОСТИКА УСТАНОВКИ (DOCTOR INSTALL)");
+    println!(
+        "          MQ LAUNCHER v{} — ДИАГНОСТИКА УСТАНОВКИ (DOCTOR INSTALL)",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("================================================================================");
     println!(
         "[ПАРАМЕТРЫ] Версия Minecraft: {} | Модлоадер: {}",
@@ -1814,7 +1839,10 @@ pub async fn cmd_doctor_install(version: &str, args: &DoctorArgs, _paths: &MqPat
                 report.steps.len(),
                 report.steps.len()
             );
-            println!("            Версия готова к быстрой и надёжной установке: 'mq install --version {}'", version);
+            println!(
+                "            Версия готова к быстрой и надёжной установке: 'mq install {}'",
+                version
+            );
         }
         StepStatus::Warn => {
             println!(
@@ -2016,7 +2044,10 @@ mod tests {
         };
 
         let markdown = export_diagnostic_report_sanitized(&report, &[]);
-        assert!(markdown.contains("### MQ Launcher v2.2.0 — Отчёт диагностики установки"));
+        assert!(markdown.contains(&format!(
+            "### MQ Launcher v{} — Отчёт диагностики установки",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(markdown.contains("Версия игры:** 1.21.1"));
         assert!(markdown.contains("ГОТОВО К УСТАНОВКЕ [OK]"));
         assert!(markdown.contains("Манифест Mojang получен за 120 мс"));

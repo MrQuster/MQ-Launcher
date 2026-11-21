@@ -392,7 +392,7 @@ async fn install_game_transactional(
         ));
     }
 
-    let rule_ctx = RuleContext::linux_x86_64();
+    let rule_ctx = RuleContext::current();
     let raw_version_json = client
         .get(&entry.url)
         .send()
@@ -619,11 +619,17 @@ async fn install_game_transactional(
     let java_dir = paths.data_dir.join("java");
     let req_major = resolved_ver.java_version.major_version;
     let comp_hint = Some(resolved_ver.java_version.component.as_str());
-    let mut java_exec_path = PathBuf::from("java");
+    let mut java_exec_path = PathBuf::from(if cfg!(target_os = "windows") {
+        "java.exe"
+    } else {
+        "java"
+    });
+    let mut java_source_label = "mojang".to_string();
 
     match mq_launch::ensure_java_runtime(&client, &java_dir, req_major, comp_hint, None).await {
         Ok(selected) => {
             java_exec_path = selected.runtime.path.clone();
+            java_source_label = format!("{:?}", selected.source).to_ascii_lowercase();
             tracing::info!(
                 major = selected.runtime.major_version,
                 source = ?selected.source,
@@ -854,6 +860,7 @@ async fn install_game_transactional(
 
         if let Some(nat) = &lib.native_linux {
             let target = lib_base.join(&nat.path);
+            let url_empty = nat.url.trim().is_empty();
             let blob_dest = if let Some(sha1) = nat.sha1 {
                 cas.blob_path(&sha1)
             } else {
@@ -861,7 +868,7 @@ async fn install_game_transactional(
             };
 
             let in_cas = nat.sha1.is_some_and(|sha1| cas.has_blob(&sha1));
-            if !in_cas {
+            if !in_cas && !url_empty && queued_dest_paths.insert(blob_dest.clone()) {
                 let mut spec = DownloadSpec {
                     id: format!("native_{}", lib.name),
                     urls: vec![nat.url.clone()],
@@ -877,7 +884,7 @@ async fn install_game_transactional(
             native_jars.push(target.clone());
             native_excludes.push(lib.extract_exclude.clone());
 
-            if blob_dest != target {
+            if blob_dest != target && (!url_empty || in_cas) {
                 hardlink_targets.push((blob_dest, target));
             }
         }
@@ -949,6 +956,9 @@ async fn install_game_transactional(
     // 8. Materialize hardlinks
     let mut hardlinks_created = 0usize;
     for (src, dst) in hardlink_targets {
+        if src == dst || !src.is_file() {
+            continue;
+        }
         if let Some(p) = dst.parent() {
             fs::create_dir_all(p).map_err(|e| (current_stage, MqError::Io(e)))?;
         }
@@ -958,7 +968,7 @@ async fn install_game_transactional(
         if fs::hard_link(&src, &dst).is_ok() {
             hardlinks_created += 1;
         } else {
-            let _ = fs::copy(&src, &dst);
+            let _ = crate::cas::copy_chunked_atomic(&src, &dst);
         }
     }
 
@@ -967,12 +977,14 @@ async fn install_game_transactional(
         let virtual_base = paths.assets_dir().join("virtual").join(&asset_index.id);
         for obj in &asset_index.objects {
             let src = cas.blob_path(&obj.hash);
-            let dst = virtual_base.join(&obj.name);
+            let Ok(dst) = mq_core::resolve_safe_path(&virtual_base, &obj.name) else {
+                continue;
+            };
             if let Some(p) = dst.parent() {
                 let _ = fs::create_dir_all(p);
             }
-            if !dst.exists() && fs::hard_link(&src, &dst).is_err() {
-                let _ = fs::copy(&src, &dst);
+            if src.is_file() && !dst.exists() && fs::hard_link(&src, &dst).is_err() {
+                let _ = crate::cas::copy_chunked_atomic(&src, &dst);
             }
         }
     }
@@ -981,12 +993,14 @@ async fn install_game_transactional(
         let resources_base = installing_dir.join("resources");
         for obj in &asset_index.objects {
             let src = cas.blob_path(&obj.hash);
-            let dst = resources_base.join(&obj.name);
+            let Ok(dst) = mq_core::resolve_safe_path(&resources_base, &obj.name) else {
+                continue;
+            };
             if let Some(p) = dst.parent() {
                 let _ = fs::create_dir_all(p);
             }
-            if !dst.exists() && fs::hard_link(&src, &dst).is_err() {
-                let _ = fs::copy(&src, &dst);
+            if src.is_file() && !dst.exists() && fs::hard_link(&src, &dst).is_err() {
+                let _ = crate::cas::copy_chunked_atomic(&src, &dst);
             }
         }
     }
@@ -1101,11 +1115,17 @@ async fn install_game_transactional(
     rename_with_retry(&installing_resolved_json, &final_resolved_json)
         .map_err(|e| (current_stage, MqError::Io(e)))?;
 
-    // Atomic swap of natives
+    // Atomic swap of natives (remove any stale backup dir first so Windows directory rename succeeds)
     let final_natives_dir = req.instance_dir.join("natives");
     let old_natives_dir = req.instance_dir.join(".natives.old");
+    if old_natives_dir.exists() {
+        let _ = remove_dir_all_with_retry(&old_natives_dir);
+    }
     if final_natives_dir.exists() {
         let _ = rename_with_retry(&final_natives_dir, &old_natives_dir);
+        if final_natives_dir.exists() {
+            let _ = remove_dir_all_with_retry(&final_natives_dir);
+        }
     }
     rename_with_retry(&installing_natives_dir, &final_natives_dir)
         .map_err(|e| (current_stage, MqError::Io(e)))?;
@@ -1118,8 +1138,14 @@ async fn install_game_transactional(
     if installing_resources.exists() {
         let final_resources = req.instance_dir.join("resources");
         let old_resources = req.instance_dir.join(".resources.old");
+        if old_resources.exists() {
+            let _ = remove_dir_all_with_retry(&old_resources);
+        }
         if final_resources.exists() {
             let _ = rename_with_retry(&final_resources, &old_resources);
+            if final_resources.exists() {
+                let _ = remove_dir_all_with_retry(&final_resources);
+            }
         }
         let _ = rename_with_retry(&installing_resources, &final_resources);
         if old_resources.exists() {
@@ -1149,8 +1175,8 @@ async fn install_game_transactional(
     state.natives_count = extracted_natives;
     state.java = Some(InstallJavaInfo {
         major_version: resolved_ver.java_version.major_version,
-        path: PathBuf::from("java"),
-        source: "mojang".to_string(),
+        path: java_exec_path,
+        source: java_source_label,
         component: Some(resolved_ver.java_version.component.clone()),
     });
     state.last_error = None;

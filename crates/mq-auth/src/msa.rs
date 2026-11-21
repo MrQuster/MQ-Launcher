@@ -181,6 +181,7 @@ impl MsaClient {
     pub fn with_endpoints(endpoints: MsaEndpoints) -> MqResult<Self> {
         let http = reqwest::Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
+            .connect_timeout(Duration::from_secs(10))
             .timeout(DEFAULT_HTTP_TIMEOUT)
             .build()
             .map_err(|err| MqError::Network(format!("failed to build MSA HTTP client: {err}")))?;

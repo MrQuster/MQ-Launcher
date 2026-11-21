@@ -2,21 +2,24 @@
 //! and persistent installation state journal (`install.journal`).
 
 use std::fmt::Write as FmtWrite;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as IoWrite;
 use std::panic::{self, PanicHookInfo};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::error::MqResult;
-use crate::fs_util::{remove_file_with_retry, rename_with_retry};
+use crate::fs_util::{remove_file_with_retry, rename_with_retry, strip_windows_verbatim_prefix};
 use crate::paths::MqPaths;
 use crate::secret::REDACTED_PLACEHOLDER;
 
 static PANIC_HOOK_PATHS: Mutex<Option<MqPaths>> = Mutex::new(None);
 static PANIC_HOOK_ONCE: Once = Once::new();
+static CRASH_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Persistent marker and stage journal for in-flight game installations (`<data_dir>/install.journal`).
 ///
@@ -146,17 +149,8 @@ impl InstallJournal {
     /// and [`rename_with_retry`].
     pub fn save(&self, paths: &MqPaths) -> MqResult<()> {
         let target = paths.install_journal_path();
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let payload = serde_json::to_vec_pretty(self)?;
-        let tmp_path = target.with_extension(format!("journal.tmp.{}", std::process::id()));
-        fs::write(&tmp_path, &payload)?;
-        if let Err(err) = rename_with_retry(&tmp_path, &target) {
-            let _ = remove_file_with_retry(&tmp_path);
-            return Err(err.into());
-        }
-        Ok(())
+        write_file_atomically(&target, &payload)
     }
 
     /// Formats a Russian, secret-sanitized diagnostic summary suitable for clipboard export
@@ -377,9 +371,20 @@ fn write_file_atomically(path: &Path, content: &[u8]) -> MqResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp_path, content)?;
-    if let Err(err) = rename_with_retry(&tmp_path, path) {
+    let seq = CRASH_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
+    let write_res = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        rename_with_retry(&tmp_path, path)
+    })();
+    if let Err(err) = write_res {
         let _ = remove_file_with_retry(&tmp_path);
         return Err(err.into());
     }
@@ -388,9 +393,10 @@ fn write_file_atomically(path: &Path, content: &[u8]) -> MqResult<()> {
 
 #[cfg(target_os = "windows")]
 fn show_windows_crash_dialog(crash_log_path: &Path, summary: &str) {
-    // Never pop up modal GUI dialogs during automated CI runs or unit tests.
+    // Never pop up modal GUI dialogs during automated CI runs, headless runs, or unit tests.
     if std::env::var_os("CI").is_some()
         || std::env::var_os("MQ_NO_CRASH_DIALOG").is_some()
+        || std::env::var_os("MQ_HEADLESS").is_some()
         || std::env::var_os("RUST_TEST_THREADS").is_some()
     {
         return;
@@ -400,19 +406,38 @@ fn show_windows_crash_dialog(crash_log_path: &Path, summary: &str) {
         return;
     }
 
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut std::ffi::c_void,
+            lp_text: *const u16,
+            lp_caption: *const u16,
+            u_type: u32,
+        ) -> i32;
+    }
+
+    const MB_OK_ICONERROR: u32 = 0x0000_0010;
+    let clean_path = strip_windows_verbatim_prefix(crash_log_path);
     let body = format!(
         "MQ Launcher завершился из-за внутренней ошибки.\n\nПричина: {}\n\nОтчёт об аварии сохранён в:\n{}",
         summary,
-        crash_log_path.display()
+        clean_path.display()
     );
-    let escaped_body = body.replace('\'', "''");
-    let ps_cmd = format!(
-        "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('{}', 'MQ Launcher — Ошибка', 'OK', 'Error') | Out-Null",
-        escaped_body
-    );
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
-        .spawn();
+    let text_w: Vec<u16> = body.encode_utf16().chain(std::iter::once(0)).collect();
+    let title_w: Vec<u16> = "MQ Launcher — Ошибка"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: Both buffers are NUL-terminated UTF-16 slices that remain alive during the call.
+    unsafe {
+        let _ = MessageBoxW(
+            std::ptr::null_mut(),
+            text_w.as_ptr(),
+            title_w.as_ptr(),
+            MB_OK_ICONERROR,
+        );
+    }
 }
 
 /// Sanitizes crash reports, logs, and breadcrumbs by redacting:
@@ -601,12 +626,52 @@ fn redact_home_dirs(s: &str) -> String {
     let mut out = s.to_owned();
     for var in ["HOME", "USERPROFILE"] {
         if let Ok(home) = std::env::var(var) {
-            let trimmed = home.trim_end_matches(['/', '\\']);
-            if trimmed.len() >= 3 {
-                out = out.replace(trimmed, "~");
-            }
+            out = redact_home_dir_str(&out, &home);
         }
     }
+    out
+}
+
+fn redact_home_dir_str(input: &str, home: &str) -> String {
+    let clean = strip_windows_verbatim_prefix(Path::new(home));
+    let clean_str = clean.to_string_lossy();
+    let trimmed = clean_str.trim_end_matches(['/', '\\']);
+    if trimmed.len() < 3 {
+        return input.to_owned();
+    }
+
+    let is_windows_style = trimmed.contains('\\')
+        || (trimmed.len() >= 2
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.as_bytes()[1] == b':');
+
+    if is_windows_style {
+        let bs = trimmed.replace('/', "\\");
+        let fs = trimmed.replace('\\', "/");
+        let verbatim = format!(r"\\?\{bs}");
+        let mut out = replace_ascii_case_insensitive(input, &verbatim, "~");
+        out = replace_ascii_case_insensitive(&out, &bs, "~");
+        if fs != bs {
+            out = replace_ascii_case_insensitive(&out, &fs, "~");
+        }
+        out
+    } else {
+        input.replace(trimmed, "~")
+    }
+}
+
+fn replace_ascii_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return haystack.to_owned();
+    }
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(pos) = find_ascii_case_insensitive(rest, needle) {
+        out.push_str(&rest[..pos]);
+        out.push_str(replacement);
+        rest = &rest[pos + needle.len()..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -766,5 +831,21 @@ mod tests {
         assert!(report.contains("simulated worker crash"));
         assert!(!report.contains("tok_secret_555"));
         assert!(report.contains("--accessToken [REDACTED]"));
+    }
+
+    #[test]
+    fn redact_home_dir_handles_windows_case_slashes_verbatim_and_cyrillic() {
+        let home = r"C:\Users\Иван Петров";
+        let raw = r"Failed reading \\?\C:\Users\Иван Петров\AppData\Local\MQ\config.toml and c:\users\Иван Петров\logs\a.log and C:/Users/Иван Петров/mods/b.jar";
+        let redacted = redact_home_dir_str(raw, home);
+
+        assert!(
+            !redacted.contains("Иван Петров"),
+            "Windows Cyrillic username leaked: {redacted}"
+        );
+        assert!(redacted.contains(r"~\AppData\Local\MQ\config.toml"));
+        assert!(redacted.contains(r"~\logs\a.log"));
+        assert!(redacted.contains("~/mods/b.jar"));
+        assert!(!redacted.contains(r"\\?\~"));
     }
 }

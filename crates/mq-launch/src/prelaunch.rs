@@ -6,7 +6,8 @@
 use std::fs;
 use std::path::Path;
 
-use mq_core::{MqPaths, MqResult};
+use mq_core::platform::{atomic_write, link_or_copy};
+use mq_core::{resolve_safe_path, MqPaths, MqResult};
 use mq_meta::{fetch_asset_index_raw, parse_asset_index, ResolvedVersion};
 
 /// Verifies and guarantees that the asset index and language files exist on disk before JVM spawn.
@@ -33,26 +34,17 @@ pub async fn ensure_prelaunch_assets(
                 (idx, content)
             } else {
                 let fetched = fetch_asset_index_raw(&client, &resolved_ver.asset_index).await?;
-                if let Some(p) = asset_index_path.parent() {
-                    let _ = fs::create_dir_all(p);
-                }
-                let _ = fs::write(&asset_index_path, fetched.1.as_bytes());
+                let _ = atomic_write(&asset_index_path, fetched.1.as_bytes());
                 fetched
             }
         } else {
             let fetched = fetch_asset_index_raw(&client, &resolved_ver.asset_index).await?;
-            if let Some(p) = asset_index_path.parent() {
-                let _ = fs::create_dir_all(p);
-            }
-            let _ = fs::write(&asset_index_path, fetched.1.as_bytes());
+            let _ = atomic_write(&asset_index_path, fetched.1.as_bytes());
             fetched
         }
     } else {
         let fetched = fetch_asset_index_raw(&client, &resolved_ver.asset_index).await?;
-        if let Some(p) = asset_index_path.parent() {
-            let _ = fs::create_dir_all(p);
-        }
-        let _ = fs::write(&asset_index_path, fetched.1.as_bytes());
+        let _ = atomic_write(&asset_index_path, fetched.1.as_bytes());
         fetched
     };
 
@@ -84,13 +76,12 @@ pub async fn ensure_prelaunch_assets(
         let prefix = &hex[..2];
         let target_dir = objects_dir.join(prefix);
         let target_file = target_dir.join(&hex);
-        let _ = fs::create_dir_all(&target_dir);
 
         let url = format!("https://resources.download.minecraft.net/{prefix}/{hex}");
         if let Ok(resp) = client.get(&url).send().await {
             if resp.status().is_success() {
                 if let Ok(bytes) = resp.bytes().await {
-                    let _ = fs::write(&target_file, &bytes);
+                    let _ = atomic_write(&target_file, &bytes);
                 }
             }
         }
@@ -102,14 +93,11 @@ pub async fn ensure_prelaunch_assets(
         for obj in &asset_index.objects {
             let hex = obj.hash.to_hex();
             let src = objects_dir.join(&hex[..2]).join(&hex);
-            let dst = virtual_base.join(&obj.name);
+            let Ok(dst) = resolve_safe_path(&virtual_base, &obj.name) else {
+                continue;
+            };
             if src.exists() && !dst.exists() {
-                if let Some(p) = dst.parent() {
-                    let _ = fs::create_dir_all(p);
-                }
-                if fs::hard_link(&src, &dst).is_err() {
-                    let _ = fs::copy(&src, &dst);
-                }
+                let _ = link_or_copy(&src, &dst);
             }
         }
     }
@@ -119,14 +107,11 @@ pub async fn ensure_prelaunch_assets(
         for obj in &asset_index.objects {
             let hex = obj.hash.to_hex();
             let src = objects_dir.join(&hex[..2]).join(&hex);
-            let dst = resources_base.join(&obj.name);
+            let Ok(dst) = resolve_safe_path(&resources_base, &obj.name) else {
+                continue;
+            };
             if src.exists() && !dst.exists() {
-                if let Some(p) = dst.parent() {
-                    let _ = fs::create_dir_all(p);
-                }
-                if fs::hard_link(&src, &dst).is_err() {
-                    let _ = fs::copy(&src, &dst);
-                }
+                let _ = link_or_copy(&src, &dst);
             }
         }
     }

@@ -14,10 +14,11 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Cursor, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use mq_core::{MqError, MqResult};
+use mq_core::fs_util::{remove_dir_all_with_retry, remove_file_with_retry, rename_with_retry};
+use mq_core::{resolve_safe_path, MqError, MqResult};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -161,17 +162,28 @@ pub fn parse_mojang_package_manifest(json: &str) -> MqResult<MojangPackageManife
         .map_err(|e| MqError::Metadata(format!("failed to parse Mojang component manifest: {e}")))
 }
 
-/// Finds the catalog entry for the specified platform and component.
+/// Finds the catalog entry for the specified platform and component,
+/// applying safe Windows architecture fallbacks (`windows-arm64` -> `windows-x64` -> `windows-x86`).
 pub fn find_mojang_runtime_entry<'a>(
     catalog: &'a MojangProductCatalog,
     platform: &str,
     component: &str,
 ) -> Option<&'a MojangCatalogEntry> {
-    catalog
-        .platforms
-        .get(platform)
-        .and_then(|comps| comps.get(component))
-        .and_then(|entries| entries.first())
+    let lookup = |p: &str| {
+        catalog
+            .platforms
+            .get(p)
+            .and_then(|comps| comps.get(component))
+            .and_then(|entries| entries.first())
+    };
+    if let Some(entry) = lookup(platform) {
+        return Some(entry);
+    }
+    match platform {
+        "windows-arm64" => lookup("windows-x64").or_else(|| lookup("windows-x86")),
+        "windows-x64" => lookup("windows-x86"),
+        _ => None,
+    }
 }
 
 /// Resolves or downloads the official Mojang Java runtime for the given component or major version.
@@ -276,21 +288,21 @@ pub async fn ensure_mojang_java_runtime(
             .unwrap_or(0)
     ));
     if temp_extract.exists() {
-        let _ = fs::remove_dir_all(&temp_extract);
+        let _ = remove_dir_all_with_retry(&temp_extract);
     }
     fs::create_dir_all(&temp_extract)?;
 
     let result = unpack_mojang_package(client, &package_manifest, &temp_extract).await;
     if let Err(e) = result {
-        let _ = fs::remove_dir_all(&temp_extract);
+        let _ = remove_dir_all_with_retry(&temp_extract);
         return Err(e);
     }
 
-    // 5. Atomic swap into destination directory
+    // 5. Atomic swap into destination directory (remove existing dir first on Windows)
     if dest_dir.exists() {
-        let _ = fs::remove_dir_all(&dest_dir);
+        remove_dir_all_with_retry(&dest_dir)?;
     }
-    fs::rename(&temp_extract, &dest_dir)?;
+    rename_with_retry(&temp_extract, &dest_dir)?;
 
     // 6. Ensure executable permissions on bin/java
     let installed_bin = dest_dir.join("bin").join(bin_name);
@@ -323,16 +335,18 @@ async fn unpack_mojang_package(
     for (rel_path, node) in &manifest.files {
         match node {
             MojangFileNode::Directory => {
-                let dir_path = dest_root.join(rel_path);
+                let dir_path = resolve_safe_path(dest_root, rel_path)?;
                 fs::create_dir_all(&dir_path)?;
             }
             MojangFileNode::File {
                 executable,
                 downloads,
             } => {
+                let _ = resolve_safe_path(dest_root, rel_path)?;
                 files_to_download.push((rel_path, *executable, downloads));
             }
             MojangFileNode::Link { target } => {
+                let _ = resolve_safe_path(dest_root, rel_path)?;
                 symlinks.push((rel_path, target));
             }
         }
@@ -344,7 +358,7 @@ async fn unpack_mojang_package(
 
     for (rel_path, executable, downloads) in files_to_download {
         let rel_path_owned = rel_path.clone();
-        let target_path = dest_root.join(&rel_path_owned);
+        let target_path = resolve_safe_path(dest_root, &rel_path_owned)?;
         let downloads_owned = downloads.clone();
         let client_clone = client.clone();
         let sem_clone = Arc::clone(&semaphore);
@@ -382,29 +396,164 @@ async fn unpack_mojang_package(
         }
     }
 
-    // Second pass: create symlinks after all target files have been extracted
-    for (rel_path, target) in symlinks {
-        let link_path = dest_root.join(rel_path);
-        if let Some(parent) = link_path.parent() {
-            fs::create_dir_all(parent)?;
+    // Second pass: create symlinks after all target files have been extracted.
+    // Run up to 2 passes so chained symlinks resolve cleanly when Windows falls back to copying.
+    let mut pending_links = symlinks;
+    for _pass in 0..2 {
+        if pending_links.is_empty() {
+            break;
         }
-
-        #[cfg(unix)]
-        {
-            // Remove existing if any
-            let _ = fs::remove_file(&link_path);
-            let _ = std::os::unix::fs::symlink(target, &link_path);
-        }
-        #[cfg(not(unix))]
-        {
-            let resolved_target = link_path.parent().unwrap_or(dest_root).join(target);
-            if resolved_target.exists() {
-                let _ = fs::copy(&resolved_target, &link_path);
+        let mut next_pending = Vec::new();
+        for (rel_path, target) in pending_links {
+            let link_path = resolve_safe_path(dest_root, rel_path)?;
+            if !materialize_manifest_link(dest_root, &link_path, target)? {
+                next_pending.push((rel_path, target));
             }
         }
+        pending_links = next_pending;
     }
 
     Ok(())
+}
+
+/// Normalizes a symlink `target` relative to `link_path`'s parent and verifies it remains
+/// strictly inside `dest_root`.
+fn resolve_link_target_within_root(
+    dest_root: &Path,
+    link_path: &Path,
+    target: &str,
+) -> Option<PathBuf> {
+    if target.is_empty() || target.contains('\0') {
+        return None;
+    }
+    let normalized_target = target.replace('\\', "/");
+    if normalized_target.starts_with('/')
+        || (normalized_target.len() >= 2 && normalized_target.as_bytes()[1] == b':')
+    {
+        return None;
+    }
+
+    let base_parent = link_path.parent().unwrap_or(dest_root);
+    let rel_parent = base_parent.strip_prefix(dest_root).ok()?;
+
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+    for comp in rel_parent.components() {
+        if let Component::Normal(part) = comp {
+            stack.push(part.to_os_string());
+        }
+    }
+    for comp in Path::new(&normalized_target).components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                stack.pop()?;
+            }
+            Component::Normal(part) => stack.push(part.to_os_string()),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    let mut resolved = dest_root.to_path_buf();
+    for part in stack {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// Recursively copies a file or directory as a safe fallback when symlink creation is
+/// unavailable (for example, `ERROR_PRIVILEGE_NOT_HELD` on Windows without Developer Mode).
+fn copy_entry_fallback(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let child_src = entry.path();
+            let child_dst = dst.join(entry.file_name());
+            copy_entry_fallback(&child_src, &child_dst)?;
+        }
+        Ok(())
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if dst.exists() {
+            let _ = remove_file_with_retry(dst);
+        }
+        fs::copy(src, dst)?;
+        Ok(())
+    }
+}
+
+/// Materializes a manifest symlink entry inside `dest_root`.
+///
+/// On Windows, symlink creation requires Administrator privileges or Developer Mode
+/// (`ERROR_PRIVILEGE_NOT_HELD`), so failures gracefully fall back to copying the resolved
+/// target file or directory.
+fn materialize_manifest_link(dest_root: &Path, link_path: &Path, target: &str) -> MqResult<bool> {
+    let Some(resolved_target) = resolve_link_target_within_root(dest_root, link_path, target)
+    else {
+        tracing::warn!(
+            link = %link_path.display(),
+            target = %target,
+            "Skipping Mojang manifest symlink pointing outside runtime directory"
+        );
+        return Ok(true);
+    };
+
+    if let Some(parent) = link_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        if link_path.is_dir() && !link_path.is_symlink() {
+            let _ = remove_dir_all_with_retry(link_path);
+        } else if link_path.exists() || link_path.is_symlink() {
+            let _ = remove_file_with_retry(link_path);
+        }
+        if std::os::unix::fs::symlink(target, link_path).is_err() && resolved_target.exists() {
+            copy_entry_fallback(&resolved_target, link_path)?;
+        }
+        Ok(true)
+    }
+
+    #[cfg(windows)]
+    {
+        if !resolved_target.exists() {
+            return Ok(false);
+        }
+
+        if link_path.is_dir() {
+            let _ = remove_dir_all_with_retry(link_path);
+        } else if link_path.exists() || link_path.is_symlink() {
+            let _ = remove_file_with_retry(link_path);
+        }
+
+        let symlink_res = if resolved_target.is_dir() {
+            std::os::windows::fs::symlink_dir(&resolved_target, link_path)
+        } else {
+            std::os::windows::fs::symlink_file(&resolved_target, link_path)
+        };
+
+        if let Err(err) = symlink_res {
+            tracing::debug!(
+                link = %link_path.display(),
+                target = %resolved_target.display(),
+                "Windows symlink failed ({err}); falling back to copy"
+            );
+            copy_entry_fallback(&resolved_target, link_path)?;
+        }
+        Ok(true)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        if !resolved_target.exists() {
+            return Ok(false);
+        }
+        copy_entry_fallback(&resolved_target, link_path)?;
+        Ok(true)
+    }
 }
 
 /// Downloads and verifies a single file using `lzma` (if present and valid) or `raw` fallback.
@@ -415,6 +564,8 @@ async fn download_and_verify_single_file(
     rel_path: &str,
     executable: bool,
 ) -> MqResult<()> {
+    #[cfg(not(unix))]
+    let _ = executable;
     // 1. Try LZMA download if available
     let mut decompressed_bytes: Option<Vec<u8>> = None;
 
@@ -506,4 +657,101 @@ async fn download_and_verify_single_file(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_windows_platform_keys_and_arm64_fallback() {
+        let json = r#"{
+            "windows-x64": {
+                "java-runtime-delta": [{
+                    "manifest": { "sha1": "aaa", "size": 10, "url": "https://example.invalid/x64.json" },
+                    "version": { "name": "21.0.3", "released": "2024-01-01" }
+                }]
+            },
+            "windows-x86": {
+                "jre-legacy": [{
+                    "manifest": { "sha1": "bbb", "size": 10, "url": "https://example.invalid/x86.json" },
+                    "version": { "name": "8u51", "released": "2015-01-01" }
+                }]
+            },
+            "windows-arm64": {
+                "java-runtime-epsilon": [{
+                    "manifest": { "sha1": "ccc", "size": 10, "url": "https://example.invalid/arm64.json" },
+                    "version": { "name": "25.0.0", "released": "2025-01-01" }
+                }]
+            }
+        }"#;
+        let catalog = parse_mojang_catalog(json).expect("parse catalog");
+        assert_eq!(
+            find_mojang_runtime_entry(&catalog, "windows-x64", "java-runtime-delta")
+                .expect("x64")
+                .manifest
+                .sha1,
+            "aaa"
+        );
+        assert_eq!(
+            find_mojang_runtime_entry(&catalog, "windows-arm64", "java-runtime-epsilon")
+                .expect("arm64 exact")
+                .manifest
+                .sha1,
+            "ccc"
+        );
+        // ARM64 falls back to x64 when component missing on arm64
+        assert_eq!(
+            find_mojang_runtime_entry(&catalog, "windows-arm64", "java-runtime-delta")
+                .expect("arm64->x64 fallback")
+                .manifest
+                .sha1,
+            "aaa"
+        );
+        // ARM64 falls back to x86 for jre-legacy when missing on arm64 & x64
+        assert_eq!(
+            find_mojang_runtime_entry(&catalog, "windows-arm64", "jre-legacy")
+                .expect("arm64->x86 fallback")
+                .manifest
+                .sha1,
+            "bbb"
+        );
+    }
+
+    #[test]
+    fn symlink_target_validation_and_copy_fallback_work_for_files_and_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        let lib_dir = root.join("lib").join("server");
+        fs::create_dir_all(&lib_dir).expect("mkdir");
+        fs::write(lib_dir.join("jvm.dll"), b"dll-payload").expect("write dll");
+
+        let link_path = root.join("bin").join("jvm.dll");
+        let resolved = resolve_link_target_within_root(root, &link_path, "../lib/server/jvm.dll")
+            .expect("valid relative target");
+        assert_eq!(resolved, lib_dir.join("jvm.dll"));
+
+        // Escaping or Windows drive-letter targets must be rejected
+        assert!(resolve_link_target_within_root(root, &link_path, "../../outside.dll").is_none());
+        assert!(
+            resolve_link_target_within_root(root, &link_path, r"C:\Windows\evil.dll").is_none()
+        );
+        assert!(resolve_link_target_within_root(root, &link_path, "/etc/passwd").is_none());
+
+        // Copy fallback for file
+        copy_entry_fallback(&resolved, &link_path).expect("copy file fallback");
+        assert_eq!(
+            fs::read(&link_path).expect("read copied dll"),
+            b"dll-payload"
+        );
+
+        // Copy fallback for directory
+        let dir_dst = root.join("bin").join("server_copy");
+        copy_entry_fallback(&lib_dir, &dir_dst).expect("copy dir fallback");
+        assert_eq!(
+            fs::read(dir_dst.join("jvm.dll")).expect("read copied dir dll"),
+            b"dll-payload"
+        );
+    }
 }

@@ -302,13 +302,18 @@ pub fn format_classpath_string<P: AsRef<Path>>(entries: &[P]) -> String {
     format_classpath_string_separator(entries, mq_core::platform::classpath_separator())
 }
 
-/// Joins ordered classpath entries with an explicit separator character.
+/// Joins ordered classpath entries with an explicit separator character,
+/// stripping any Windows `\\?\` verbatim prefixes that break Java `-cp`.
 pub fn format_classpath_string_separator<P: AsRef<Path>>(entries: &[P], sep: char) -> String {
     let mut sep_buf = [0u8; 4];
     let sep_str = sep.encode_utf8(&mut sep_buf);
     entries
         .iter()
-        .map(|entry| entry.as_ref().to_string_lossy())
+        .map(|entry| {
+            mq_core::fs_util::strip_windows_verbatim_prefix(entry.as_ref())
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>()
         .join(sep_str)
 }
@@ -592,5 +597,18 @@ mod tests {
         assert_eq!(merged.asset_index, parent.asset_index);
         assert_eq!(merged.client_jar, parent.client_jar);
         assert_eq!(merged.loader, ModLoaderKind::NeoForge);
+    }
+
+    #[test]
+    fn format_classpath_strips_windows_verbatim_prefixes_and_uses_semicolon() {
+        let entries = [
+            PathBuf::from(r"\\?\C:\Users\Player\MQ\libraries\a.jar"),
+            PathBuf::from(r"\\?\UNC\server\share\MQ\libraries\b.jar"),
+        ];
+        let formatted = format_classpath_string_separator(&entries, ';');
+        assert_eq!(
+            formatted,
+            r"C:\Users\Player\MQ\libraries\a.jar;\\server\share\MQ\libraries\b.jar"
+        );
     }
 }

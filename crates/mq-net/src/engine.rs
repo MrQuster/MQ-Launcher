@@ -11,7 +11,8 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use mq_core::fs_util::{
-    async_remove_file_with_retry, async_rename_with_retry, remove_file_with_retry,
+    async_remove_file_with_retry, async_rename_with_retry, is_transient_windows_lock_error,
+    remove_file_with_retry, strip_windows_verbatim_prefix, RETRY_DELAYS_MS,
 };
 use mq_core::{Event, EventBus, MqError, MqResult, PhaseProgress, Sha1Digest, Sha512Digest};
 use mq_sched::{
@@ -113,6 +114,7 @@ impl NetEngine {
             .user_agent(&config.user_agent)
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.read_timeout)
+            .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
             .pool_max_idle_per_host(max_conn)
             .gzip(true)
             .build()
@@ -907,21 +909,11 @@ impl NetEngine {
                     )));
                 }
 
-                let f = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .append(true)
-                    .open(epoch_part_path)
-                    .await?;
+                let f = async_open_part_with_retry(epoch_part_path, true).await?;
                 (f, existing_offset, existing_offset)
             } else {
                 // Server returned 200 OK (or no partial offset existed): truncate and restart from 0.
-                let f = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(epoch_part_path)
-                    .await?;
+                let f = async_open_part_with_retry(epoch_part_path, false).await?;
                 (f, 0u64, 0u64)
             };
 
@@ -1225,19 +1217,21 @@ impl NetEngine {
         }
 
         let tmp_path = make_part_path(dest_path, Some(epoch_guard.epoch()));
+        let _ = async_remove_file_with_retry(&tmp_path).await;
         if fs::hard_link(source_path, &tmp_path).await.is_ok() {
-            self.check_epoch(epoch_guard)?;
-            async_rename_with_retry(&tmp_path, dest_path).await?;
+            if let Err(err) = self.check_epoch(epoch_guard) {
+                let _ = async_remove_file_with_retry(&tmp_path).await;
+                return Err(err);
+            }
+            if let Err(err) = async_rename_with_retry(&tmp_path, dest_path).await {
+                let _ = async_remove_file_with_retry(&tmp_path).await;
+                return Err(err.into());
+            }
             return Ok(());
         }
 
         let mut src = fs::File::open(source_path).await?;
-        let mut dst = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .await?;
+        let mut dst = async_open_part_with_retry(&tmp_path, false).await?;
 
         let mut pooled_buf = self.buffer_pool.acquire().await;
         loop {
@@ -1246,11 +1240,22 @@ impl NetEngine {
                 let _ = async_remove_file_with_retry(&tmp_path).await;
                 return Err(err);
             }
-            let n = src.read(pooled_buf.as_mut_slice()).await?;
+            let n = match src.read(pooled_buf.as_mut_slice()).await {
+                Ok(n) => n,
+                Err(err) => {
+                    drop(dst);
+                    let _ = async_remove_file_with_retry(&tmp_path).await;
+                    return Err(err.into());
+                }
+            };
             if n == 0 {
                 break;
             }
-            dst.write_all(&pooled_buf.as_slice()[..n]).await?;
+            if let Err(err) = dst.write_all(&pooled_buf.as_slice()[..n]).await {
+                drop(dst);
+                let _ = async_remove_file_with_retry(&tmp_path).await;
+                return Err(err.into());
+            }
         }
         drop(pooled_buf);
         dst.flush().await?;
@@ -1262,7 +1267,10 @@ impl NetEngine {
             return Err(err);
         }
 
-        async_rename_with_retry(&tmp_path, dest_path).await?;
+        if let Err(err) = async_rename_with_retry(&tmp_path, dest_path).await {
+            let _ = async_remove_file_with_retry(&tmp_path).await;
+            return Err(err.into());
+        }
         Ok(())
     }
 
@@ -1297,11 +1305,48 @@ impl NetEngine {
     }
 }
 
+async fn async_open_part_with_retry(path: &Path, append: bool) -> std::io::Result<fs::File> {
+    let mut attempt = 0;
+    loop {
+        let mut opts = OpenOptions::new();
+        opts.create(true).write(true);
+        if append {
+            opts.append(true);
+        } else {
+            opts.truncate(true);
+        }
+        match opts.open(path).await {
+            Ok(file) => return Ok(file),
+            Err(err)
+                if is_transient_windows_lock_error(&err) && attempt < RETRY_DELAYS_MS.len() =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[attempt]))
+                    .await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn normalize_path_for_dedup(path: &Path, windows_case_insensitive: bool) -> String {
+    let clean = strip_windows_verbatim_prefix(path);
+    let rendered = clean.to_string_lossy();
+    if windows_case_insensitive {
+        rendered.replace('/', "\\").to_ascii_lowercase()
+    } else {
+        rendered.into_owned()
+    }
+}
+
 fn compute_dedup_key(spec: &DownloadSpec) -> String {
     if let Some(sha1) = spec.expected_sha1 {
         format!("sha1:{}", sha1.to_hex())
     } else {
-        format!("path:{}", spec.dest_path.display())
+        format!(
+            "path:{}",
+            normalize_path_for_dedup(&spec.dest_path, cfg!(target_os = "windows"))
+        )
     }
 }
 
@@ -1440,5 +1485,15 @@ mod tests {
             max_observed_buf <= 64,
             "Peak active buffer leases ({max_observed_buf}) must be <= 64"
         );
+    }
+
+    #[test]
+    fn windows_dedup_key_normalizes_slashes_case_and_verbatim_prefix() {
+        let a = normalize_path_for_dedup(Path::new(r"\\?\C:\Users\Player\MQ/cache/Mod.jar"), true);
+        let b = normalize_path_for_dedup(Path::new(r"c:\users\player\mq\cache\mod.jar"), true);
+        assert_eq!(a, b);
+
+        let unix = normalize_path_for_dedup(Path::new("/home/User/MQ/Mod.jar"), false);
+        assert_eq!(unix, "/home/User/MQ/Mod.jar");
     }
 }

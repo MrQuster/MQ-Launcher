@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use mq_core::fs_util::rename_with_retry;
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
 use mq_core::{resolve_safe_path, MqError, MqResult};
 use mq_sched::{ComputePool, EpochGuard};
 
@@ -70,19 +70,16 @@ pub async fn extract_natives_archives(
                     let raw_name = entry.name().to_string();
 
                     // Directory entries don't need extraction
-                    if entry.is_dir() || raw_name.ends_with('/') {
+                    if entry.is_dir() || raw_name.ends_with('/') || raw_name.ends_with('\\') {
                         continue;
                     }
 
-                    // Exclude META-INF and user/profile-specified prefixes
-                    if raw_name.starts_with("META-INF/")
-                        || raw_name.starts_with("META-INF\\")
-                        || excludes.iter().any(|ex| raw_name.starts_with(ex))
-                    {
-                        continue;
+                    // Security check: reject symlinks, NUL bytes, Windows drive prefixes, and traversal
+                    if entry.is_symlink() {
+                        return Err(MqError::ZipSlip {
+                            entry: format!("symlink entry prohibited: {raw_name}"),
+                        });
                     }
-
-                    // Security check: reject symlinks
                     if let Some(mode) = entry.unix_mode() {
                         if (mode & 0o170000) == 0o120000 {
                             return Err(MqError::ZipSlip {
@@ -91,24 +88,41 @@ pub async fn extract_natives_archives(
                         }
                     }
 
-                    // Security check: zip-slip and path traversal
-                    if raw_name.contains("..")
+                    let has_windows_drive = raw_name.len() >= 2
+                        && raw_name.as_bytes()[0].is_ascii_alphabetic()
+                        && raw_name.as_bytes()[1] == b':';
+                    if raw_name.contains('\0')
+                        || has_windows_drive
                         || raw_name.starts_with('/')
                         || raw_name.starts_with('\\')
                     {
                         return Err(MqError::ZipSlip { entry: raw_name });
                     }
 
-                    let dest_path = resolve_safe_path(&target_dir, &raw_name)?;
+                    let normalized_name = raw_name.replace('\\', "/");
+                    if normalized_name.split('/').any(|seg| seg == "..") {
+                        return Err(MqError::ZipSlip { entry: raw_name });
+                    }
+
+                    // Exclude META-INF and user/profile-specified prefixes (separator-normalized)
+                    if normalized_name.starts_with("META-INF/")
+                        || excludes
+                            .iter()
+                            .any(|ex| normalized_name.starts_with(&ex.replace('\\', "/")))
+                    {
+                        continue;
+                    }
+
+                    let dest_path = resolve_safe_path(&target_dir, &normalized_name)?;
 
                     if let Some(parent) = dest_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
 
-                    // Stream to a temp file then rename
+                    // Stream to a temp file then rename, cleaning up temp file on any I/O error
                     let temp_path =
                         target_dir.join(format!(".extract_tmp.{}.{}.part", epoch, extracted_count));
-                    {
+                    let write_res = (|| -> std::io::Result<()> {
                         let mut out_file = File::create(&temp_path)?;
                         let mut buffer = [0u8; NATIVES_CHUNK_SIZE];
                         loop {
@@ -119,22 +133,33 @@ pub async fn extract_natives_archives(
                             out_file.write_all(&buffer[..n])?;
                         }
                         out_file.flush()?;
+                        Ok(())
+                    })();
+                    if let Err(err) = write_res {
+                        let _ = remove_file_with_retry(&temp_path);
+                        return Err(MqError::Io(err));
                     }
 
-                    rename_with_retry(&temp_path, &dest_path)?;
+                    if let Err(err) = rename_with_retry(&temp_path, &dest_path) {
+                        let _ = remove_file_with_retry(&temp_path);
+                        return Err(MqError::Io(err));
+                    }
                     extracted_count += 1;
 
-                    // Modern nested format support (e.g. linux/x64/liblwjgl.so):
-                    // In Java, -Djava.library.path is non-recursive. If a native .so file is nested
-                    // in subdirectories, also ensure it is available at the root of `target_dir`.
-                    if is_native_shared_object(&dest_path) {
+                    // Modern nested format support (e.g. `linux/x64/liblwjgl.so`, `windows/x64/lwjgl.dll`):
+                    // In Java, `-Djava.library.path` is non-recursive. If a native shared library is
+                    // nested in subdirectories matching the host architecture (or without an arch dir),
+                    // also ensure it is available at the root of `target_dir`.
+                    if is_native_shared_object(&dest_path)
+                        && nested_native_matches_host_arch(&normalized_name)
+                    {
                         if let Some(file_name) = dest_path.file_name() {
                             let root_target = target_dir.join(file_name);
                             if root_target != dest_path
                                 && !root_target.exists()
                                 && fs::hard_link(&dest_path, &root_target).is_err()
                             {
-                                let _ = fs::copy(&dest_path, &root_target);
+                                let _ = crate::cas::copy_chunked_atomic(&dest_path, &root_target);
                             }
                         }
                     }
@@ -153,13 +178,37 @@ pub fn ensure_natives_dir_exists(target_natives_dir: &Path) -> MqResult<()> {
     Ok(())
 }
 
-/// Checks whether a given path corresponds to a dynamic shared object library (`.so` or `.so.*`).
+/// Checks whether a nested LWJGL/native archive entry path matches the current host CPU
+/// architecture when an explicit arch segment (`x64`/`x86`/`arm64`/`arm32`) is present.
+fn nested_native_matches_host_arch(normalized_rel: &str) -> bool {
+    let mut found_arch = None;
+    for seg in normalized_rel.split('/') {
+        match seg.to_ascii_lowercase().as_str() {
+            "x64" | "x86_64" | "amd64" => found_arch = Some("x86_64"),
+            "x86" | "i386" | "i686" => found_arch = Some("x86"),
+            "arm64" | "aarch64" => found_arch = Some("aarch64"),
+            "arm32" | "arm" => found_arch = Some("arm"),
+            _ => {}
+        }
+    }
+    match found_arch {
+        Some(arch) => arch == std::env::consts::ARCH,
+        None => true,
+    }
+}
+
+/// Checks whether a given path corresponds to a dynamic shared library across platforms:
+/// Linux (`.so`, `.so.*`), Windows (`.dll`), and macOS (`.dylib`, `.jnilib`).
 pub fn is_native_shared_object(path: &Path) -> bool {
     let name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(n) => n,
+        Some(n) => n.to_ascii_lowercase(),
         None => return false,
     };
-    name.ends_with(".so") || name.contains(".so.")
+    name.ends_with(".so")
+        || name.contains(".so.")
+        || name.ends_with(".dll")
+        || name.ends_with(".dylib")
+        || name.ends_with(".jnilib")
 }
 
 /// Recursively lists all native shared object (.so) files present in `target_natives_dir`.
@@ -307,5 +356,75 @@ mod tests {
         assert!(target_dir.join("liblwjgl.so").exists());
         let so_list = list_native_shared_objects(&target_dir).unwrap();
         assert!(so_list.iter().any(|p| p.ends_with("liblwjgl.so")));
+    }
+
+    #[tokio::test]
+    async fn extracts_windows_dll_natives_hoists_to_root_and_rejects_windows_zip_slip() {
+        let dir = tempdir().unwrap();
+        let jar_path = dir.path().join("lwjgl-natives-windows.jar");
+        let target_dir = dir.path().join("natives_win");
+
+        {
+            let file = File::create(&jar_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("windows/x64/lwjgl.dll", options).unwrap();
+            zip.write_all(b"MZ-windows-dll-bytes").unwrap();
+            zip.start_file(r"META-INF\MANIFEST.MF", options).unwrap();
+            zip.write_all(b"Manifest-Version: 1.0").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let pool = ComputePool::new(2);
+        let cancel_epoch = mq_sched::CancelEpoch::new();
+        let epoch_guard = cancel_epoch.snapshot();
+
+        let count =
+            extract_natives_archives(&[jar_path], &[vec![]], &target_dir, &pool, &epoch_guard)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+        assert!(target_dir.join("windows/x64/lwjgl.dll").exists());
+        assert!(
+            !target_dir.join("META-INF/MANIFEST.MF").exists(),
+            "META-INF with backslash separator must be excluded"
+        );
+        assert!(
+            verify_natives_dir(&target_dir).unwrap(),
+            "verify_natives_dir must recognize .dll natives"
+        );
+        if cfg!(target_arch = "x86_64") {
+            assert!(
+                target_dir.join("lwjgl.dll").exists(),
+                "matching-arch nested Windows DLL must be hoisted to natives root"
+            );
+        }
+
+        // Verify Windows drive-letter & backslash Zip-Slip entries are rejected
+        for evil_entry in [
+            r"C:\Windows\System32\evil.dll",
+            r"..\evil.dll",
+            r"\evil.dll",
+        ] {
+            let evil_jar = dir.path().join("evil_win.jar");
+            {
+                let file = File::create(&evil_jar).unwrap();
+                let mut zip = zip::ZipWriter::new(file);
+                let options =
+                    SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+                zip.start_file(evil_entry, options).unwrap();
+                zip.write_all(b"evil").unwrap();
+                zip.finish().unwrap();
+            }
+            let evil_target = dir.path().join("evil_out");
+            let res =
+                extract_natives_archives(&[evil_jar], &[vec![]], &evil_target, &pool, &epoch_guard)
+                    .await;
+            assert!(
+                matches!(res, Err(MqError::ZipSlip { .. })),
+                "expected ZipSlip for {evil_entry:?}, got {res:?}"
+            );
+        }
     }
 }

@@ -7,6 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
 use mq_core::{resolve_safe_path, MqError, MqPaths, MqResult, Sha1Digest, Sha512Digest};
 use mq_net::{DownloadSpec, NetEngine};
 use mq_sched::EpochGuard;
@@ -66,11 +67,11 @@ pub fn toggle_mod(mods_dir: &Path, file_name: &str) -> MqResult<PathBuf> {
         )));
     }
 
-    let target_name = if file_name.ends_with(".jar.disabled")
-        || file_name.ends_with(".zip.disabled")
-    {
-        file_name.trim_end_matches(".disabled").to_string()
-    } else if file_name.ends_with(".jar") || file_name.ends_with(".zip") {
+    let lower = file_name.to_ascii_lowercase();
+    let target_name = if lower.ends_with(".jar.disabled") || lower.ends_with(".zip.disabled") {
+        let strip_len = ".disabled".len();
+        file_name[..file_name.len() - strip_len].to_string()
+    } else if lower.ends_with(".jar") || lower.ends_with(".zip") {
         format!("{file_name}.disabled")
     } else {
         return Err(MqError::Internal(format!(
@@ -79,7 +80,10 @@ pub fn toggle_mod(mods_dir: &Path, file_name: &str) -> MqResult<PathBuf> {
     };
 
     let safe_dst = resolve_safe_path(mods_dir, &target_name)?;
-    fs::rename(&safe_src, &safe_dst)?;
+    if safe_dst.exists() && safe_dst != safe_src {
+        let _ = remove_file_with_retry(&safe_dst);
+    }
+    rename_with_retry(&safe_src, &safe_dst)?;
     Ok(safe_dst)
 }
 
@@ -87,7 +91,7 @@ pub fn toggle_mod(mods_dir: &Path, file_name: &str) -> MqResult<PathBuf> {
 pub fn delete_mod(mods_dir: &Path, file_name: &str) -> MqResult<()> {
     let safe_path = resolve_safe_path(mods_dir, file_name)?;
     if safe_path.exists() {
-        fs::remove_file(&safe_path)?;
+        remove_file_with_retry(&safe_path)?;
     }
     Ok(())
 }
@@ -229,7 +233,7 @@ async fn install_resolved_To_dir(
         }
 
         if let Err(err) = verify_file_sha1_and_sha512(&dest_file, &d.filename, d.sha1, d.sha512) {
-            let _ = fs::remove_file(&dest_file);
+            let _ = remove_file_with_retry(&dest_file);
             return Err(err);
         }
 
@@ -298,11 +302,11 @@ where
     let bak_path = resolve_safe_path(target_dir, &bak_name)?;
 
     if bak_path.exists() {
-        let _ = fs::remove_file(&bak_path);
+        let _ = remove_file_with_retry(&bak_path);
     }
 
     // 1. Move old file to `<old_file_name>.bak`
-    fs::rename(&old_path, &bak_path)?;
+    rename_with_retry(&old_path, &bak_path)?;
 
     // 2. Write new file and verify hashes
     let write_and_verify = (|| -> MqResult<()> {
@@ -325,16 +329,16 @@ where
     match write_and_verify {
         Ok(()) => {
             // 3a. Success: remove `.bak`
-            let _ = fs::remove_file(&bak_path);
+            let _ = remove_file_with_retry(&bak_path);
             Ok(new_path)
         }
         Err(err) => {
             // 3b. Rollback: remove broken new file and restore `.bak` -> `old_path`
             if new_path.exists() {
-                let _ = fs::remove_file(&new_path);
+                let _ = remove_file_with_retry(&new_path);
             }
             if bak_path.exists() {
-                let _ = fs::rename(&bak_path, &old_path);
+                let _ = rename_with_retry(&bak_path, &old_path);
             }
             Err(err)
         }
@@ -368,11 +372,11 @@ pub async fn update_installed_content(
     let bak_path = resolve_safe_path(target_dir, &bak_name)?;
 
     if bak_path.exists() {
-        let _ = fs::remove_file(&bak_path);
+        let _ = remove_file_with_retry(&bak_path);
     }
 
     // Create `.bak` backup before attempting update
-    fs::rename(&old_path, &bak_path)?;
+    rename_with_retry(&old_path, &bak_path)?;
 
     let update_res: MqResult<()> = async {
         validate_content_download_url(&new_download.url)?;
@@ -419,7 +423,7 @@ pub async fn update_installed_content(
 
     match update_res {
         Ok(()) => {
-            let _ = fs::remove_file(&bak_path);
+            let _ = remove_file_with_retry(&bak_path);
 
             if let Ok((actual_sha1, actual_sha512, _)) = stream_hash_file_sha1_sha512(&new_path) {
                 let mut lock = ModLockFile::load_or_default(target_dir);
@@ -450,10 +454,10 @@ pub async fn update_installed_content(
         }
         Err(err) => {
             if new_path.exists() {
-                let _ = fs::remove_file(&new_path);
+                let _ = remove_file_with_retry(&new_path);
             }
             if bak_path.exists() {
-                let _ = fs::rename(&bak_path, &old_path);
+                let _ = rename_with_retry(&bak_path, &old_path);
             }
             Err(err)
         }
@@ -805,5 +809,35 @@ mod tests {
         .await
         .is_err());
         assert!(!inst_dir.join("mods").join("cancelled-mod.jar").exists());
+    }
+
+    #[test]
+    fn toggle_and_delete_mod_handle_readonly_uppercase_and_existing_dest() {
+        let dir = tempdir().unwrap();
+
+        // 1. Existing read-only destination + read-only source with uppercase `.JAR`
+        let src = dir.path().join("OptiMod.JAR");
+        let existing_dst = dir.path().join("OptiMod.JAR.disabled");
+        fs::write(&src, b"new-jar").unwrap();
+        fs::write(&existing_dst, b"stale-disabled").unwrap();
+
+        let mut ro = fs::metadata(&existing_dst).unwrap().permissions();
+        ro.set_readonly(true);
+        fs::set_permissions(&existing_dst, ro).unwrap();
+
+        let disabled = toggle_mod(dir.path(), "OptiMod.JAR").expect("toggle uppercase JAR");
+        assert_eq!(disabled, existing_dst);
+        assert_eq!(fs::read(&disabled).unwrap(), b"new-jar");
+
+        // Re-enable uppercase `.JAR.disabled`
+        let enabled = toggle_mod(dir.path(), "OptiMod.JAR.disabled").expect("re-enable");
+        assert_eq!(enabled, src);
+
+        // Delete read-only mod cleanly
+        let mut ro_src = fs::metadata(&enabled).unwrap().permissions();
+        ro_src.set_readonly(true);
+        fs::set_permissions(&enabled, ro_src).unwrap();
+        delete_mod(dir.path(), "OptiMod.JAR").expect("delete read-only mod");
+        assert!(!enabled.exists());
     }
 }

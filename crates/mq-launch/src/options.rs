@@ -8,8 +8,12 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
 use mq_core::{MqError, MqResult};
+
+static OPTIONS_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Canonical filename for Minecraft's settings file (`options.txt`).
 pub const MINECRAFT_OPTIONS_FILE: &str = "options.txt";
@@ -175,8 +179,9 @@ pub fn read_minecraft_options_lang(instance_dir: &Path) -> Option<String> {
 
 fn atomic_write_file(path: &Path, bytes: &[u8]) -> MqResult<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let seq = OPTIONS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = parent.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{seq}.tmp",
         path.file_name().and_then(|f| f.to_str()).unwrap_or("file"),
         std::process::id()
     ));
@@ -190,12 +195,12 @@ fn atomic_write_file(path: &Path, bytes: &[u8]) -> MqResult<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&tmp_path, path)?;
+        rename_with_retry(&tmp_path, path)?;
         Ok(())
     })();
 
     if let Err(err) = res {
-        let _ = fs::remove_file(&tmp_path);
+        let _ = remove_file_with_retry(&tmp_path);
         return Err(MqError::Io(err));
     }
 
@@ -257,10 +262,7 @@ impl MinecraftOptionsManager {
         let mut out = lines.join("\n");
         out.push('\n');
 
-        let tmp_path = options_path.with_extension("tmp");
-        fs::write(&tmp_path, out)?;
-        fs::rename(tmp_path, options_path)?;
-        Ok(())
+        atomic_write_file(options_path, out.as_bytes())
     }
 }
 

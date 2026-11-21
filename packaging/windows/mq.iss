@@ -21,7 +21,7 @@
     #expr FileClose(CargoFile)
   #endif
   #if MyAppVersion == ""
-    #expr MyAppVersion = "2.7.2"
+    #expr MyAppVersion = "2.7.3"
   #endif
 #endif
 
@@ -74,6 +74,9 @@ OutputBaseFilename=MQ-Setup-{#MyAppVersion}-x64
 SetupIconFile=mq.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} Launcher
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Launcher Setup
+VersionInfoProductName={#MyAppName}
 
 #if FileExists("..\..\LICENSE")
 LicenseFile=..\..\LICENSE
@@ -93,8 +96,9 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 UsedUserAreasWarning=no
 
-; File associations (.mrpack only; .zip is never intercepted)
+; File associations (.mrpack only; .zip is never intercepted) and PATH broadcast
 ChangesAssociations=yes
+ChangesEnvironment=yes
 
 ; Automatic process handling for in-place updates (only mq.exe, never java.exe/javaw.exe)
 CloseApplications=yes
@@ -113,6 +117,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 english.CreateStartMenuIcon=Create a &Start Menu shortcut
 english.CreateDesktopIcon=Create a &desktop shortcut
 english.AdditionalIcons=Additional shortcuts:
+english.AdditionalTasks=System integration:
+english.AddToPath=Add %1 to PATH (enables "mq" command in terminal)
 english.FileAssociations=File associations:
 english.AssocMrpack=Associate .mrpack files with %1
 english.MrpackFileDescription=Modrinth Modpack
@@ -123,6 +129,8 @@ english.UninstallPurgePrompt=Delete launcher data (instances, settings, accounts
 russian.CreateStartMenuIcon=Создать ярлык в меню «&Пуск»
 russian.CreateDesktopIcon=Создать &ярлык на рабочем столе
 russian.AdditionalIcons=Дополнительные ярлыки:
+russian.AdditionalTasks=Интеграция с системой:
+russian.AddToPath=Добавить %1 в PATH (команда «mq» в терминале)
 russian.FileAssociations=Ассоциации файлов:
 russian.AssocMrpack=Ассоциировать файлы .mrpack с %1
 russian.MrpackFileDescription=Модпак Modrinth
@@ -133,6 +141,8 @@ russian.UninstallPurgePrompt=Удалить данные лаунчера (ин�
 ukrainian.CreateStartMenuIcon=Створити ярлик у меню «&Пуск»
 ukrainian.CreateDesktopIcon=Створити &ярлик на робочому столі
 ukrainian.AdditionalIcons=Додаткові ярлики:
+ukrainian.AdditionalTasks=Інтеграція з системою:
+ukrainian.AddToPath=Додати %1 до PATH (команда «mq» у терміналі)
 ukrainian.FileAssociations=Асоціації файлів:
 ukrainian.AssocMrpack=Асоціювати файли .mrpack з %1
 ukrainian.MrpackFileDescription=Модпак Modrinth
@@ -143,6 +153,7 @@ ukrainian.UninstallPurgePrompt=Видалити дані лаунчера (ін�
 [Tasks]
 Name: "startmenu"; Description: "{cm:CreateStartMenuIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "addtopath"; Description: "{cm:AddToPath,{#MyAppName}}"; GroupDescription: "{cm:AdditionalTasks}"
 Name: "assocmrpack"; Description: "{cm:AssocMrpack,{#MyAppName}}"; GroupDescription: "{cm:FileAssociations}"
 
 [Files]
@@ -173,15 +184,144 @@ Type: files; Name: "{app}\*.tmp"
 Type: dirifempty; Name: "{app}"
 
 [Code]
+function GetEnvRegRoot(): Integer;
+begin
+  if IsAdminInstallMode then
+    Result := HKEY_LOCAL_MACHINE
+  else
+    Result := HKEY_CURRENT_USER;
+end;
+
+function GetEnvRegKey(): string;
+begin
+  if IsAdminInstallMode then
+    Result := 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+  else
+    Result := 'Environment';
+end;
+
+function NormalizePathEntry(const S: string): string;
+begin
+  Result := Uppercase(RemoveBackslashUnlessRoot(Trim(S)));
+end;
+
+procedure EnvAddPath(const NewPath: string);
+var
+  RootKey: Integer;
+  SubKey, Paths, Remaining, Token, CleanNew, NormNew, Rebuilt: string;
+  P: Integer;
+  Found: Boolean;
+begin
+  CleanNew := RemoveBackslashUnlessRoot(Trim(NewPath));
+  if CleanNew = '' then
+    Exit;
+  NormNew := Uppercase(CleanNew);
+
+  RootKey := GetEnvRegRoot();
+  SubKey := GetEnvRegKey();
+  Paths := '';
+  RegQueryStringValue(RootKey, SubKey, 'Path', Paths);
+
+  Remaining := Paths;
+  Rebuilt := '';
+  Found := False;
+  while Remaining <> '' do
+  begin
+    P := Pos(';', Remaining);
+    if P > 0 then
+    begin
+      Token := Trim(Copy(Remaining, 1, P - 1));
+      Remaining := Copy(Remaining, P + 1, Length(Remaining) - P);
+    end
+    else
+    begin
+      Token := Trim(Remaining);
+      Remaining := '';
+    end;
+
+    if Token <> '' then
+    begin
+      if NormalizePathEntry(Token) = NormNew then
+        Found := True;
+      if Rebuilt <> '' then
+        Rebuilt := Rebuilt + ';' + Token
+      else
+        Rebuilt := Token;
+    end;
+  end;
+
+  if not Found then
+  begin
+    if Rebuilt <> '' then
+      Rebuilt := Rebuilt + ';' + CleanNew
+    else
+      Rebuilt := CleanNew;
+    RegWriteExpandStringValue(RootKey, SubKey, 'Path', Rebuilt);
+  end;
+end;
+
+procedure EnvRemovePath(const OldPath: string);
+var
+  RootKey: Integer;
+  SubKey, Paths, Remaining, Token, NormOld, Rebuilt: string;
+  P: Integer;
+  Changed: Boolean;
+begin
+  NormOld := NormalizePathEntry(OldPath);
+  if NormOld = '' then
+    Exit;
+
+  RootKey := GetEnvRegRoot();
+  SubKey := GetEnvRegKey();
+  Paths := '';
+  if not RegQueryStringValue(RootKey, SubKey, 'Path', Paths) then
+    Exit;
+
+  Remaining := Paths;
+  Rebuilt := '';
+  Changed := False;
+  while Remaining <> '' do
+  begin
+    P := Pos(';', Remaining);
+    if P > 0 then
+    begin
+      Token := Trim(Copy(Remaining, 1, P - 1));
+      Remaining := Copy(Remaining, P + 1, Length(Remaining) - P);
+    end
+    else
+    begin
+      Token := Trim(Remaining);
+      Remaining := '';
+    end;
+
+    if Token <> '' then
+    begin
+      if NormalizePathEntry(Token) = NormOld then
+        Changed := True
+      else if Rebuilt <> '' then
+        Rebuilt := Rebuilt + ';' + Token
+      else
+        Rebuilt := Token;
+    end;
+  end;
+
+  if Changed then
+    RegWriteExpandStringValue(RootKey, SubKey, 'Path', Rebuilt);
+end;
+
 // Safely terminate only running instances of mq.exe (never touch java.exe / javaw.exe)
 function TerminateMQProcess(): Boolean;
 var
+  TaskKillPath: string;
   ResultCode: Integer;
 begin
-  Exec('taskkill.exe', '/im mq.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Sleep(200);
-  Exec('taskkill.exe', '/f /im mq.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Sleep(200);
+  TaskKillPath := ExpandConstant('{sys}\taskkill.exe');
+  if Exec(TaskKillPath, '/im mq.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode <> 128) then
+  begin
+    Sleep(300);
+    Exec(TaskKillPath, '/f /im mq.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(200);
+  end;
   Result := True;
 end;
 
@@ -225,6 +365,15 @@ begin
   Result := '';
 end;
 
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if WizardIsTaskSelected('addtopath') then
+      EnvAddPath(ExpandConstant('{app}'));
+  end;
+end;
+
 function InitializeUninstall(): Boolean;
 begin
   TerminateMQProcess();
@@ -243,6 +392,8 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
+    EnvRemovePath(ExpandConstant('{app}'));
+
     LocalDataDir := ExpandConstant('{localappdata}\MQ');
     RoamingDataDir := ExpandConstant('{userappdata}\MQ');
     if (not DirExists(LocalDataDir)) and (not DirExists(RoamingDataDir)) then

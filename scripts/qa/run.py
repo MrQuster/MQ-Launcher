@@ -24,7 +24,7 @@ import checks  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", "/home/honey/mq/target"))
+DEFAULT_TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", str(REPO_ROOT / "target")))
 
 
 def resolve_mq_binary(explicit_bin: Path | None, no_build: bool) -> Path:
@@ -165,7 +165,7 @@ def wait_for_socket(sock_path: Path, proc: subprocess.Popen[str], timeout_s: flo
                 raise RuntimeError(f"Insecure permissions {oct(mode)} on {sock_path}, expected 0600")
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                sock.settimeout(30.0)
+                sock.settimeout(35.0)
                 sock.connect(str(sock_path))
                 return sock
             except OSError:
@@ -184,7 +184,12 @@ class JsonLineClient:
         line = json.dumps(payload, ensure_ascii=False)
         self.writer.write(line + "\n")
         self.writer.flush()
-        resp_line = self.reader.readline()
+        try:
+            resp_line = self.reader.readline()
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out waiting for response to {payload.get('cmd')!r}"
+            ) from exc
         if not resp_line:
             raise EOFError(f"Socket closed while waiting response for {payload.get('cmd')}")
         return json.loads(resp_line)

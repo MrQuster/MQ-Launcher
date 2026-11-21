@@ -11,9 +11,12 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry, strip_windows_verbatim_prefix};
+use mq_core::platform::atomic_write;
 use mq_core::{AccountId, MqError, MqPaths, MqResult, SecretString};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -60,7 +63,9 @@ impl ElyByClient {
     /// Creates a new [`ElyByClient`] targeting production Ely.by endpoints.
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
-            .user_agent("mq-launcher/0.1.0")
+            .user_agent(concat!("mq-launcher/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self::with_http_client(http)
@@ -416,15 +421,22 @@ impl ElyByClient {
             .unwrap_or_else(|| Path::new("."))
             .join(tmp_name);
 
-        {
+        let write_res = (|| -> std::io::Result<()> {
             let mut file = fs::File::create(&tmp_path)?;
             file.write_all(&jar_bytes)?;
             file.sync_all()?;
+            drop(file);
+            rename_with_retry(&tmp_path, &jar_path)
+        })();
+
+        if let Err(err) = write_res {
+            let _ = remove_file_with_retry(&tmp_path);
+            return Err(MqError::Io(err));
         }
 
-        fs::rename(&tmp_path, &jar_path)?;
-        let _ = fs::write(&sidecar_primary, format!("{expected_sha256}\n"));
-        let _ = fs::write(&sidecar_alt, format!("{expected_sha256}\n"));
+        let sha_payload = format!("{expected_sha256}\n");
+        let _ = atomic_write(&sidecar_primary, sha_payload.as_bytes());
+        let _ = atomic_write(&sidecar_alt, sha_payload.as_bytes());
 
         Ok(jar_path)
     }
@@ -432,10 +444,11 @@ impl ElyByClient {
     /// Returns the JVM arguments required to inject `authlib-injector.jar` using this client's
     /// configured injector metadata URL.
     pub fn jvm_injection_args(&self, injector_jar_path: &Path) -> [String; 2] {
+        let clean_path = strip_windows_verbatim_prefix(injector_jar_path);
         [
             format!(
                 "-javaagent:{}={}",
-                injector_jar_path.display(),
+                clean_path.display(),
                 self.injector_config_url
             ),
             "-Dauthlibinjector.side=client".to_owned(),
@@ -504,10 +517,11 @@ impl ElyByClient {
 /// Builds the two JVM arguments required to launch Minecraft with Ely.by's `authlib-injector`:
 /// `["-javaagent:<jar_path>=https://account.ely.by/api/authlib-injector", "-Dauthlibinjector.side=client"]`.
 pub fn elyby_jvm_injection_args(injector_jar_path: &Path) -> [String; 2] {
+    let clean_path = strip_windows_verbatim_prefix(injector_jar_path);
     [
         format!(
             "-javaagent:{}={}",
-            injector_jar_path.display(),
+            clean_path.display(),
             ELYBY_INJECTOR_CONFIG_URL
         ),
         "-Dauthlibinjector.side=client".to_owned(),
@@ -622,95 +636,168 @@ impl ElyByOAuthFlow {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
+        let mut candidate_ports = Vec::with_capacity(6);
+        candidate_ports.push(port);
+        if let Some(p1) = port.checked_add(1) {
+            candidate_ports.push(p1);
+        }
+        if let Some(p2) = port.checked_add(2) {
+            candidate_ports.push(p2);
+        }
+        candidate_ports.extend_from_slice(&[25585, 25586, 0]);
+
         let mut bound_listener = None;
-        for p in [port, port + 1, port + 2, 25585, 25586, 0] {
+        for p in candidate_ports {
             if let Ok(l) = TcpListener::bind(("127.0.0.1", p)).await {
                 bound_listener = Some(l);
                 break;
             }
         }
 
-        let listener = bound_listener.ok_or_else(|| {
+        let v4_listener = bound_listener.ok_or_else(|| {
             MqError::Auth("Failed to bind loopback TCP server for Ely.by OAuth callback".into())
         })?;
-
-        let (mut socket, _) =
-            tokio::time::timeout(std::time::Duration::from_secs(300), listener.accept())
-                .await
-                .map_err(|_| MqError::Auth("Таймаут ожидания входа в браузере (5 минут)".into()))?
-                .map_err(|e| MqError::Network(format!("Ошибка loopback соединения: {e}")))?;
-
-        let mut buf = [0u8; 4096];
-        let n = socket.read(&mut buf).await.map_err(|e| {
-            MqError::Network(format!("Ошибка чтения HTTP запроса от браузера: {e}"))
-        })?;
-        let request = String::from_utf8_lossy(&buf[..n]);
-
-        let first_line = request.lines().next().unwrap_or_default();
-        let target = first_line.split_whitespace().nth(1).unwrap_or_default();
-
-        let mut code = None;
-        let mut state = None;
-        let mut error_msg = None;
-
-        if let Some(query) = target.split('?').nth(1) {
-            for param in query.split('&') {
-                let mut kv = param.split('=');
-                if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
-                    if k == "code" {
-                        code = Some(v.to_string());
-                    } else if k == "state" {
-                        state = Some(v.to_string());
-                    } else if k == "error" {
-                        error_msg = Some(v.to_string());
-                    }
-                }
-            }
-        }
+        // Also opportunistically bind IPv6 loopback `[::1]` on the same port in case Windows
+        // resolves `localhost` to `::1`; ignore failures if IPv6 is unavailable.
+        let v6_listener = match v4_listener.local_addr() {
+            Ok(addr) => TcpListener::bind(("::1", addr.port())).await.ok(),
+            Err(_) => None,
+        };
 
         let html_success = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>MQ Launcher</title><style>body{background:#121316;color:#e1e4ea;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.card{background:#1a1c23;padding:36px 48px;border-radius:8px;border:1px solid #2e323b;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.45);}h2{margin-top:0;color:#10b981;}p{color:#9ca3af;font-size:14px;}</style></head><body><div class=\"card\"><h2>Вход выполнен</h2><p>Можно закрыть эту вкладку и вернуться в лаунчер MQ.</p></div></body></html>";
 
         let html_error = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>MQ Launcher — Ошибка</title><style>body{background:#121316;color:#e1e4ea;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.card{background:#1a1c23;padding:36px 48px;border-radius:8px;border:1px solid #ef4444;text-align:center;}h2{margin-top:0;color:#ef4444;}</style></head><body><div class=\"card\"><h2>Ошибка авторизации</h2><p>Запрос отклонён или нарушена проверка безопасности.</p></div></body></html>";
 
-        if let Some(err) = error_msg {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(MqError::Auth(
+                    "Таймаут ожидания входа в браузере (5 минут)".into(),
+                ));
+            }
+
+            let mut socket = tokio::time::timeout(
+                remaining,
+                accept_loopback(&v4_listener, v6_listener.as_ref()),
+            )
+            .await
+            .map_err(|_| MqError::Auth("Таймаут ожидания входа в браузере (5 минут)".into()))?
+            .map_err(|e| MqError::Network(format!("Ошибка loopback соединения: {e}")))?;
+
+            let mut raw = Vec::with_capacity(2048);
+            let mut chunk = [0u8; 1024];
+            let read_res = tokio::time::timeout(Duration::from_secs(5), async {
+                while raw.len() < 8192 {
+                    let n = socket.read(&mut chunk).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&chunk[..n]);
+                    if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Ok::<(), std::io::Error>(())
+            })
+            .await;
+
+            if read_res.is_err() || raw.is_empty() {
+                // Ignore empty speculative preconnect sockets opened by Chrome/Edge on Windows.
+                let _ = socket.shutdown().await;
+                continue;
+            }
+
+            let request = String::from_utf8_lossy(&raw);
+            let first_line = request.lines().next().unwrap_or_default();
+            let target = first_line.split_whitespace().nth(1).unwrap_or_default();
+            let (path_only, query_opt) = match target.split_once('?') {
+                Some((p, q)) => (p, Some(q)),
+                None => (target, None),
+            };
+
+            // Ignore unrelated browser probes (e.g. `/favicon.ico`) so they don't abort OAuth.
+            if path_only != "/callback" && path_only != "/" {
+                let not_found =
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(not_found).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                continue;
+            }
+
+            let mut code = None;
+            let mut state = None;
+            let mut error_msg = None;
+
+            if let Some(query) = query_opt {
+                for param in query.split('&') {
+                    if let Some((k, v)) = param.split_once('=') {
+                        if k == "code" {
+                            code = Some(percent_decode_query_component(v));
+                        } else if k == "state" {
+                            state = Some(percent_decode_query_component(v));
+                        } else if k == "error" {
+                            error_msg = Some(percent_decode_query_component(v));
+                        }
+                    }
+                }
+            }
+
+            if let Some(err) = error_msg {
+                let resp = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html_error.len(),
+                    html_error
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                return Err(MqError::Auth(format!(
+                    "Ely.by вернул ошибку авторизации: {err}"
+                )));
+            }
+
+            if state.as_deref() != Some(expected_state) {
+                let resp = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html_error.len(),
+                    html_error
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                return Err(MqError::Auth(
+                    "CSRF проверка не прошла: параметр state не совпадает".into(),
+                ));
+            }
+
+            let Some(code) = code else {
+                let resp = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html_error.len(),
+                    html_error
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                return Err(MqError::Auth(
+                    "В ответе Ely.by отсутствует параметр authorization code".into(),
+                ));
+            };
+
             let resp = format!(
-                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                html_error.len(),
-                html_error
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                html_success.len(),
+                html_success
             );
             let _ = socket.write_all(resp.as_bytes()).await;
             let _ = socket.flush().await;
-            return Err(MqError::Auth(format!(
-                "Ely.by вернул ошибку авторизации: {err}"
-            )));
+            let _ = socket.shutdown().await;
+
+            return Ok(code);
         }
-
-        if state.as_deref() != Some(expected_state) {
-            let resp = format!(
-                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                html_error.len(),
-                html_error
-            );
-            let _ = socket.write_all(resp.as_bytes()).await;
-            let _ = socket.flush().await;
-            return Err(MqError::Auth(
-                "CSRF проверка не прошла: параметр state не совпадает".into(),
-            ));
-        }
-
-        let code = code.ok_or_else(|| {
-            MqError::Auth("В ответе Ely.by отсутствует параметр authorization code".into())
-        })?;
-
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            html_success.len(),
-            html_success
-        );
-        let _ = socket.write_all(resp.as_bytes()).await;
-        let _ = socket.flush().await;
-
-        Ok(code)
     }
 
     pub async fn exchange_code_for_token(
@@ -821,6 +908,43 @@ impl ElyByOAuthFlow {
             .map_err(|e| MqError::Auth(format!("Некорректный JSON профиля Ely.by: {e}")))?;
         Ok(info)
     }
+}
+
+async fn accept_loopback(
+    v4: &tokio::net::TcpListener,
+    v6: Option<&tokio::net::TcpListener>,
+) -> std::io::Result<tokio::net::TcpStream> {
+    match v6 {
+        Some(v6_listener) => tokio::select! {
+            res = v4.accept() => res.map(|(s, _)| s),
+            res = v6_listener.accept() => res.map(|(s, _)| s),
+        },
+        None => v4.accept().await.map(|(s, _)| s),
+    }
+}
+
+fn percent_decode_query_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        } else if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn percent_encode_query_component(input: &str) -> String {
@@ -1393,5 +1517,54 @@ mod tests {
 
         let err = cancel_task.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("access_denied"));
+
+        // 4. Test browser favicon probe + empty preconnect + percent-encoded code
+        let probe_task = tokio::spawn(async {
+            ElyByOAuthFlow::start_loopback_listener(29854, "state_probe_ok").await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 4a. Speculative empty preconnect socket closed immediately
+        {
+            let preconnect = TcpStream::connect("127.0.0.1:29854").await.unwrap();
+            drop(preconnect);
+        }
+        // 4b. Browser favicon request must receive 404 without aborting the OAuth listener
+        {
+            let mut fav_stream = TcpStream::connect("127.0.0.1:29854").await.unwrap();
+            fav_stream
+                .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .await
+                .unwrap();
+            let n = fav_stream.read(&mut resp_buf).await.unwrap();
+            let fav_resp = String::from_utf8_lossy(&resp_buf[..n]);
+            assert!(fav_resp.starts_with("HTTP/1.1 404 Not Found"));
+        }
+        // 4c. Real callback with percent-encoded code arrives afterwards and succeeds
+        {
+            let mut cb_stream = TcpStream::connect("127.0.0.1:29854").await.unwrap();
+            cb_stream
+                .write_all(
+                    b"GET /callback?code=auth%2Fcode%3D99&state=state_probe_ok HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let n = cb_stream.read(&mut resp_buf).await.unwrap();
+            let cb_resp = String::from_utf8_lossy(&resp_buf[..n]);
+            assert!(cb_resp.starts_with("HTTP/1.1 200 OK"));
+        }
+        let decoded_code = probe_task.await.unwrap().expect("decoded auth code");
+        assert_eq!(decoded_code, "auth/code=99");
+    }
+
+    #[test]
+    fn elyby_jvm_injection_args_strips_windows_verbatim_prefix() {
+        let verbatim =
+            Path::new(r"\\?\C:\Users\Иван Петров\AppData\Local\MQ\cache\authlib-injector.jar");
+        let args = elyby_jvm_injection_args(verbatim);
+        assert_eq!(
+            args[0],
+            r"-javaagent:C:\Users\Иван Петров\AppData\Local\MQ\cache\authlib-injector.jar=https://account.ely.by/api/authlib-injector"
+        );
     }
 }

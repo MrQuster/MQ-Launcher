@@ -8,12 +8,114 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use mq_core::fs_util::{
+    remove_dir_all_with_retry, rename_with_retry, strip_windows_verbatim_prefix,
+};
 use mq_core::{MqError, MqResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Standard system JVM installation root directories probed on Linux.
 pub const SYSTEM_JVM_DIRS: [&str; 2] = ["/usr/lib/jvm", "/usr/lib64/jvm"];
+
+#[cfg(windows)]
+fn configure_hidden_std_command(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_hidden_std_command(_cmd: &mut Command) {}
+
+/// Canonicalizes `path` and strips any Windows verbatim `\\?\` / `\\?\UNC\` prefix so paths
+/// remain safe for Java (`-cp`, `-Djava.library.path`, `-javaagent`) and display.
+fn clean_canonicalize(path: &Path) -> PathBuf {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    strip_windows_verbatim_prefix(&resolved)
+}
+
+fn java_executable_names() -> &'static [&'static str] {
+    if cfg!(target_os = "windows") {
+        &["java.exe", "javaw.exe", "java"]
+    } else {
+        &["java"]
+    }
+}
+
+/// Finds the preferred Java executable inside a JVM `bin/` directory (`java.exe` preferred over
+/// `javaw.exe` on Windows so log pipes and `-version` probes work cleanly with `CREATE_NO_WINDOW`).
+fn find_preferred_java_in_dir(dir: &Path) -> Option<PathBuf> {
+    for &bin_name in java_executable_names() {
+        let candidate = dir.join(bin_name);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Scans a JVM root directory up to `max_depth` levels deep for `<home>/bin/java[.exe]` or
+/// `<home>/jre/bin/java[.exe]`, supporting standard vendor folders, Scoop (`current/bin`), and
+/// Mojang's nested Minecraft Launcher `runtime/<component>/<platform>/<component>/bin` layout.
+fn collect_java_bins_under_root(
+    root: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > max_depth || !root.is_dir() {
+        return;
+    }
+
+    // Check direct executable inside root (e.g. Oracle `javapath\java.exe`).
+    if let Some(direct) = find_preferred_java_in_dir(root) {
+        out.push(direct);
+    }
+
+    // Check standard `<root>/bin/java[.exe]` and `<root>/jre/bin/java[.exe]`.
+    let bin_dir = root.join("bin");
+    if let Some(found) = find_preferred_java_in_dir(&bin_dir) {
+        out.push(found);
+        // Once we found a JVM home, don't descend into its internal directories (`lib/`, `jmods/`, etc.).
+        let jre_bin = root.join("jre").join("bin");
+        if let Some(jre_found) = find_preferred_java_in_dir(&jre_bin) {
+            out.push(jre_found);
+        }
+        return;
+    }
+    let jre_bin = root.join("jre").join("bin");
+    if let Some(jre_found) = find_preferred_java_in_dir(&jre_bin) {
+        out.push(jre_found);
+        return;
+    }
+
+    if depth == max_depth {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut dir_paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|entry| entry.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    dir_paths.sort();
+
+    for entry_path in dir_paths {
+        if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+            let lower = name.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "bin" | "lib" | "jmods" | "include" | "legal" | "conf" | "man" | "demo" | "sample"
+            ) {
+                continue;
+            }
+        }
+        collect_java_bins_under_root(&entry_path, depth + 1, max_depth, out);
+    }
+}
 
 /// Discovered Java Virtual Machine installation on the local system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,15 +142,73 @@ pub fn discover_java_runtimes() -> Vec<JavaRuntime> {
 
     #[cfg(target_os = "windows")]
     {
+        let vendor_subdirs = [
+            "Java",
+            "Eclipse Adoptium",
+            "AdoptOpenJDK",
+            "Microsoft",
+            "Zulu",
+            "BellSoft",
+            "Amazon Corretto",
+            "Semeru",
+            "SapMachine",
+            "GraalVM",
+        ];
+
         for env_var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
             if let Ok(dir) = env::var(env_var) {
                 let base = PathBuf::from(dir);
-                jvm_roots.push(base.join("Java"));
-                jvm_roots.push(base.join("Eclipse Adoptium"));
-                jvm_roots.push(base.join("AdoptOpenJDK"));
-                jvm_roots.push(base.join("Zulu"));
-                jvm_roots.push(base.join("BellSoft"));
-                jvm_roots.push(base.join("Programs").join("Eclipse Adoptium"));
+                for sub in vendor_subdirs {
+                    jvm_roots.push(base.join(sub));
+                }
+            }
+        }
+
+        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+            let local_base = PathBuf::from(local_app_data);
+            let programs = local_base.join("Programs");
+            for sub in vendor_subdirs {
+                jvm_roots.push(programs.join(sub));
+            }
+            // Microsoft Store / UWP Minecraft Launcher bundled runtimes
+            jvm_roots.push(
+                local_base
+                    .join("Packages")
+                    .join("Microsoft.4297127D64EC6_8wekyb3d8bbwe")
+                    .join("LocalCache")
+                    .join("Local")
+                    .join("runtime"),
+            );
+        }
+
+        // Legacy/MSI Minecraft Launcher bundled runtimes
+        for pf_var in ["ProgramFiles(x86)", "ProgramFiles"] {
+            if let Ok(pf) = env::var(pf_var) {
+                let base = PathBuf::from(pf);
+                jvm_roots.push(base.join("Minecraft Launcher").join("runtime"));
+                jvm_roots.push(
+                    base.join("Common Files")
+                        .join("Oracle")
+                        .join("Java")
+                        .join("javapath"),
+                );
+            }
+        }
+
+        // Scoop & Chocolatey / Oracle javapath
+        if let Ok(profile) = env::var("USERPROFILE") {
+            jvm_roots.push(PathBuf::from(profile).join("scoop").join("apps"));
+        }
+        if let Ok(program_data) = env::var("ProgramData") {
+            let pd = PathBuf::from(program_data);
+            jvm_roots.push(pd.join("Oracle").join("Java").join("javapath"));
+            jvm_roots.push(pd.join("chocolatey").join("lib"));
+        }
+
+        if let Ok(mq_data) = env::var("MQ_DATA_DIR") {
+            let custom_java = PathBuf::from(mq_data).join("java");
+            if custom_java.exists() {
+                jvm_roots.push(custom_java);
             }
         }
         let mq_java = mq_core::platform::default_data_dir().join("java");
@@ -60,6 +220,12 @@ pub fn discover_java_runtimes() -> Vec<JavaRuntime> {
     #[cfg(not(target_os = "windows"))]
     {
         jvm_roots.extend(SYSTEM_JVM_DIRS.iter().map(PathBuf::from));
+        if let Ok(mq_data) = env::var("MQ_DATA_DIR") {
+            let custom_java = PathBuf::from(mq_data).join("java");
+            if custom_java.exists() {
+                jvm_roots.push(custom_java);
+            }
+        }
         let mq_java = mq_core::platform::default_data_dir().join("java");
         if mq_java.exists() {
             jvm_roots.push(mq_java);
@@ -80,70 +246,53 @@ pub fn discover_java_runtimes_from_sources(
     path_env: Option<&OsStr>,
 ) -> Vec<JavaRuntime> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    let java_bin_names: &[&str] = if cfg!(target_os = "windows") {
-        &["java.exe", "javaw.exe", "java"]
-    } else {
-        &["java"]
-    };
 
-    // 1. Scan JVM roots
+    // 1. Scan JVM roots (supports direct `<root>/<jdk>/bin/java`, Scoop `<app>/current/bin/java.exe`,
+    //    and Mojang's nested `runtime/<component>/<platform>/<component>/bin/java.exe`).
     for root in jvm_roots {
-        if let Ok(entries) = fs::read_dir(root) {
-            let mut dir_paths: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok().map(|entry| entry.path()))
-                .collect();
-            dir_paths.sort();
-
-            for entry_path in dir_paths {
-                if !entry_path.is_dir() {
-                    continue;
-                }
-                for &bin_name in java_bin_names {
-                    let bin_java = entry_path.join("bin").join(bin_name);
-                    if is_executable_file(&bin_java) {
-                        candidates.push(bin_java);
-                    }
-                    let jre_bin_java = entry_path.join("jre").join("bin").join(bin_name);
-                    if is_executable_file(&jre_bin_java) {
-                        candidates.push(jre_bin_java);
-                    }
-                }
-            }
-        }
+        collect_java_bins_under_root(root, 0, 4, &mut candidates);
     }
 
     // 2. Check $JAVA_HOME
     if let Some(home) = java_home.filter(|p| !p.as_os_str().is_empty()) {
-        for &bin_name in java_bin_names {
-            let bin_java = home.join("bin").join(bin_name);
-            if is_executable_file(&bin_java) {
-                candidates.push(bin_java);
-            }
-        }
-        if is_executable_file(home) {
+        if let Some(bin_java) = find_preferred_java_in_dir(&home.join("bin")) {
+            candidates.push(bin_java);
+        } else if let Some(jre_java) = find_preferred_java_in_dir(&home.join("jre").join("bin")) {
+            candidates.push(jre_java);
+        } else if is_executable_file(home) {
             candidates.push(home.to_path_buf());
         }
     }
 
-    // 3. Scan $PATH entries
+    // 3. Scan $PATH entries (prefer `java.exe` over `javaw.exe` within each directory)
     if let Some(paths_os) = path_env.filter(|p| !p.is_empty()) {
         for dir in env::split_paths(paths_os) {
             if dir.as_os_str().is_empty() {
                 continue;
             }
-            for &bin_name in java_bin_names {
-                let bin_java = dir.join(bin_name);
-                if is_executable_file(&bin_java) {
-                    candidates.push(bin_java);
-                }
+            if let Some(bin_java) = find_preferred_java_in_dir(&dir) {
+                candidates.push(bin_java);
             }
         }
     }
 
-    // Deduplicate by canonical path and probe each unique binary once.
+    // Deduplicate by cleaned canonical path and probe each unique binary once.
     let mut by_canon_path: BTreeMap<PathBuf, JavaRuntime> = BTreeMap::new();
     for candidate in candidates {
-        let canon = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        let mut canon = clean_canonicalize(&candidate);
+        // On Windows, if a symlink/shortcut resolved to `javaw.exe` while sibling `java.exe` exists,
+        // prefer `java.exe` so stdout/stderr pipes work cleanly with `CREATE_NO_WINDOW`.
+        if cfg!(target_os = "windows")
+            && canon
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case("javaw.exe"))
+        {
+            let sibling_java = canon.with_file_name("java.exe");
+            if is_executable_file(&sibling_java) {
+                canon = clean_canonicalize(&sibling_java);
+            }
+        }
         if by_canon_path.contains_key(&canon) {
             continue;
         }
@@ -165,12 +314,9 @@ pub fn discover_java_runtimes_from_sources(
 /// `<home>/release` file before falling back to spawning `<java_bin> -version`.
 pub fn probe_java_binary(java_bin_or_home: &Path) -> Option<JavaRuntime> {
     let raw_bin = if java_bin_or_home.is_dir() {
-        let primary = java_bin_or_home.join("bin").join("java");
-        if primary.is_file() {
-            primary
-        } else {
-            java_bin_or_home.join("jre").join("bin").join("java")
-        }
+        find_preferred_java_in_dir(&java_bin_or_home.join("bin"))
+            .or_else(|| find_preferred_java_in_dir(&java_bin_or_home.join("jre").join("bin")))
+            .or_else(|| find_preferred_java_in_dir(java_bin_or_home))?
     } else {
         java_bin_or_home.to_path_buf()
     };
@@ -179,7 +325,7 @@ pub fn probe_java_binary(java_bin_or_home: &Path) -> Option<JavaRuntime> {
         return None;
     }
 
-    let canon_bin = fs::canonicalize(&raw_bin).unwrap_or(raw_bin);
+    let canon_bin = clean_canonicalize(&raw_bin);
     let home_dir = infer_jvm_home(&canon_bin);
 
     // 1. Fast path: check `<home_dir>/release` (or parent `<home_dir>/../release` for `jre/bin/java`).
@@ -193,7 +339,7 @@ pub fn probe_java_binary(java_bin_or_home: &Path) -> Option<JavaRuntime> {
             if let Some((major_version, full_version, vendor)) = parse_java_release_file(&content) {
                 let effective_home = rel_path
                     .parent()
-                    .map(Path::to_path_buf)
+                    .map(strip_windows_verbatim_prefix)
                     .unwrap_or_else(|| home_dir.clone());
                 return Some(JavaRuntime {
                     path: canon_bin,
@@ -206,8 +352,28 @@ pub fn probe_java_binary(java_bin_or_home: &Path) -> Option<JavaRuntime> {
         }
     }
 
-    // 2. Fallback: run `<canon_bin> -version`.
-    if let Ok(output) = Command::new(&canon_bin).arg("-version").output() {
+    // 2. Fallback: run `<probe_bin> -version` with CREATE_NO_WINDOW on Windows.
+    // On Windows, `javaw.exe -version` produces no console output, so probe via sibling `java.exe` if present.
+    let probe_bin = if cfg!(target_os = "windows")
+        && canon_bin
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("javaw.exe"))
+    {
+        let sibling = canon_bin.with_file_name("java.exe");
+        if sibling.is_file() {
+            sibling
+        } else {
+            canon_bin.clone()
+        }
+    } else {
+        canon_bin.clone()
+    };
+
+    let mut cmd = Command::new(&probe_bin);
+    cmd.arg("-version");
+    configure_hidden_std_command(&mut cmd);
+    if let Ok(output) = cmd.output() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let combined = if stderr.trim().is_empty() {
@@ -307,6 +473,14 @@ pub fn parse_java_version_output(output: &str) -> Option<(u32, String, String)> 
             vendor = "Azul Zulu".to_owned();
         } else if lower.contains("corretto") {
             vendor = "Amazon Corretto".to_owned();
+        } else if lower.contains("microsoft") {
+            vendor = "Microsoft".to_owned();
+        } else if lower.contains("liberica") || lower.contains("bellsoft") {
+            vendor = "BellSoft Liberica".to_owned();
+        } else if lower.contains("semeru") || lower.contains("openj9") {
+            vendor = "IBM Semeru".to_owned();
+        } else if lower.contains("sapmachine") {
+            vendor = "SapMachine".to_owned();
         } else if lower.contains("graalvm") {
             vendor = "GraalVM".to_owned();
         } else if lower.starts_with("java(tm)") {
@@ -413,7 +587,7 @@ pub fn select_java_runtime(
     override_path: Option<&Path>,
 ) -> MqResult<JavaRuntime> {
     if let Some(custom) = override_path.filter(|p| !p.as_os_str().is_empty()) {
-        let canon_custom = fs::canonicalize(custom).unwrap_or_else(|_| custom.to_path_buf());
+        let canon_custom = clean_canonicalize(custom);
         if let Some(found) = runtimes
             .iter()
             .find(|r| r.path == custom || r.path == canon_custom || r.home_dir == canon_custom)
@@ -445,11 +619,18 @@ pub fn select_java_runtime(
     }
 
     if runtimes.is_empty() {
+        let hint = if cfg!(target_os = "windows") {
+            format!(
+                "no Java runtime found in %ProgramFiles%\\Java, %JAVA_HOME%, or %PATH%; install Temurin/OpenJDK {required_major}"
+            )
+        } else {
+            format!(
+                "no Java runtime found in /usr/lib/jvm, $JAVA_HOME, or $PATH; install jdk{required_major}-openjdk"
+            )
+        };
         return Err(MqError::JavaNotFound {
             required_major,
-            hint: format!(
-                "no Java runtime found in /usr/lib/jvm, $JAVA_HOME, or $PATH; install jdk{required_major}-openjdk"
-            ),
+            hint,
         });
     }
 
@@ -500,20 +681,29 @@ pub fn select_java_runtime(
 
     Err(MqError::JavaNotFound {
         required_major,
-        hint: format!("install jdk{required_major}-openjdk under /usr/lib/jvm"),
+        hint: if cfg!(target_os = "windows") {
+            format!("install Temurin/OpenJDK {required_major} on Windows")
+        } else {
+            format!("install jdk{required_major}-openjdk under /usr/lib/jvm")
+        },
     })
 }
 
 fn infer_jvm_home(java_bin: &Path) -> PathBuf {
-    if let Some(bin_dir) = java_bin.parent() {
-        if bin_dir.file_name().and_then(|n| n.to_str()) == Some("bin") {
+    let clean_bin = strip_windows_verbatim_prefix(java_bin);
+    if let Some(bin_dir) = clean_bin.parent() {
+        if bin_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
+        {
             if let Some(home) = bin_dir.parent() {
                 return home.to_path_buf();
             }
         }
         return bin_dir.to_path_buf();
     }
-    java_bin.to_path_buf()
+    clean_bin
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -543,16 +733,32 @@ pub fn verify_java_executable(java_bin: &Path) -> MqResult<JavaRuntime> {
         });
     }
 
-    let canon_bin = fs::canonicalize(java_bin).unwrap_or_else(|_| java_bin.to_path_buf());
-    let output = Command::new(&canon_bin)
-        .arg("-version")
-        .output()
-        .map_err(|e| {
-            MqError::Internal(format!(
-                "failed to execute '{} -version': {e}",
-                canon_bin.display()
-            ))
-        })?;
+    let canon_bin = clean_canonicalize(java_bin);
+    let probe_bin = if cfg!(target_os = "windows")
+        && canon_bin
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("javaw.exe"))
+    {
+        let sibling = canon_bin.with_file_name("java.exe");
+        if sibling.is_file() {
+            sibling
+        } else {
+            canon_bin.clone()
+        }
+    } else {
+        canon_bin.clone()
+    };
+
+    let mut cmd = Command::new(&probe_bin);
+    cmd.arg("-version");
+    configure_hidden_std_command(&mut cmd);
+    let output = cmd.output().map_err(|e| {
+        MqError::Internal(format!(
+            "failed to execute '{} -version': {e}",
+            probe_bin.display()
+        ))
+    })?;
 
     if !output.status.success() {
         return Err(MqError::Internal(format!(
@@ -868,25 +1074,25 @@ pub async fn download_adoptium_java(
         std::process::id()
     ));
     if temp_extract.exists() {
-        let _ = fs::remove_dir_all(&temp_extract);
+        let _ = remove_dir_all_with_retry(&temp_extract);
     }
     fs::create_dir_all(&temp_extract)?;
 
     if target_os == "windows" {
         let cursor = std::io::Cursor::new(&archive_bytes[..]);
         let mut zip_archive = zip::ZipArchive::new(cursor).map_err(|e| {
-            let _ = fs::remove_dir_all(&temp_extract);
+            let _ = remove_dir_all_with_retry(&temp_extract);
             MqError::Internal(format!("failed to parse Adoptium zip: {e}"))
         })?;
         zip_archive.extract(&temp_extract).map_err(|e| {
-            let _ = fs::remove_dir_all(&temp_extract);
+            let _ = remove_dir_all_with_retry(&temp_extract);
             MqError::Internal(format!("failed to unpack Adoptium zip archive: {e}"))
         })?;
     } else {
         let gz_decoder = flate2::read::GzDecoder::new(&archive_bytes[..]);
         let mut archive = tar::Archive::new(gz_decoder);
         archive.unpack(&temp_extract).map_err(|e| {
-            let _ = fs::remove_dir_all(&temp_extract);
+            let _ = remove_dir_all_with_retry(&temp_extract);
             MqError::Internal(format!("failed to unpack Adoptium archive: {e}"))
         })?;
     }
@@ -902,10 +1108,10 @@ pub async fn download_adoptium_java(
     }
 
     if dest_dir.exists() {
-        let _ = fs::remove_dir_all(&dest_dir);
+        let _ = remove_dir_all_with_retry(&dest_dir);
     }
-    fs::rename(&root_extracted, &dest_dir)?;
-    let _ = fs::remove_dir_all(&temp_extract);
+    rename_with_retry(&root_extracted, &dest_dir)?;
+    let _ = remove_dir_all_with_retry(&temp_extract);
 
     // Ensure permissions
     let final_bin = dest_dir.join("bin").join(bin_name);
@@ -1028,25 +1234,25 @@ pub async fn download_zulu_java(
         std::process::id()
     ));
     if temp_extract.exists() {
-        let _ = fs::remove_dir_all(&temp_extract);
+        let _ = remove_dir_all_with_retry(&temp_extract);
     }
     fs::create_dir_all(&temp_extract)?;
 
     if target_os == "windows" {
         let cursor = std::io::Cursor::new(&archive_bytes[..]);
         let mut zip_archive = zip::ZipArchive::new(cursor).map_err(|e| {
-            let _ = fs::remove_dir_all(&temp_extract);
+            let _ = remove_dir_all_with_retry(&temp_extract);
             MqError::Internal(format!("failed to parse Zulu zip: {e}"))
         })?;
         zip_archive.extract(&temp_extract).map_err(|e| {
-            let _ = fs::remove_dir_all(&temp_extract);
+            let _ = remove_dir_all_with_retry(&temp_extract);
             MqError::Internal(format!("failed to unpack Zulu zip archive: {e}"))
         })?;
     } else {
         let gz_decoder = flate2::read::GzDecoder::new(&archive_bytes[..]);
         let mut archive = tar::Archive::new(gz_decoder);
         archive.unpack(&temp_extract).map_err(|e| {
-            let _ = fs::remove_dir_all(&temp_extract);
+            let _ = remove_dir_all_with_retry(&temp_extract);
             MqError::Internal(format!("failed to unpack Zulu archive: {e}"))
         })?;
     }
@@ -1061,10 +1267,10 @@ pub async fn download_zulu_java(
     }
 
     if dest_dir.exists() {
-        let _ = fs::remove_dir_all(&dest_dir);
+        let _ = remove_dir_all_with_retry(&dest_dir);
     }
-    fs::rename(&root_extracted, &dest_dir)?;
-    let _ = fs::remove_dir_all(&temp_extract);
+    rename_with_retry(&root_extracted, &dest_dir)?;
+    let _ = remove_dir_all_with_retry(&temp_extract);
 
     let final_bin = dest_dir.join("bin").join(bin_name);
     #[cfg(unix)]

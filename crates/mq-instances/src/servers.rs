@@ -120,7 +120,7 @@ pub fn save_servers_dat(instance_dir: &Path, servers: &[ServerEntry]) -> MqResul
     // TAG_End for root compound
     buf.push(0x00);
 
-    fs::write(&dat_path, buf)?;
+    mq_core::platform::atomic_write(&dat_path, &buf)?;
     Ok(())
 }
 

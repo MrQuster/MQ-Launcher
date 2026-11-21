@@ -5,12 +5,29 @@
 use std::fs;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
+use mq_core::fs_util::strip_windows_verbatim_prefix;
 use mq_core::{redact_text, Event, EventBus, GameLogEntry, GameLogLevel, MqError, MqResult};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::command::BuiltLaunchCommand;
+
+#[cfg(target_os = "windows")]
+static ARGFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[cfg(target_os = "windows")]
+struct ArgfileGuard(Option<std::path::PathBuf>);
+
+#[cfg(target_os = "windows")]
+impl Drop for ArgfileGuard {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.0 {
+            let _ = mq_core::fs_util::remove_file_with_retry(path);
+        }
+    }
+}
 
 /// Spawns the configured Minecraft JVM (or wrapper) child process, streams `stdout` and `stderr`
 /// lines asynchronously without blocking, scrubs any sensitive tokens in `secrets` using
@@ -35,33 +52,60 @@ pub async fn spawn_and_stream_game_with_pid(
     event_bus: Option<EventBus>,
     pid_tx: Option<tokio::sync::oneshot::Sender<u32>>,
 ) -> MqResult<ExitStatus> {
-    if !cmd.working_dir.as_os_str().is_empty() {
-        fs::create_dir_all(&cmd.working_dir)?;
+    let clean_program = strip_windows_verbatim_prefix(&cmd.program);
+    let clean_working_dir = strip_windows_verbatim_prefix(&cmd.working_dir);
+
+    if !clean_working_dir.as_os_str().is_empty() {
+        fs::create_dir_all(&clean_working_dir)?;
     }
 
-    let mut command = Command::new(&cmd.program);
+    #[cfg(target_os = "windows")]
+    let (effective_args, _argfile_guard) = {
+        use std::sync::atomic::Ordering;
+        let argfile_base = if !clean_working_dir.as_os_str().is_empty() {
+            clean_working_dir.clone()
+        } else {
+            std::env::temp_dir()
+        };
+        let seq = ARGFILE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let argfile_path =
+            argfile_base.join(format!(".mq-args-{}-{seq}.argfile", std::process::id()));
+        let java_major = crate::java::probe_java_binary(&clean_program).map(|rt| rt.major_version);
+        let (rewritten, created) = crate::command::rewrite_args_for_windows_limit(
+            &clean_program,
+            &cmd.args,
+            &clean_working_dir,
+            java_major,
+            &argfile_path,
+        )?;
+        (rewritten, ArgfileGuard(created))
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let effective_args = &cmd.args;
+
+    let mut command = Command::new(&clean_program);
     command
-        .args(&cmd.args)
+        .args(effective_args)
         .envs(&cmd.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if !cmd.working_dir.as_os_str().is_empty() {
-        command.current_dir(&cmd.working_dir);
+    if !clean_working_dir.as_os_str().is_empty() {
+        command.current_dir(&clean_working_dir);
     }
 
     #[cfg(target_os = "windows")]
     {
-        // 0x08000000 = CREATE_NO_WINDOW: prevent console window popup for Minecraft javaw/java
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
+        // 0x08000000 = CREATE_NO_WINDOW: prevent console window popup for Minecraft java.exe
+        command.creation_flags(0x0800_0000);
     }
 
     let mut child = command.spawn().map_err(|err| {
         MqError::Process(format!(
             "failed to spawn game process '{}': {err}",
-            cmd.program.display()
+            clean_program.display()
         ))
     })?;
 
@@ -95,22 +139,33 @@ pub async fn spawn_and_stream_game_with_pid(
     let status = child.wait().await.map_err(|err| {
         MqError::Process(format!(
             "error waiting for game process '{}': {err}",
-            cmd.program.display()
+            clean_program.display()
         ))
     })?;
 
+    // Bound log drain after child exit so inherited pipe handles on Windows cannot hang indefinitely.
     if let Some(handle) = stdout_task {
-        let _ = handle.await;
+        if tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .is_err()
+        {
+            tracing::debug!("stdout log drain timed out after game exit");
+        }
     }
     if let Some(handle) = stderr_task {
-        let _ = handle.await;
+        if tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .is_err()
+        {
+            tracing::debug!("stderr log drain timed out after game exit");
+        }
     }
 
     Ok(status)
 }
 
 async fn stream_log_lines<R>(
-    reader: R,
+    mut reader: R,
     instance_id: String,
     secrets: Arc<Vec<String>>,
     event_bus: Option<EventBus>,
@@ -118,16 +173,29 @@ async fn stream_log_lines<R>(
     R: AsyncBufRead + Unpin,
 {
     let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    let mut lines = reader.lines();
+    let mut buf = Vec::with_capacity(256);
 
-    while let Ok(Some(raw_line)) = lines.next_line().await {
-        let redacted = redact_text(&raw_line, &secret_refs);
-        let level = GameLogLevel::from_line(&redacted);
-        let mut entry = GameLogEntry::from_raw_line(instance_id.clone(), redacted);
-        entry.level = level;
+    // Use `read_until(b'\n')` + lossy UTF-8 decoding instead of `lines()` so non-UTF-8 bytes
+    // (e.g. Windows CP1251/CP866 native/JVM output) never abort log streaming or stall pipes.
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                    buf.pop();
+                }
+                let raw_line = String::from_utf8_lossy(&buf);
+                let redacted = redact_text(&raw_line, &secret_refs);
+                let level = GameLogLevel::from_line(&redacted);
+                let mut entry = GameLogEntry::from_raw_line(instance_id.clone(), redacted);
+                entry.level = level;
 
-        if let Some(ref bus) = event_bus {
-            bus.publish(Event::GameLog(entry));
+                if let Some(ref bus) = event_bus {
+                    bus.publish(Event::GameLog(entry));
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -148,14 +216,28 @@ pub fn exit_status_code(status: &ExitStatus) -> i32 {
 }
 
 /// Terminates a game process and all of its descendant child processes.
-/// On Windows, executes `taskkill /F /T /PID <pid>`.
+/// On Windows, executes `taskkill /F /T /PID <pid>` with `CREATE_NO_WINDOW` and falls back to
+/// Win32 `TerminateProcess` if `taskkill` is unavailable or fails.
 /// On Unix, collects descendant PIDs from `/proc` and terminates the tree via SIGKILL.
 pub fn kill_process_tree(pid: u32) -> Result<(), std::io::Error> {
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("taskkill")
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let taskkill_ok = std::process::Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
-            .output();
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !taskkill_ok {
+            terminate_windows_pid_fallback(pid);
+        }
         Ok(())
     }
     #[cfg(unix)]
@@ -168,6 +250,28 @@ pub fn kill_process_tree(pid: u32) -> Result<(), std::io::Error> {
                 .output();
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_windows_pid_fallback(pid: u32) {
+    type Handle = *mut std::ffi::c_void;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn TerminateProcess(process: Handle, exit_code: u32) -> i32;
+        fn CloseHandle(object: Handle) -> i32;
+    }
+
+    // SAFETY: Win32 kernel32 APIs called with valid POD arguments and checked non-null handle.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            let _ = TerminateProcess(handle, 1);
+            let _ = CloseHandle(handle);
+        }
     }
 }
 
@@ -212,4 +316,50 @@ fn collect_descendant_pids(root_pid: u32) -> Vec<u32> {
     }
     result.reverse();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stream_log_lines_handles_windows_crlf_and_non_utf8_cp1251_without_stopping() {
+        let bus = EventBus::with_capacity(16);
+        // Line 1: valid UTF-8 with CRLF
+        // Line 2: raw CP1251 bytes ("Ошибка" in CP1251) + secret token with CRLF
+        // Line 3: valid UTF-8 line after invalid UTF-8 without trailing newline
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"[INFO] First line\r\n");
+        payload.extend_from_slice(&[0xCE, 0xF8, 0xE8, 0xE1, 0xEA, 0xE0]);
+        payload.extend_from_slice(b" token=secret_win_tok\r\n");
+        payload.extend_from_slice(b"[WARN] Third line survives");
+
+        let reader = BufReader::new(std::io::Cursor::new(payload));
+        stream_log_lines(
+            reader,
+            "win-inst".to_owned(),
+            Arc::new(vec!["secret_win_tok".to_owned()]),
+            Some(bus.clone()),
+        )
+        .await;
+
+        let events = bus.drain_all();
+        assert_eq!(
+            events.len(),
+            3,
+            "stream_log_lines must not stop on non-UTF-8 Windows console bytes"
+        );
+        let lines: Vec<String> = events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::GameLog(entry) => Some(entry.line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines[0], "[INFO] First line");
+        assert!(!lines[1].contains("secret_win_tok"));
+        assert!(lines[1].contains("[REDACTED]"));
+        assert!(!lines[1].ends_with('\r'));
+        assert_eq!(lines[2], "[WARN] Third line survives");
+    }
 }

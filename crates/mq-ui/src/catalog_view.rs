@@ -571,9 +571,10 @@ impl CatalogView {
                     .hint_text("Путь к .mrpack / .zip или перетащите файл в окно")
                     .desired_width(360.0),
             );
-            let can = !self.import_path.trim().is_empty();
+            let cleaned_import = crate::opener::clean_user_path(&self.import_path);
+            let can = !cleaned_import.is_empty();
             if secondary_glass_button(ui, None, "Импортировать").clicked() && can {
-                let p = std::path::PathBuf::from(self.import_path.trim());
+                let p = std::path::PathBuf::from(cleaned_import);
                 self.import_path.clear();
                 state.import_local_pack(p);
             }

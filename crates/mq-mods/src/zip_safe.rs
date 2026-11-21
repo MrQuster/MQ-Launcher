@@ -5,8 +5,12 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
 use mq_core::{resolve_safe_path, MqError, MqResult, Sha1Digest, Sha512Digest};
+
+static CAS_COPY_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 use sha1::{Digest as _, Sha1};
 use sha2::Sha512;
 use url::Url;
@@ -395,6 +399,9 @@ where
         if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        if dest_path.exists() {
+            let _ = remove_file_with_retry(&dest_path);
+        }
 
         let mut out_file = File::create(&dest_path)?;
         let mut entry_written = 0u64;
@@ -409,7 +416,7 @@ where
 
             if entry_written > limits.max_entry_uncompressed_bytes {
                 drop(out_file);
-                let _ = fs::remove_file(&dest_path);
+                let _ = remove_file_with_retry(&dest_path);
                 return Err(MqError::Archive(format!(
                     "zip-bomb detected while streaming '{raw_name}': decompressed size {entry_written} exceeds limit {}",
                     limits.max_entry_uncompressed_bytes
@@ -417,7 +424,7 @@ where
             }
             if total_written > limits.max_total_uncompressed_bytes {
                 drop(out_file);
-                let _ = fs::remove_file(&dest_path);
+                let _ = remove_file_with_retry(&dest_path);
                 return Err(MqError::Archive(format!(
                     "zip-bomb detected while streaming '{raw_name}': total decompressed size {total_written} exceeds limit {}",
                     limits.max_total_uncompressed_bytes
@@ -428,7 +435,7 @@ where
                     || (entry_written / compressed_size) > limits.max_compression_ratio)
             {
                 drop(out_file);
-                let _ = fs::remove_file(&dest_path);
+                let _ = remove_file_with_retry(&dest_path);
                 return Err(MqError::Archive(format!(
                     "zip-bomb detected while streaming '{raw_name}': compression ratio exceeds {}:1",
                     limits.max_compression_ratio
@@ -444,8 +451,8 @@ where
     Ok(outcome)
 }
 
-/// Hardlinks `cas_blob` to `target_path` (`std::fs::hard_link`), falling back to a `64 KiB`
-/// streaming copy if `hard_link` fails (e.g. cross-device mount `EXDEV`).
+/// Hardlinks `cas_blob` to `target_path` (`std::fs::hard_link`), falling back to an atomic `64 KiB`
+/// streaming copy if `hard_link` fails (e.g. cross-device mount `EXDEV` or Windows permissions).
 ///
 /// Returns `Ok(true)` if a hardlink was created, or `Ok(false)` if the streaming copy fallback was used.
 pub fn link_or_copy_cas_blob(cas_blob: &Path, target_path: &Path) -> MqResult<bool> {
@@ -461,24 +468,43 @@ pub fn link_or_copy_cas_blob(cas_blob: &Path, target_path: &Path) -> MqResult<bo
     }
 
     if target_path.symlink_metadata().is_ok() {
-        fs::remove_file(target_path)?;
+        remove_file_with_retry(target_path)?;
     }
 
     if fs::hard_link(cas_blob, target_path).is_ok() {
         return Ok(true);
     }
 
-    let mut src = File::open(cas_blob)?;
-    let mut dst = File::create(target_path)?;
-    let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
-    loop {
-        let n = src.read(&mut buf)?;
-        if n == 0 {
-            break;
+    let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
+    let fname = target_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("blob");
+    let seq = CAS_COPY_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!(".{fname}.{}.{seq}.cas.tmp", std::process::id()));
+
+    let copy_res = (|| -> std::io::Result<()> {
+        let mut src = File::open(cas_blob)?;
+        let mut dst = File::create(&tmp_path)?;
+        let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+        loop {
+            let n = src.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            dst.write_all(&buf[..n])?;
         }
-        dst.write_all(&buf[..n])?;
+        dst.flush()?;
+        drop(dst);
+        rename_with_retry(&tmp_path, target_path)?;
+        Ok(())
+    })();
+
+    if let Err(err) = copy_res {
+        let _ = remove_file_with_retry(&tmp_path);
+        return Err(MqError::Io(err));
     }
-    dst.flush()?;
+
     Ok(false)
 }
 

@@ -6,10 +6,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use mq_auth::{elyby_jvm_injection_args, AccountKind, AccountProfile};
+use mq_core::fs_util::strip_windows_verbatim_prefix;
 use mq_core::{redact_text, resolve_safe_path, MqError, MqPaths, MqResult};
 use mq_instances::InstanceManifest;
 use mq_meta::{build_deterministic_classpath, format_classpath_string, ResolvedVersion};
 use serde::{Deserialize, Serialize};
+
+/// Conservative command-line character threshold below Windows's 32,767-char `CreateProcessW`
+/// limit at which JVM classpath/module arguments are compacted or offloaded to a Java `@argfile`.
+pub const WINDOWS_ARGFILE_THRESHOLD_CHARS: usize = 24_000;
 
 /// Canonical launcher brand string injected into `${launcher_name}`.
 pub const LAUNCHER_NAME: &str = "mq";
@@ -109,18 +114,27 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         ));
     }
 
-    let instance_dir = ctx.instance.instance_dir(&ctx.paths);
+    let instance_dir = strip_windows_verbatim_prefix(&ctx.instance.instance_dir(&ctx.paths));
     let raw_game_dir = ctx.instance.game_dir(&ctx.paths);
-    let game_dir = raw_game_dir
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::absolute(&raw_game_dir).unwrap_or(raw_game_dir));
-    let natives_dir = ctx.instance.natives_dir(&ctx.paths);
-    let libraries_dir = ctx.paths.libraries_dir();
+    let game_dir = strip_windows_verbatim_prefix(
+        &raw_game_dir
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::absolute(&raw_game_dir).unwrap_or(raw_game_dir)),
+    );
+    let natives_dir = strip_windows_verbatim_prefix(&ctx.instance.natives_dir(&ctx.paths));
+    let libraries_dir = strip_windows_verbatim_prefix(&ctx.paths.libraries_dir());
     let raw_assets_dir = ctx.paths.assets_dir();
-    let assets_dir = raw_assets_dir
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::absolute(&raw_assets_dir).unwrap_or(raw_assets_dir));
-    let client_jar_path = resolve_client_jar_path(&ctx.paths, &instance_dir, &ctx.version)?;
+    let assets_dir = strip_windows_verbatim_prefix(
+        &raw_assets_dir
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::absolute(&raw_assets_dir).unwrap_or(raw_assets_dir)),
+    );
+    let client_jar_path = strip_windows_verbatim_prefix(&resolve_client_jar_path(
+        &ctx.paths,
+        &instance_dir,
+        &ctx.version,
+    )?);
+    let clean_java_bin = strip_windows_verbatim_prefix(&ctx.java_bin);
 
     let classpath_entries =
         build_deterministic_classpath(&ctx.version, &libraries_dir, &client_jar_path);
@@ -132,10 +146,11 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
     // Always inject `-javaagent:<jar>=https://account.ely.by/api/authlib-injector` as the
     // VERY FIRST JVM flag before everything else, followed by `-Dauthlibinjector.side=client`.
     if ctx.account.kind == AccountKind::ElyBy {
-        let injector_jar = ctx
-            .authlib_injector_jar
-            .clone()
-            .unwrap_or_else(|| ctx.paths.authlib_injector_jar());
+        let injector_jar = strip_windows_verbatim_prefix(
+            &ctx.authlib_injector_jar
+                .clone()
+                .unwrap_or_else(|| ctx.paths.authlib_injector_jar()),
+        );
         let [agent_flag, side_flag] = elyby_jvm_injection_args(&injector_jar);
         jvm_flags.push(agent_flag);
         jvm_flags.push(side_flag);
@@ -156,9 +171,7 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
     let log_path_str = if let Some(ref logging) = ctx.version.logging {
         if let Some(ref client) = logging.client {
             if !client.file.path.is_empty() {
-                ctx.paths
-                    .assets_dir()
-                    .join(&client.file.path)
+                strip_windows_verbatim_prefix(&assets_dir.join(&client.file.path))
                     .to_string_lossy()
                     .into_owned()
             } else {
@@ -237,13 +250,15 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         jvm_flags.push(classpath_str);
     }
 
-    // 5. Main class.
-    jvm_flags.push(ctx.version.main_class.trim().to_owned());
-
-    // 5.1 Ensure UTF-8 file encoding on Windows for Cyrillic username/path safety
+    // 4.1 Ensure UTF-8 file encoding on Windows for Cyrillic username/path safety.
+    // MUST be added BEFORE `main_class` so the JVM interprets it as a system property
+    // rather than forwarding it as an unknown Minecraft game argument!
     if cfg!(target_os = "windows") && !jvm_flags.iter().any(|f| f.starts_with("-Dfile.encoding=")) {
         jvm_flags.push("-Dfile.encoding=UTF-8".to_string());
     }
+
+    // 5. Main class.
+    jvm_flags.push(ctx.version.main_class.trim().to_owned());
 
     // 6. Expanded game arguments.
     let uuid_simple = ctx.account.uuid_simple();
@@ -300,15 +315,29 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         jvm_flags.push(expanded);
     }
 
-    // 7. Apply optional wrapper command prefix (Linux only: `gamemoderun`, `mangohud`, `prime-run`).
+    // 7. Apply optional wrapper command prefix.
+    // On Windows, ignore Linux-only wrappers (`gamemoderun`, `mangohud`, `prime-run`, etc.)
+    // with a warning instead of failing `CreateProcessW` with file-not-found.
+    let raw_wrapper = ctx
+        .instance
+        .wrapper_cmd
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let wrapper_effective = if cfg!(target_os = "windows") {
-        None
+        match raw_wrapper {
+            Some(wrapper) if is_linux_only_wrapper(wrapper) => {
+                tracing::warn!(
+                    wrapper = %wrapper,
+                    "Ignoring Linux-only launch wrapper on Windows"
+                );
+                None
+            }
+            other => other,
+        }
     } else {
-        ctx.instance
-            .wrapper_cmd
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+        raw_wrapper
     };
 
     let (program, args) = match wrapper_effective {
@@ -319,11 +348,11 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
             for extra_tok in wrapper_tokens {
                 full_args.push(extra_tok.to_owned());
             }
-            full_args.push(ctx.java_bin.to_string_lossy().into_owned());
+            full_args.push(clean_java_bin.to_string_lossy().into_owned());
             full_args.extend(jvm_flags);
             (PathBuf::from(first_bin), full_args)
         }
-        None => (ctx.java_bin.clone(), jvm_flags),
+        None => (clean_java_bin, jvm_flags),
     };
 
     // Strict guarantee: sanitize any remaining stray unexpanded placeholders across all arguments
@@ -517,6 +546,368 @@ fn default_minecraft_game_arguments() -> Vec<String> {
     .collect()
 }
 
+/// Returns `true` when `wrapper` invokes a Linux-specific launcher wrapper or GPU environment
+/// prefix (`gamemoderun`, `mangohud`, `prime-run`, `gamescope`, `DRI_PRIME=...`, etc.) that does
+/// not exist on Windows.
+pub fn is_linux_only_wrapper(wrapper: &str) -> bool {
+    const LINUX_ONLY_BINS: &[&str] = &[
+        "gamemoderun",
+        "mangohud",
+        "prime-run",
+        "gamescope",
+        "optirun",
+        "primusrun",
+        "obs-gamecapture",
+        "vkcube",
+    ];
+    const LINUX_ONLY_ENV_PREFIXES: &[&str] = &[
+        "DRI_PRIME=",
+        "__NV_PRIME_RENDER_OFFLOAD=",
+        "__GLX_VENDOR_LIBRARY_NAME=",
+        "MANGOHUD=",
+        "MANGOHUD_CONFIG=",
+        "ENABLE_VKBASALT=",
+    ];
+
+    wrapper.split_whitespace().any(|tok| {
+        if LINUX_ONLY_ENV_PREFIXES
+            .iter()
+            .any(|prefix| tok.starts_with(prefix))
+        {
+            return true;
+        }
+        let base = tok
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(tok)
+            .to_ascii_lowercase();
+        LINUX_ONLY_BINS.contains(&base.as_str())
+    })
+}
+
+/// Estimates the Windows `CreateProcessW` command-line length (in UTF-16 code units / chars)
+/// for `program` + `args`, including quoting and separating spaces.
+pub fn estimate_windows_cmdline_len(program: &Path, args: &[String]) -> usize {
+    let mut total = program.to_string_lossy().encode_utf16().count() + 2;
+    for arg in args {
+        // Account for space separator + potential quotes/escaping overhead
+        total += 1 + arg.encode_utf16().count() + 2;
+    }
+    total
+}
+
+/// Formats a single JVM argument as a JEP 293 Java `@argfile` token.
+///
+/// Always wraps in double quotes when the argument contains whitespace, backslashes, quotes,
+/// `#` (comment start), or classpath separators (`;`), escaping `\` -> `\\` and `"` -> `\"` so
+/// Windows paths like `C:\Users\Name\foo.jar` are parsed verbatim by OpenJDK's `libjli`.
+pub fn format_java_argfile_token(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_owned();
+    }
+    let needs_quoting = arg
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '#' | ';'));
+    if !needs_quoting {
+        return arg.to_owned();
+    }
+    let mut out = String::with_capacity(arg.len() + 8);
+    out.push('"');
+    for ch in arg.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Compacts a classpath/module-path string by replacing entries sharing a common root with
+/// `base_dir` into shorter relative paths (e.g. `..\..\libraries\...`).
+///
+/// Keeps an entry absolute if the relative path is not strictly shorter, uses a different drive,
+/// or (when files exist on disk) does not resolve to an existing file from `base_dir`.
+pub fn compact_classpath_relative_to(classpath: &str, base_dir: &Path, sep: char) -> String {
+    let base_clean = strip_windows_verbatim_prefix(base_dir);
+    let base_str = base_clean.to_string_lossy();
+    let dir_sep = if sep == ';' { '\\' } else { '/' };
+
+    let entries: Vec<String> = classpath
+        .split(sep)
+        .map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return String::new();
+            }
+            if let Some(rel) = relative_path_between_str(&base_str, trimmed, dir_sep) {
+                if rel.len() < trimmed.len() {
+                    let abs_path = Path::new(trimmed);
+                    if !abs_path.exists() || base_clean.join(&rel).exists() {
+                        return rel;
+                    }
+                }
+            }
+            trimmed.to_owned()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    entries.join(&sep.to_string())
+}
+
+fn relative_path_between_str(from_dir: &str, target: &str, dir_sep: char) -> Option<String> {
+    let from_norm = from_dir.strip_prefix(r"\\?\").unwrap_or(from_dir);
+    let target_norm = target.strip_prefix(r"\\?\").unwrap_or(target);
+
+    let from_parts: Vec<&str> = from_norm
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    let target_parts: Vec<&str> = target_norm
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+
+    if from_parts.is_empty() || target_parts.is_empty() {
+        return None;
+    }
+    if from_parts.contains(&"..") || target_parts.contains(&"..") {
+        return None;
+    }
+
+    let is_windows_drive = |s: &str| s.len() == 2 && s.as_bytes()[1] == b':';
+    let mut common = 0usize;
+
+    if is_windows_drive(from_parts[0]) || is_windows_drive(target_parts[0]) {
+        if !is_windows_drive(from_parts[0])
+            || !is_windows_drive(target_parts[0])
+            || !from_parts[0].eq_ignore_ascii_case(target_parts[0])
+        {
+            return None;
+        }
+        common = 1;
+        while common < from_parts.len()
+            && common < target_parts.len()
+            && from_parts[common].eq_ignore_ascii_case(target_parts[common])
+        {
+            common += 1;
+        }
+        // Require at least one shared directory below the drive root (e.g. C:\MQ)
+        if common < 2 {
+            return None;
+        }
+    } else {
+        while common < from_parts.len()
+            && common < target_parts.len()
+            && from_parts[common] == target_parts[common]
+        {
+            common += 1;
+        }
+        if common == 0 {
+            return None;
+        }
+    }
+
+    let up_count = from_parts.len() - common;
+    let mut rel_parts: Vec<&str> = Vec::with_capacity(up_count + (target_parts.len() - common));
+    rel_parts.resize(up_count, "..");
+    rel_parts.extend_from_slice(&target_parts[common..]);
+    if rel_parts.is_empty() {
+        return None;
+    }
+    Some(rel_parts.join(&dir_sep.to_string()))
+}
+
+fn is_two_token_jvm_option(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-cp"
+            | "-classpath"
+            | "--class-path"
+            | "-p"
+            | "--module-path"
+            | "--upgrade-module-path"
+            | "--add-modules"
+            | "--add-exports"
+            | "--add-opens"
+            | "--add-reads"
+            | "--limit-modules"
+            | "--patch-module"
+            | "-m"
+            | "--module"
+    )
+}
+
+fn is_path_list_jvm_option(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-cp" | "-classpath" | "--class-path" | "-p" | "--module-path"
+    )
+}
+
+fn find_jvm_args_end(args: &[String]) -> usize {
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i].as_str();
+        if is_two_token_jvm_option(tok) {
+            i = (i + 2).min(args.len());
+        } else if tok.starts_with('-') || tok.starts_with('@') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+fn is_java_launcher_binary(program: &Path) -> bool {
+    let raw = program.to_string_lossy();
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let lower = base.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    stem == "java" || stem == "javaw"
+}
+
+/// Rewrites JVM arguments when a Windows launch command approaches the 32,767-character
+/// `CreateProcessW` limit (`WINDOWS_ARGFILE_THRESHOLD_CHARS`).
+///
+/// Strategy:
+/// 1. First compacts `-cp`/`-classpath`/`-p`/`--module-path` entries relative to `working_dir`
+///    (shrinks long `C:\Users\...\libraries\...` paths into short ASCII `..\..\libraries\...`).
+/// 2. If still over threshold:
+///    - For Java 9+ (or unknown version), offloads JVM path/option flags strictly BEFORE
+///      `main_class` into `argfile_path` using JEP 293 `@argfile` syntax (never writing game
+///      arguments such as `--accessToken` to disk).
+///    - For Java 8 (`java_major < 9`), keeps the compacted inline arguments (Java 8 does not
+///      support `@argfile`) and emits a warning if the command line still risks exceeding 32 KB.
+pub fn rewrite_args_for_windows_limit(
+    program: &Path,
+    args: &[String],
+    working_dir: &Path,
+    java_major: Option<u32>,
+    argfile_path: &Path,
+) -> MqResult<(Vec<String>, Option<PathBuf>)> {
+    if !is_java_launcher_binary(program)
+        || estimate_windows_cmdline_len(program, args) <= WINDOWS_ARGFILE_THRESHOLD_CHARS
+    {
+        return Ok((args.to_vec(), None));
+    }
+
+    let jvm_end = find_jvm_args_end(args);
+    let mut compacted = args.to_vec();
+
+    // Step 1: compact `-cp` / `-p` entries relative to working_dir.
+    let mut i = 0;
+    while i + 1 < jvm_end {
+        if is_path_list_jvm_option(&compacted[i]) {
+            compacted[i + 1] = compact_classpath_relative_to(&compacted[i + 1], working_dir, ';');
+            i += 2;
+        } else if is_two_token_jvm_option(&compacted[i]) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    if estimate_windows_cmdline_len(program, &compacted) <= WINDOWS_ARGFILE_THRESHOLD_CHARS {
+        return Ok((compacted, None));
+    }
+
+    // Step 2: Java 8 does not support `@argfile`; keep compacted args and warn if still huge.
+    if java_major.is_some_and(|m| m < 9) {
+        let est = estimate_windows_cmdline_len(program, &compacted);
+        if est > 30_000 {
+            tracing::warn!(
+                estimated_chars = est,
+                "Windows Java 8 command line is {est} chars (CreateProcessW limit is 32,767); \
+                 Java 8 does not support @argfile — consider using a shorter MQ data directory"
+            );
+        }
+        return Ok((compacted, None));
+    }
+
+    // Step 3: Java 9+ `@argfile` offloading (strictly JVM args before `main_class`).
+    let mut kept_jvm: Vec<String> = Vec::new();
+    let mut argfile_tokens: Vec<String> = Vec::new();
+
+    let mut idx = 0;
+    while idx < jvm_end {
+        if is_path_list_jvm_option(&compacted[idx]) && idx + 1 < jvm_end {
+            argfile_tokens.push(compacted[idx].clone());
+            argfile_tokens.push(compacted[idx + 1].clone());
+            idx += 2;
+        } else if is_two_token_jvm_option(&compacted[idx]) && idx + 1 < jvm_end {
+            kept_jvm.push(compacted[idx].clone());
+            kept_jvm.push(compacted[idx + 1].clone());
+            idx += 2;
+        } else {
+            kept_jvm.push(compacted[idx].clone());
+            idx += 1;
+        }
+    }
+
+    let clean_argfile = strip_windows_verbatim_prefix(argfile_path);
+    let argfile_flag = format!("@{}", clean_argfile.display());
+
+    // If remaining args are still too long (e.g., giant Forge/NeoForge --add-opens list),
+    // move non-javaagent JVM args before `main_class` into the argfile too.
+    let mut probe_args = Vec::with_capacity(kept_jvm.len() + 1 + (compacted.len() - jvm_end));
+    probe_args.extend(kept_jvm.iter().cloned());
+    probe_args.push(argfile_flag.clone());
+    probe_args.extend_from_slice(&compacted[jvm_end..]);
+
+    if estimate_windows_cmdline_len(program, &probe_args) > WINDOWS_ARGFILE_THRESHOLD_CHARS {
+        let mut minimal_jvm = Vec::new();
+        let mut extra_argfile = Vec::new();
+        let mut k = 0;
+        while k < kept_jvm.len() {
+            if kept_jvm[k].starts_with("-javaagent:") {
+                minimal_jvm.push(kept_jvm[k].clone());
+                k += 1;
+            } else if is_two_token_jvm_option(&kept_jvm[k]) && k + 1 < kept_jvm.len() {
+                extra_argfile.push(kept_jvm[k].clone());
+                extra_argfile.push(kept_jvm[k + 1].clone());
+                k += 2;
+            } else {
+                extra_argfile.push(kept_jvm[k].clone());
+                k += 1;
+            }
+        }
+        extra_argfile.extend(argfile_tokens);
+        argfile_tokens = extra_argfile;
+        kept_jvm = minimal_jvm;
+    }
+
+    if argfile_tokens.is_empty() {
+        return Ok((compacted, None));
+    }
+
+    if let Some(parent) = clean_argfile.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut content = String::new();
+    for tok in &argfile_tokens {
+        content.push_str(&format_java_argfile_token(tok));
+        content.push('\n');
+    }
+    std::fs::write(&clean_argfile, content.as_bytes())?;
+
+    let mut final_args = Vec::with_capacity(kept_jvm.len() + 1 + (compacted.len() - jvm_end));
+    final_args.extend(kept_jvm);
+    final_args.push(argfile_flag);
+    final_args.extend_from_slice(&compacted[jvm_end..]);
+
+    Ok((final_args, Some(clean_argfile)))
+}
+
 fn shell_quote(arg: &str) -> String {
     if arg.is_empty() {
         return "\"\"".to_owned();
@@ -679,5 +1070,127 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg.starts_with("-Dlog4j.configurationFile=")));
+
+        // Verify ALL JVM `-D...` flags appear strictly BEFORE `main_class`
+        // (regression guard for Windows `-Dfile.encoding=UTF-8` ordering bug).
+        let main_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "net.minecraft.client.main.Main")
+            .expect("main_class present");
+        for game_arg in &cmd.args[main_idx + 1..] {
+            assert!(
+                !game_arg.starts_with("-Dfile.encoding="),
+                "JVM property leaked after main_class as game argument: {game_arg}"
+            );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let enc_idx = cmd
+                .args
+                .iter()
+                .position(|a| a == "-Dfile.encoding=UTF-8")
+                .expect("-Dfile.encoding=UTF-8 present on Windows");
+            assert!(
+                enc_idx < main_idx,
+                "-Dfile.encoding=UTF-8 must precede main_class on Windows"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_linux_only_wrappers() {
+        assert!(is_linux_only_wrapper("gamemoderun"));
+        assert!(is_linux_only_wrapper("mangohud --dlsym"));
+        assert!(is_linux_only_wrapper("/usr/bin/prime-run"));
+        assert!(is_linux_only_wrapper("env DRI_PRIME=1 gamemoderun"));
+        assert!(!is_linux_only_wrapper(r"C:\Tools\wrapper.exe --fast"));
+    }
+
+    #[test]
+    fn formats_java_argfile_tokens_with_windows_escaping() {
+        assert_eq!(format_java_argfile_token("-cp"), "-cp");
+        assert_eq!(
+            format_java_argfile_token(r#"C:\Users\John Doe\libs\a.jar;C:\libs\"b".jar"#),
+            r#""C:\\Users\\John Doe\\libs\\a.jar;C:\\libs\\\"b\".jar""#
+        );
+    }
+
+    #[test]
+    fn windows_cmdline_limit_uses_argfile_for_java9_plus_and_compacts_for_java8() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let program = Path::new(r"C:\Program Files\Java\jdk-21\bin\java.exe");
+        let workdir = Path::new(r"C:\Users\PlayerWithLongName\AppData\Local\MQ\instances\pack1");
+
+        // Build a huge Windows classpath (~52 KB raw, ~30 KB even after relative compaction)
+        // simulating a large Forge/NeoForge modpack that still exceeds WINDOWS_ARGFILE_THRESHOLD_CHARS.
+        let cp: String = (0..450)
+            .map(|i| {
+                format!(
+                    r"C:\Users\PlayerWithLongName\AppData\Local\MQ\libraries\org\example\modlib-{i:03}\1.0.{i}\modlib-{i:03}-1.0.{i}.jar"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(cp.len() > WINDOWS_ARGFILE_THRESHOLD_CHARS);
+        assert!(
+            compact_classpath_relative_to(&cp, workdir, ';').len()
+                > WINDOWS_ARGFILE_THRESHOLD_CHARS
+        );
+
+        let args = vec![
+            r"-javaagent:C:\MQ\authlib-injector.jar=https://account.ely.by/api/authlib-injector"
+                .to_owned(),
+            "-Xms1024M".to_owned(),
+            "-Xmx4096M".to_owned(),
+            "-cp".to_owned(),
+            cp,
+            "cpw.mods.bootstraplauncher.BootstrapLauncher".to_owned(),
+            "--username".to_owned(),
+            "Steve".to_owned(),
+            "--accessToken".to_owned(),
+            "SUPER_SECRET_TOKEN_12345".to_owned(),
+        ];
+
+        // 1. Java 21 -> uses @argfile and NEVER writes --accessToken to disk
+        let argfile_path = tmp.path().join(".mq-args-test.argfile");
+        let (rewritten_21, created_file) =
+            rewrite_args_for_windows_limit(program, &args, workdir, Some(21), &argfile_path)
+                .expect("rewrite java 21");
+        let created_path = created_file.expect("argfile should be created for huge Java 21 cp");
+        assert!(
+            estimate_windows_cmdline_len(program, &rewritten_21) < WINDOWS_ARGFILE_THRESHOLD_CHARS
+        );
+        assert!(rewritten_21
+            .iter()
+            .any(|a| a == &format!("@{}", created_path.display())));
+        let disk_content = std::fs::read_to_string(&created_path).expect("read argfile");
+        assert!(disk_content.contains("-cp"));
+        assert!(
+            disk_content.contains(r"..\\..\\libraries\\org\\example\\modlib-000"),
+            "expected compacted ASCII relative paths with escaped backslashes in argfile: {disk_content}"
+        );
+        assert!(
+            !disk_content.contains("SUPER_SECRET_TOKEN_12345"),
+            "game access token must never be written to @argfile"
+        );
+
+        // 2. Java 8 -> does NOT emit @argfile, compacts -cp relative to working_dir
+        let argfile_path_8 = tmp.path().join(".mq-args-java8.argfile");
+        let (rewritten_8, created_8) =
+            rewrite_args_for_windows_limit(program, &args, workdir, Some(8), &argfile_path_8)
+                .expect("rewrite java 8");
+        assert!(created_8.is_none(), "Java 8 must not use @argfile");
+        assert!(!argfile_path_8.exists());
+        assert!(!rewritten_8.iter().any(|a| a.starts_with('@')));
+        let cp_idx = rewritten_8.iter().position(|a| a == "-cp").unwrap();
+        assert!(
+            rewritten_8[cp_idx + 1].contains(r"..\..\libraries\org\example\modlib-000"),
+            "Java 8 classpath should be compacted relative to working_dir"
+        );
+        assert!(
+            rewritten_8[cp_idx + 1].len() < args[4].len(),
+            "Java 8 classpath should shrink after compaction"
+        );
     }
 }

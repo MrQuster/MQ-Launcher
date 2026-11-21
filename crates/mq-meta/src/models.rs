@@ -143,6 +143,15 @@ impl RuleContext {
         }
     }
 
+    pub fn windows_x86() -> Self {
+        Self {
+            os_name: "windows".to_string(),
+            os_arch: "x86".to_string(),
+            os_version: Some("10.0".to_string()),
+            features: BTreeMap::new(),
+        }
+    }
+
     pub fn windows_arm64() -> Self {
         Self {
             os_name: "windows".to_string(),

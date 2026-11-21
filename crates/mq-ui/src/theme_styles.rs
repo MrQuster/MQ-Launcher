@@ -520,7 +520,11 @@ fn build_serpantinum_refracted_glass_mesh(
     tint_override: Option<Color32>,
 ) -> Option<Mesh> {
     let backdrop = active_backdrop_texture(ctx)?;
-    if !rect.is_positive() || rect.width() < 6.0 || rect.height() < 6.0 {
+    if !backdrop.screen_rect.is_positive()
+        || !rect.is_positive()
+        || rect.width() < 6.0
+        || rect.height() < 6.0
+    {
         return None;
     }
 
@@ -608,8 +612,10 @@ fn build_serpantinum_refracted_glass_mesh(
             (interior_tint.g() as u16 + spec_lift).min(248) as u8,
             (interior_tint.b() as u16 + spec_lift + 4).min(252) as u8,
         );
-        out_uv.x = out_uv.x.clamp(0.002 + 1.0 / sw, 0.998 - 1.0 / sw);
-        out_uv.y = out_uv.y.clamp(0.002 + 1.0 / sh, 0.998 - 1.0 / sh);
+        let uv_eps_x = (0.002 + 1.0 / sw).min(0.49);
+        let uv_eps_y = (0.002 + 1.0 / sh).min(0.49);
+        out_uv.x = out_uv.x.clamp(uv_eps_x, 1.0 - uv_eps_x);
+        out_uv.y = out_uv.y.clamp(uv_eps_y, 1.0 - uv_eps_y);
 
         mesh.vertices.push(Vertex {
             pos: out_p,
@@ -640,6 +646,51 @@ fn build_serpantinum_refracted_glass_mesh(
     Some(mesh)
 }
 
+const INVALID_UNIFORM_OFFSET: u32 = u32::MAX;
+
+/// Computes a DX12/Vulkan-safe physical pixel scissor rectangle `[x, y, width, height]`
+/// strictly clamped within `[0, screen_size_px[0]] x [0, screen_size_px[1]]`.
+///
+/// Returns `None` when the window is minimized (`0x0`), `pixels_per_point` is invalid,
+/// `clip_rect` contains `NaN` or is empty, or the clamped scissor area has zero width/height.
+pub fn clamp_scissor_rect_px(
+    clip_rect: Rect,
+    pixels_per_point: f32,
+    screen_size_px: [u32; 2],
+) -> Option<[u32; 4]> {
+    let [sw, sh] = screen_size_px;
+    if sw == 0 || sh == 0 || !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return None;
+    }
+    if clip_rect.min.x.is_nan()
+        || clip_rect.min.y.is_nan()
+        || clip_rect.max.x.is_nan()
+        || clip_rect.max.y.is_nan()
+        || clip_rect.min.x >= clip_rect.max.x
+        || clip_rect.min.y >= clip_rect.max.y
+    {
+        return None;
+    }
+    let sw_f = sw as f32;
+    let sh_f = sh as f32;
+    let min_x = ((clip_rect.min.x * pixels_per_point)
+        .floor()
+        .clamp(0.0, sw_f) as u32)
+        .min(sw);
+    let min_y = ((clip_rect.min.y * pixels_per_point)
+        .floor()
+        .clamp(0.0, sh_f) as u32)
+        .min(sh);
+    let max_x = ((clip_rect.max.x * pixels_per_point).ceil().clamp(0.0, sw_f) as u32).min(sw);
+    let max_y = ((clip_rect.max.y * pixels_per_point).ceil().clamp(0.0, sh_f) as u32).min(sh);
+    let w = max_x.saturating_sub(min_x);
+    let h = max_y.saturating_sub(min_y);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some([min_x, min_y, w, h])
+}
+
 struct LiquidGlassCallback {
     backdrop: Option<Arc<ActiveGpuBackdrop>>,
     uniforms: LiquidGlassUniforms,
@@ -656,7 +707,14 @@ impl egui_wgpu::CallbackTrait for LiquidGlassCallback {
         egui_encoder: &mut egui_wgpu::wgpu::CommandEncoder,
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<egui_wgpu::wgpu::CommandBuffer> {
+        if screen_descriptor.size_in_pixels[0] == 0 || screen_descriptor.size_in_pixels[1] == 0 {
+            self.slot_offset
+                .store(INVALID_UNIFORM_OFFSET, Ordering::Relaxed);
+            return Vec::new();
+        }
         let Some(resources) = callback_resources.get_mut::<LiquidGlassGpuResources>() else {
+            self.slot_offset
+                .store(INVALID_UNIFORM_OFFSET, Ordering::Relaxed);
             return Vec::new();
         };
         resources.begin_frame_if_needed(self.generation);
@@ -701,7 +759,13 @@ impl egui_wgpu::CallbackTrait for LiquidGlassCallback {
         let Some(resources) = callback_resources.get::<LiquidGlassGpuResources>() else {
             return;
         };
-        if info.screen_size_px[0] == 0 || info.screen_size_px[1] == 0 {
+        let Some([sx, sy, sw, sh]) =
+            clamp_scissor_rect_px(info.clip_rect, info.pixels_per_point, info.screen_size_px)
+        else {
+            return;
+        };
+        let offset = self.slot_offset.load(Ordering::Relaxed);
+        if offset == INVALID_UNIFORM_OFFSET || !resources.is_valid_uniform_offset(offset) {
             return;
         }
         render_pass.set_viewport(
@@ -712,8 +776,8 @@ impl egui_wgpu::CallbackTrait for LiquidGlassCallback {
             0.0,
             1.0,
         );
+        render_pass.set_scissor_rect(sx, sy, sw, sh);
         render_pass.set_pipeline(resources.glass_pipeline());
-        let offset = self.slot_offset.load(Ordering::Relaxed);
         render_pass.set_bind_group(0, resources.glass_bind_group(), &[offset]);
         render_pass.draw(0..6, 0..1);
     }
@@ -732,15 +796,57 @@ fn build_gpu_liquid_glass_shape(
     spec_radius_pt: f32,
     hover_t: f32,
 ) -> Shape {
-    let ppp = ctx.pixels_per_point().max(0.5);
-    let screen_pts = ctx.screen_rect().size();
+    let screen_rect = ctx.screen_rect();
+    if !screen_rect.is_positive()
+        || !rect.is_positive()
+        || !callback_rect.is_positive()
+        || !rect.min.x.is_finite()
+        || !rect.min.y.is_finite()
+        || !rect.max.x.is_finite()
+        || !rect.max.y.is_finite()
+    {
+        return Shape::Noop;
+    }
+
+    let raw_ppp = ctx.pixels_per_point();
+    let ppp = if raw_ppp.is_finite() {
+        raw_ppp.clamp(0.5, 8.0)
+    } else {
+        1.0
+    };
+    let screen_pts = screen_rect.size();
     let screen_px = [(screen_pts.x * ppp).max(1.0), (screen_pts.y * ppp).max(1.0)];
 
     let (xform, opacity) = crate::animation::current_visual_transform(ctx);
+    let scale = if xform.scaling.is_finite() && xform.scaling > 0.0 {
+        xform.scaling
+    } else {
+        1.0
+    };
     let rect = xform * rect;
-    let radius_pt = radius_pt * xform.scaling;
-    let bevel_pt = bevel_pt * xform.scaling;
-    let op = opacity.clamp(0.01, 1.0);
+    if !rect.is_positive()
+        || !rect.min.x.is_finite()
+        || !rect.min.y.is_finite()
+        || !rect.max.x.is_finite()
+        || !rect.max.y.is_finite()
+    {
+        return Shape::Noop;
+    }
+    let radius_pt = if radius_pt.is_finite() {
+        (radius_pt * scale).max(0.0)
+    } else {
+        0.0
+    };
+    let bevel_pt = if bevel_pt.is_finite() {
+        (bevel_pt * scale).max(0.0)
+    } else {
+        0.0
+    };
+    let op = if opacity.is_finite() {
+        opacity.clamp(0.01, 1.0)
+    } else {
+        1.0
+    };
 
     let phys_min = [rect.left() * ppp, rect.top() * ppp];
     let phys_size = [
@@ -749,13 +855,16 @@ fn build_gpu_liquid_glass_shape(
     ];
     let corner_radius =
         (radius_pt * ppp).clamp(0.0, (phys_size[0].min(phys_size[1]) * 0.49).max(0.0));
-    let bevel_width = if bevel_pt > 0.0 {
-        (bevel_pt * ppp).clamp(2.0 * ppp, (phys_size[0].min(phys_size[1]) * 0.45).max(1.0))
+    let max_bevel = (phys_size[0].min(phys_size[1]) * 0.45).max(0.0);
+    let bevel_width = if bevel_pt > 0.0 && max_bevel > 0.5 {
+        let min_bevel = (2.0 * ppp).min(max_bevel);
+        (bevel_pt * ppp).clamp(min_bevel, max_bevel)
     } else {
         0.0
     };
 
     let cursor_pos = smoothed_pointer_pos(ctx)
+        .filter(|p| p.x.is_finite() && p.y.is_finite())
         .map(|p| [p.x * ppp, p.y * ppp])
         .unwrap_or([-10000.0, -10000.0]);
 
@@ -802,8 +911,16 @@ fn build_gpu_liquid_glass_shape(
         ior_strength,
         dispersion,
         cursor_pos,
-        spec_radius: spec_radius_pt * xform.scaling * ppp,
-        hover_t: hover_t.clamp(0.0, 1.0),
+        spec_radius: if spec_radius_pt.is_finite() {
+            (spec_radius_pt * scale * ppp).max(0.0)
+        } else {
+            0.0
+        },
+        hover_t: if hover_t.is_finite() {
+            hover_t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
     };
 
     Shape::Callback(egui_wgpu::Callback::new_paint_callback(
@@ -812,7 +929,7 @@ fn build_gpu_liquid_glass_shape(
             backdrop: backdrop_opt,
             uniforms,
             generation,
-            slot_offset: AtomicU32::new(0),
+            slot_offset: AtomicU32::new(INVALID_UNIFORM_OFFSET),
         },
     ))
 }
@@ -830,7 +947,7 @@ pub fn collect_glass_underlay_shapes(
     is_button: bool,
     out: &mut Vec<Shape>,
 ) {
-    if !rect.is_positive() || !style.refraction_border {
+    if !rect.is_positive() || !ctx.screen_rect().is_positive() || !style.refraction_border {
         return;
     }
 
@@ -852,7 +969,7 @@ pub fn collect_glass_underlay_shapes(
         } else {
             style.specular_radius_card
         };
-        out.push(build_gpu_liquid_glass_shape(
+        let shape = build_gpu_liquid_glass_shape(
             ctx,
             rect,
             rect.expand(3.0),
@@ -863,7 +980,10 @@ pub fn collect_glass_underlay_shapes(
             0.11,
             spec_r,
             hover_t,
-        ));
+        );
+        if !matches!(shape, Shape::Noop) {
+            out.push(shape);
+        }
         return;
     }
 
@@ -940,7 +1060,7 @@ pub fn paint_glass_surface_overlay(
     hover_t: f32,
     is_button: bool,
 ) {
-    if !rect.is_positive() || !style.refraction_border {
+    if !rect.is_positive() || !ctx.screen_rect().is_positive() || !style.refraction_border {
         return;
     }
 
@@ -995,7 +1115,7 @@ pub fn collect_tinted_glass_pill_shapes(
     hover_t: f32,
     out: &mut Vec<Shape>,
 ) {
-    if !rect.is_positive() || !style.refraction_border {
+    if !rect.is_positive() || !ctx.screen_rect().is_positive() || !style.refraction_border {
         return;
     }
     let hover_t = hover_t.clamp(0.0, 1.0);
@@ -1011,7 +1131,7 @@ pub fn collect_tinted_glass_pill_shapes(
             tint.b() as f32 / 255.0,
             0.32 + 0.08 * hover_t,
         ];
-        out.push(build_gpu_liquid_glass_shape(
+        let shape = build_gpu_liquid_glass_shape(
             ctx,
             rect,
             rect.expand(3.0),
@@ -1022,7 +1142,10 @@ pub fn collect_tinted_glass_pill_shapes(
             0.11,
             style.specular_radius_button,
             hover_t,
-        ));
+        );
+        if !matches!(shape, Shape::Noop) {
+            out.push(shape);
+        }
         return;
     }
 
@@ -1099,7 +1222,7 @@ pub fn paint_sidebar_glass_dock(
     style: &ThemeStyleParams,
     tokens: &Tokens,
 ) {
-    if !rect.is_positive() || !style.refraction_border {
+    if !rect.is_positive() || !ctx.screen_rect().is_positive() || !style.refraction_border {
         return;
     }
 
@@ -1170,7 +1293,7 @@ pub fn paint_hud_glass_dock(
     style: &ThemeStyleParams,
     tokens: &Tokens,
 ) {
-    if !rect.is_positive() || !style.refraction_border {
+    if !rect.is_positive() || !ctx.screen_rect().is_positive() || !style.refraction_border {
         return;
     }
     if is_wgpu_glass_available(ctx) {
@@ -1712,5 +1835,119 @@ mod tests {
         );
         assert_eq!(gpu_shapes.len(), 1);
         assert!(matches!(gpu_shapes[0], Shape::Callback(_)));
+    }
+
+    #[test]
+    fn scissor_clamping_handles_zero_viewport_fractional_hidpi_and_edge_cases() {
+        // Minimized 0x0 viewport -> None (never panics or emits 0-sized scissor)
+        assert_eq!(
+            clamp_scissor_rect_px(
+                Rect::from_min_size(Pos2::ZERO, egui::vec2(100.0, 100.0)),
+                1.5,
+                [0, 0]
+            ),
+            None
+        );
+        assert_eq!(
+            clamp_scissor_rect_px(
+                Rect::from_min_size(Pos2::ZERO, egui::vec2(100.0, 100.0)),
+                1.25,
+                [1920, 0]
+            ),
+            None
+        );
+
+        // Rect::EVERYTHING (-inf..+inf) must clamp cleanly to full framebuffer
+        assert_eq!(
+            clamp_scissor_rect_px(Rect::EVERYTHING, 1.5, [1920, 1080]),
+            Some([0, 0, 1920, 1080])
+        );
+        assert_eq!(
+            clamp_scissor_rect_px(Rect::NOTHING, 1.5, [1920, 1080]),
+            None
+        );
+
+        // Fractional Windows HiDPI (125%, 150%, 175%) with clip extending past screen bounds
+        for (ppp, screen) in [
+            (1.25_f32, [1920_u32, 1080_u32]),
+            (1.5_f32, [2560, 1440]),
+            (1.75_f32, [3840, 2160]),
+        ] {
+            let clip = Rect::from_min_max(Pos2::new(-12.3, 10.7), Pos2::new(5000.9, 5000.4));
+            let [x, y, w, h] = clamp_scissor_rect_px(clip, ppp, screen).expect("valid scissor");
+            assert!(
+                x + w <= screen[0],
+                "scissor x+w exceeds screen width at {ppp}x"
+            );
+            assert!(
+                y + h <= screen[1],
+                "scissor y+h exceeds screen height at {ppp}x"
+            );
+            assert!(w > 0 && h > 0);
+        }
+
+        // Completely off-screen or NaN clip -> None
+        let offscreen = Rect::from_min_size(Pos2::new(2000.0, 0.0), egui::vec2(100.0, 100.0));
+        assert_eq!(clamp_scissor_rect_px(offscreen, 1.25, [1920, 1080]), None);
+        let nan_rect = Rect::from_min_max(Pos2::new(f32::NAN, 0.0), Pos2::new(50.0, 50.0));
+        assert_eq!(clamp_scissor_rect_px(nan_rect, 1.5, [1920, 1080]), None);
+    }
+
+    #[test]
+    fn gpu_liquid_glass_never_panics_on_tiny_or_zero_rects_at_fractional_hidpi() {
+        let ctx = Context::default();
+        crate::theme::mark_wgpu_glass_available_for_test(&ctx);
+        let cfg = ThemeConfig::preset_liquid_glass();
+        let style = ThemeStyleParams::from_config(&cfg);
+        let tokens = Tokens::from_config(&cfg);
+
+        for ppp in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+            ctx.set_pixels_per_point(ppp);
+            // Tiny 1x1 and 2x2 rects previously panicked in bevel_width.clamp(min, max)
+            for tiny in [
+                Rect::from_min_size(Pos2::new(5.0, 5.0), egui::vec2(1.0, 1.0)),
+                Rect::from_min_size(Pos2::new(5.0, 5.0), egui::vec2(2.0, 3.0)),
+                Rect::from_min_size(Pos2::new(5.0, 5.0), egui::vec2(0.0, 0.0)),
+            ] {
+                let mut shapes = Vec::new();
+                collect_glass_underlay_shapes(
+                    &ctx,
+                    tiny,
+                    CornerRadius::same(10),
+                    &style,
+                    &tokens,
+                    0.5,
+                    true,
+                    &mut shapes,
+                );
+                if !tiny.is_positive() {
+                    assert!(shapes.is_empty());
+                }
+            }
+        }
+
+        // Minimized 0x0 viewport emits no glass shapes (use fresh Context without pending zoom factor,
+        // because egui overrides `RawInput::screen_rect` on the first pass after `set_pixels_per_point`).
+        let zero_ctx = Context::default();
+        crate::theme::mark_wgpu_glass_available_for_test(&zero_ctx);
+        let zero_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(0.0, 0.0))),
+            ..Default::default()
+        };
+        let _ = zero_ctx.run(zero_input, |ctx| {
+            assert!(!ctx.screen_rect().is_positive());
+            let mut shapes = Vec::new();
+            collect_glass_underlay_shapes(
+                ctx,
+                Rect::from_min_size(Pos2::ZERO, egui::vec2(120.0, 48.0)),
+                CornerRadius::same(8),
+                &style,
+                &tokens,
+                0.0,
+                false,
+                &mut shapes,
+            );
+            assert!(shapes.is_empty());
+        });
     }
 }

@@ -3,7 +3,7 @@
 //! `mq` — Command Line Interface and Desktop GUI entrypoint.
 //!
 //! Provides subcommands for:
-//! - `mq` (default without args): launch desktop GUI (Wayland/X11, Vulkan/OpenGL fallback).
+//! - `mq` (default without args): launch desktop GUI (Wayland/X11/Win32, DX12/Vulkan/OpenGL fallback).
 //! - `mq install <version>`: multi-threaded DAG installation into CAS and instance.
 //! - `mq verify <instance>`: parallel SHA-1 / SHA-512 integrity check across all cores.
 //! - `mq launch <instance>`: launch Minecraft (offline / Ely.by skins / Microsoft) or `--dry-run`.
@@ -11,7 +11,7 @@
 //! - `mq auth`: manage offline, Ely.by, and Microsoft accounts.
 //! - `mq mods`: local jar scanner, conflict detector, catalog search and dependency installer.
 //! - `mq modpack install`: `.mrpack` and CurseForge `.zip` installer.
-//! - `mq bench`: Amdahl law scaling verification and `/proc/stat` core saturation benchmark.
+//! - `mq bench`: Amdahl law scaling verification and per-core CPU saturation benchmark.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,8 +45,8 @@ use mq_mods::{
 };
 use mq_net::{NetConfig, NetEngine};
 use mq_sched::{
-    compute_speedup, estimate_serial_fraction, read_peak_rss_mib, read_proc_stat, thread_ladder,
-    BufferPool, CancelEpoch, ComputePool,
+    compute_speedup, estimate_serial_fraction, read_peak_rss_mib, thread_ladder, BufferPool,
+    CancelEpoch, ComputePool, CpuSampler,
 };
 use mq_ui::{run_gui, UiState};
 use testsupport::{MockConfig, MockServer};
@@ -60,7 +60,7 @@ use doctor::{cmd_doctor_install, DoctorArgs};
     author = "MrQuster <https://github.com/MrQuster>",
     version,
     about = "High-performance modular Minecraft launcher in Rust/egui by MrQuster",
-    long_about = "MQ — high-performance, multithreaded Minecraft launcher for Linux.\n\
+    long_about = "MQ — high-performance, multithreaded Minecraft launcher for Linux and Windows.\n\
                   Created by MrQuster (https://github.com/MrQuster).\n\
                   Supports Offline mode, Ely.by browser OAuth2 with authlib-injector, Modrinth, and CurseForge.\n\
                   Run 'mq' without arguments to start the GUI, or use subcommands for CLI operations.",
@@ -104,7 +104,8 @@ fn enforce_test_hooks_sandbox(cli: &Cli) -> Result<()> {
         .context(
             "MQ_DATA_DIR must be set to an isolated sandbox directory when test-hooks is active",
         )?;
-    let abs_data = std::fs::canonicalize(&data_dir).unwrap_or_else(|_| data_dir.clone());
+    let abs_data =
+        strip_windows_verbatim_prefix(std::fs::canonicalize(&data_dir).unwrap_or(data_dir));
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         let forbidden_data = home.join(".local/share/mq");
         let forbidden_cfg = home.join(".config/mq");
@@ -113,6 +114,24 @@ fn enforce_test_hooks_sandbox(cli: &Cli) -> Result<()> {
                 "Refusing to run test-hooks against user profile path: {}",
                 abs_data.display()
             );
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let abs_lower = abs_data.to_string_lossy().to_ascii_lowercase();
+        for env_key in ["LOCALAPPDATA", "APPDATA"] {
+            if let Some(base) = std::env::var_os(env_key).map(PathBuf::from) {
+                let forbidden = base.join("MQ").to_string_lossy().to_ascii_lowercase();
+                if abs_lower == forbidden
+                    || abs_lower.starts_with(&format!("{forbidden}\\"))
+                    || abs_lower.starts_with(&format!("{forbidden}/"))
+                {
+                    anyhow::bail!(
+                        "Refusing to run test-hooks against user profile path: {}",
+                        abs_data.display()
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -659,23 +678,68 @@ fn bump_nofile_limit() {
     }
 }
 
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn should_attach_parent_console(args: &[std::ffi::OsString]) -> bool {
+    let Some(first_arg) = args.get(1) else {
+        return false;
+    };
+    if args.len() == 2
+        && (first_arg == "--after-update" || is_mrpack_arg(std::path::Path::new(first_arg)))
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn attach_parent_console_if_cli() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if !should_attach_parent_console(&args) {
+        return;
+    }
+
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // (DWORD)-11
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // (DWORD)-12
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+        fn GetStdHandle(n_std_handle: u32) -> isize;
+    }
+
+    unsafe {
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        let err = GetStdHandle(STD_ERROR_HANDLE);
+        let out_valid = out != 0 && out != INVALID_HANDLE_VALUE;
+        let err_valid = err != 0 && err != INVALID_HANDLE_VALUE;
+        if !out_valid || !err_valid {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     bump_nofile_limit();
 
+    // Must run BEFORE tracing_subscriber and Cli::parse() so `--version`, `--help`,
+    // and clap error messages print cleanly in PowerShell/CMD when compiled with
+    // windows_subsystem = "windows", without popping up a console when double-clicked.
     #[cfg(target_os = "windows")]
-    {
-        // If invoked from a console window with arguments, attach to parent console so CLI output is visible
-        if std::env::args().len() > 1 {
-            unsafe {
-                extern "system" {
-                    fn AttachConsole(dw_process_id: u32) -> i32;
-                }
-                AttachConsole(0xFFFFFFFF);
-            }
-        }
-    }
+    attach_parent_console_if_cli();
 
     // Initialize structured logging with token redaction
     tracing_subscriber::fmt()
@@ -686,6 +750,10 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.after_update {
+        mq_update::UpdateManager::clean_old_binary_backups();
+        tracing::info!("Started after self-update; cleaned previous binary backup if present");
+    }
     #[cfg(feature = "test-hooks")]
     enforce_test_hooks_sandbox(&cli)?;
     let paths = MqPaths::platform_default().context("Failed to initialize platform directories")?;
@@ -704,7 +772,8 @@ async fn main() -> Result<()> {
                             path.display()
                         );
                     }
-                    let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+                    let resolved =
+                        strip_windows_verbatim_prefix(std::fs::canonicalize(&path).unwrap_or(path));
                     if try_forward_mrpack_to_running_instance(&paths, &resolved) {
                         return Ok(());
                     }
@@ -1729,7 +1798,11 @@ async fn cmd_verify(args: VerifyArgs, paths: MqPaths, threads: Option<usize>) ->
     println!(
         "  Объём данных:          {:.2} MiB ({:.2} MiB/s)",
         total_mib,
-        total_mib / elapsed
+        if elapsed > 0.0 {
+            total_mib / elapsed
+        } else {
+            0.0
+        }
     );
     println!("--------------------------------------------------------------------------------");
     if !report.corrupted_files.is_empty() || !report.missing_files.is_empty() {
@@ -2181,7 +2254,19 @@ async fn cmd_mods(args: ModsArgs, paths: MqPaths, threads: Option<usize>) -> Res
                             let new_path = mods_dir.join(&file_info.filename);
                             let bytes = reqwest::get(&file_info.url).await?.bytes().await?;
                             std::fs::write(&new_path, bytes)?;
-                            if old_path != &new_path && old_path.exists() {
+                            let same_file = {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    old_path
+                                        .to_string_lossy()
+                                        .eq_ignore_ascii_case(&new_path.to_string_lossy())
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    old_path == &new_path
+                                }
+                            };
+                            if !same_file && old_path.exists() {
                                 let _ = std::fs::remove_file(old_path);
                             }
                             println!("    [OK] Обновлено: {}", file_info.filename);
@@ -2320,7 +2405,7 @@ async fn cmd_modpack(args: ModpackArgs, paths: MqPaths, threads: Option<usize>) 
             println!("[MQ] Установка сборки модпака '{}'...", inst_name);
             let started = Instant::now();
 
-            if pack_path.extension().and_then(|s| s.to_str()) == Some("mrpack") {
+            if is_mrpack_arg(&pack_path) {
                 let outcome = install_mrpack(
                     &pack_path,
                     &inst_dir,
@@ -2742,6 +2827,107 @@ async fn cmd_worlds(args: WorldsArgs, paths: MqPaths) -> Result<()> {
     Ok(())
 }
 
+fn detect_os_pretty_name() -> String {
+    #[cfg(target_os = "linux")]
+    if let Some(pretty) = std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|c| {
+            c.lines().find(|l| l.starts_with("PRETTY_NAME=")).map(|l| {
+                l.trim_start_matches("PRETTY_NAME=")
+                    .trim_matches('"')
+                    .to_string()
+            })
+        })
+        .filter(|s| !s.is_empty())
+    {
+        return pretty;
+    }
+
+    sysinfo::System::long_os_version()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| sysinfo::System::name().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                "Windows".to_string()
+            } else {
+                std::env::consts::OS.to_string()
+            }
+        })
+}
+
+fn detect_cpu_model() -> String {
+    #[cfg(target_os = "linux")]
+    if let Some(model) = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|c| {
+            c.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+    {
+        return model;
+    }
+
+    let sys = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_cpu(sysinfo::CpuRefreshKind::nothing()),
+    );
+    sys.cpus()
+        .first()
+        .map(|c| c.brand().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Unknown CPU".to_string())
+}
+
+#[cfg(unix)]
+fn detect_free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    rustix::fs::statvfs(path)
+        .ok()
+        .map(|s| s.f_bavail * s.f_frsize)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lp_directory_name: *const u16,
+            lp_free_bytes_available_to_caller: *mut u64,
+            lp_total_number_of_bytes: *mut u64,
+            lp_total_number_of_free_bytes: *mut u64,
+        ) -> i32;
+    }
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_avail: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_avail,
+            &mut total_bytes,
+            &mut total_free,
+        )
+    };
+    if ok != 0 {
+        Some(free_avail)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn detect_free_disk_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
 async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
     if let Some(ref version) = args.install {
         return cmd_doctor_install(version, &args, &paths).await;
@@ -2755,16 +2941,7 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
     println!("================================================================================");
 
     // 1. OS & Architecture
-    let os_name = std::fs::read_to_string("/etc/os-release")
-        .ok()
-        .and_then(|c| {
-            c.lines().find(|l| l.starts_with("PRETTY_NAME=")).map(|l| {
-                l.trim_start_matches("PRETTY_NAME=")
-                    .trim_matches('"')
-                    .to_string()
-            })
-        })
-        .unwrap_or_else(|| "Linux (Unknown)".to_string());
+    let os_name = detect_os_pretty_name();
     let arch = std::env::consts::ARCH;
     println!("[СИСТЕМА]   ОС: {} | Архитектура: {}", os_name, arch);
 
@@ -2772,15 +2949,7 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
     let num_cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let cpu_model = std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|c| {
-            c.lines()
-                .find(|l| l.starts_with("model name"))
-                .and_then(|l| l.split(':').nth(1))
-                .map(|s| s.trim().to_string())
-        })
-        .unwrap_or_else(|| "Unknown CPU".to_string());
+    let cpu_model = detect_cpu_model();
     println!(
         "[ПРОЦЕССОР] Модель: {} (Логических ядер: {})",
         cpu_model, num_cpus
@@ -2804,7 +2973,9 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
             );
         }
         None => {
-            println!("[ГРАФИКА]   Предупреждение: Аппаратный адаптер Vulkan/OpenGL не обнаружен.");
+            println!(
+                "[ГРАФИКА]   Предупреждение: Аппаратный адаптер Vulkan/DX12/OpenGL не обнаружен."
+            );
         }
     }
 
@@ -2872,12 +3043,7 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
 
     // 6. Storage & Disk Space
     let data_dir = &paths.data_dir;
-    #[cfg(unix)]
-    let free_space = rustix::fs::statvfs(data_dir)
-        .ok()
-        .map(|s| s.f_bavail * s.f_frsize);
-    #[cfg(not(unix))]
-    let free_space: Option<u64> = None;
+    let free_space = detect_free_disk_bytes(data_dir);
 
     println!("[ДИСК]      Каталог данных: {}", data_dir.display());
     if let Some(free) = free_space {
@@ -3495,8 +3661,8 @@ async fn cmd_bench(args: BenchArgs) -> Result<()> {
         )?);
         let cas = CasStore::new(b_paths.clone());
 
-        // Snapshot initial CPU counters
-        let stat_before = read_proc_stat().unwrap_or_default();
+        // Snapshot initial CPU counters (cross-platform: /proc/stat on Linux, sysinfo on Windows)
+        let mut cpu_sampler = CpuSampler::new().ok();
         let bench_start = Instant::now();
 
         // 1. Install Game (3200+ assets, 110+ libs)
@@ -3556,10 +3722,13 @@ async fn cmd_bench(args: BenchArgs) -> Result<()> {
 
         let elapsed_sec = bench_start.elapsed().as_secs_f64();
 
-        // Sample final CPU utilization and RSS
-        let stat_after = read_proc_stat().unwrap_or_default();
-        let (total_cpu_pct, per_core_cpu) = stat_after.utilization_delta(&stat_before);
-        let peak_rss_mib = read_peak_rss_mib();
+        // Sample final CPU utilization and RSS (cross-platform)
+        let (total_cpu_pct, per_core_cpu, sampled_peak_rss) =
+            match cpu_sampler.as_mut().and_then(|s| s.sample().ok()) {
+                Some(snap) => (snap.total_pct, snap.per_core_pct, snap.peak_rss_mib),
+                None => (0.0, Vec::new(), 0.0),
+            };
+        let peak_rss_mib = sampled_peak_rss.max(read_peak_rss_mib());
 
         let t1 = *baseline_time.get_or_insert(elapsed_sec);
         let speedup = compute_speedup(t1, elapsed_sec);
@@ -3597,7 +3766,7 @@ async fn cmd_bench(args: BenchArgs) -> Result<()> {
         );
     }
     println!("================================================================================");
-    println!("\nПоядерная утилизация CPU (/proc/stat):");
+    println!("\nПоядерная утилизация CPU:");
     for r in &results {
         print!("  threads={:<2}: [", r.threads);
         for (i, core) in r.per_core_cpu.iter().enumerate() {
@@ -3676,5 +3845,61 @@ mod mrpack_cli_tests {
             .expect("receive forwarded .mrpack path");
         assert_eq!(received, pack);
         let _ = std::fs::remove_file(port_file);
+    }
+
+    #[test]
+    fn console_attachment_skips_bare_gui_mrpack_and_after_update() {
+        let os = |items: &[&str]| -> Vec<std::ffi::OsString> {
+            items.iter().map(std::ffi::OsString::from).collect()
+        };
+
+        assert!(!should_attach_parent_console(&os(&["mq.exe"])));
+        assert!(!should_attach_parent_console(&os(&[
+            "mq.exe",
+            "--after-update"
+        ])));
+        assert!(!should_attach_parent_console(&os(&[
+            "mq.exe",
+            r"C:\Users\Иван\Pack.mrpack"
+        ])));
+        assert!(!should_attach_parent_console(&os(&[
+            "mq.exe",
+            r"C:\Users\Иван\PACK.MRPACK"
+        ])));
+
+        assert!(should_attach_parent_console(&os(&["mq.exe", "--version"])));
+        assert!(should_attach_parent_console(&os(&["mq.exe", "--help"])));
+        assert!(should_attach_parent_console(&os(&["mq.exe", "doctor"])));
+        assert!(should_attach_parent_console(&os(&[
+            "mq.exe", "mods", "scan", "inst"
+        ])));
+        assert!(should_attach_parent_console(&os(&[
+            "mq.exe",
+            "launch",
+            "inst",
+            "--dry-run"
+        ])));
+    }
+
+    #[test]
+    fn strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\Иван\pack.mrpack")),
+            PathBuf::from(r"C:\Users\Иван\pack.mrpack")
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\pack.mrpack")),
+            PathBuf::from(r"\\server\share\pack.mrpack")
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(PathBuf::from("/tmp/pack.mrpack")),
+            PathBuf::from("/tmp/pack.mrpack")
+        );
+    }
+
+    #[test]
+    fn detects_os_and_cpu_non_empty() {
+        assert!(!detect_os_pretty_name().trim().is_empty());
+        assert!(!detect_cpu_model().trim().is_empty());
     }
 }

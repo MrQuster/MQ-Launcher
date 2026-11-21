@@ -1114,11 +1114,12 @@ impl LiquidGlassGpuResources {
         width: u32,
         height: u32,
     ) -> (wgpu::Texture, wgpu::TextureView) {
+        let max_dim = device.limits().max_texture_dimension_2d.max(1);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
+                width: width.clamp(1, max_dim),
+                height: height.clamp(1, max_dim),
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -1220,6 +1221,17 @@ impl LiquidGlassGpuResources {
         self.frame_flushed = true;
     }
 
+    /// Returns whether `offset` is an aligned in-bounds dynamic offset for `LiquidGlassUniforms`.
+    #[inline]
+    pub fn is_valid_uniform_offset(&self, offset: u32) -> bool {
+        let off = offset as usize;
+        let stride = self.uniform_stride.max(1);
+        off.is_multiple_of(stride)
+            && off
+                .checked_add(std::mem::size_of::<LiquidGlassUniforms>())
+                .is_some_and(|end| end <= self.glass_uniform_capacity)
+    }
+
     /// Uploads wallpaper sharp pixels when changed and executes 4-pass GPU separable blur
     /// only when wallpaper changes or window size changes.
     pub fn sync_backdrop(
@@ -1230,12 +1242,21 @@ impl LiquidGlassGpuResources {
         source: &GpuBackdropSource,
         window_px: [u32; 2],
     ) {
-        let target_w = (window_px[0] / 2).clamp(160, 960);
-        let target_h = (window_px[1] / 2).clamp(120, 640);
+        if window_px[0] == 0 || window_px[1] == 0 || source.width == 0 || source.height == 0 {
+            return;
+        }
+        let max_dim = device.limits().max_texture_dimension_2d.max(256);
+        let target_w = (window_px[0] / 2).clamp(160, 960).min(max_dim).max(1);
+        let target_h = (window_px[1] / 2).clamp(120, 640).min(max_dim).max(1);
         let target_blur = [target_w, target_h];
 
-        let key_changed =
-            self.loaded_key != source.key || self.sharp_size != [source.width, source.height];
+        let (upload_w, upload_h, resized_rgba) =
+            downscale_rgba_if_exceeds(&source.rgba, source.width, source.height, max_dim);
+        if upload_w == 0 || upload_h == 0 {
+            return;
+        }
+
+        let key_changed = self.loaded_key != source.key || self.sharp_size != [upload_w, upload_h];
         let size_changed = self.blur_size != target_blur || self.loaded_window_px != window_px;
 
         if !key_changed && !size_changed {
@@ -1244,42 +1265,42 @@ impl LiquidGlassGpuResources {
 
         let mut rebuild_bg = false;
 
-        if key_changed && source.width > 0 && source.height > 0 {
-            let expected_len = (source.width as usize)
-                .saturating_mul(source.height as usize)
+        if key_changed {
+            let upload_bytes: &[u8] = resized_rgba.as_deref().unwrap_or(&source.rgba);
+            let expected_len = (upload_w as usize)
+                .saturating_mul(upload_h as usize)
                 .saturating_mul(4);
-            if source.rgba.len() >= expected_len {
-                if self.sharp_size != [source.width, source.height] {
-                    let (tex, view) = Self::create_rgba_texture(
-                        device,
-                        "mq_glass_sharp",
-                        source.width,
-                        source.height,
+            let bytes_per_row = upload_w.checked_mul(4);
+            if let Some(bpr) = bytes_per_row {
+                if expected_len > 0 && upload_bytes.len() >= expected_len {
+                    if self.sharp_size != [upload_w, upload_h] {
+                        let (tex, view) =
+                            Self::create_rgba_texture(device, "mq_glass_sharp", upload_w, upload_h);
+                        self.sharp_texture = tex;
+                        self.sharp_view = view;
+                        self.sharp_size = [upload_w, upload_h];
+                        rebuild_bg = true;
+                    }
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &self.sharp_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &upload_bytes[..expected_len],
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(bpr),
+                            rows_per_image: Some(upload_h),
+                        },
+                        wgpu::Extent3d {
+                            width: upload_w,
+                            height: upload_h,
+                            depth_or_array_layers: 1,
+                        },
                     );
-                    self.sharp_texture = tex;
-                    self.sharp_view = view;
-                    self.sharp_size = [source.width, source.height];
-                    rebuild_bg = true;
                 }
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.sharp_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &source.rgba[..expected_len],
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(source.width * 4),
-                        rows_per_image: Some(source.height),
-                    },
-                    wgpu::Extent3d {
-                        width: source.width,
-                        height: source.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
             }
             self.loaded_key = source.key.clone();
         }
@@ -1498,7 +1519,45 @@ fn build_ambient_gpu_backdrop(
     source
 }
 
+fn downscale_rgba_if_exceeds(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    max_dim: u32,
+) -> (u32, u32, Option<Vec<u8>>) {
+    if width == 0 || height == 0 || max_dim == 0 {
+        return (0, 0, None);
+    }
+    let expected = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    if src.len() < expected {
+        return (0, 0, None);
+    }
+    if width <= max_dim && height <= max_dim {
+        return (width, height, None);
+    }
+    let scale = (max_dim as f64) / (width.max(height) as f64);
+    let dw = ((width as f64 * scale).floor() as u32).clamp(1, max_dim);
+    let dh = ((height as f64 * scale).floor() as u32).clamp(1, max_dim);
+    let mut out = vec![0_u8; (dw as usize) * (dh as usize) * 4];
+    for y in 0..dh {
+        let sy = (((y as u64) * (height as u64)) / (dh as u64)).min((height - 1) as u64) as usize;
+        for x in 0..dw {
+            let sx = (((x as u64) * (width as u64)) / (dw as u64)).min((width - 1) as u64) as usize;
+            let si = (sy * (width as usize) + sx) * 4;
+            let di = ((y as usize) * (dw as usize) + (x as usize)) * 4;
+            out[di..di + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    (dw, dh, Some(out))
+}
+
 fn build_blurred_backdrop_image(src: &[u8], w: usize, h: usize) -> ColorImage {
+    let expected = w.saturating_mul(h).saturating_mul(4);
+    if w == 0 || h == 0 || src.len() < expected {
+        return ColorImage::new([1, 1], Color32::from_rgb(16, 18, 24));
+    }
     let scale = (480.0 / (w.max(h) as f32)).min(1.0);
     let dw = ((w as f32 * scale).round() as usize).max(16);
     let dh = ((h as f32 * scale).round() as usize).max(16);
@@ -1609,7 +1668,8 @@ struct ResolvedBackdrop {
 }
 
 fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<ResolvedBackdrop> {
-    let trimmed = path.trim();
+    let cleaned = crate::opener::clean_user_path(path);
+    let trimmed = cleaned.as_str();
     if trimmed.is_empty() {
         return None;
     }
@@ -1654,6 +1714,16 @@ fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<ResolvedBackdro
     let loaded = (|| {
         let bytes = fs::read(Path::new(trimmed)).ok()?;
         let img = image::load_from_memory(&bytes).ok()?;
+        let max_backdrop_side = 4096_u32;
+        let img = if img.width() > max_backdrop_side || img.height() > max_backdrop_side {
+            img.resize(
+                max_backdrop_side,
+                max_backdrop_side,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            img
+        };
         let rgba = img.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
         if size[0] == 0 || size[1] == 0 {
@@ -1841,6 +1911,9 @@ fn draw_aspect_fill_wallpaper(
     size: [usize; 2],
     window_alpha: f32,
 ) -> Rect {
+    if !rect.is_positive() || size[0] == 0 || size[1] == 0 {
+        return Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    }
     let tex_aspect = (size[0] as f32) / (size[1].max(1) as f32);
     let rect_aspect = rect.width() / rect.height().max(1.0);
     let uv = if rect_aspect > tex_aspect {
@@ -2127,5 +2200,22 @@ mod tests {
         let visuals = build_visuals_from_config(&cfg);
         assert_ne!(visuals.selection.bg_fill, visuals.selection.stroke.color);
         assert_eq!(visuals.selection.stroke.color, tokens.text);
+    }
+
+    #[test]
+    fn backdrop_helpers_handle_zero_and_oversized_dimensions_safely() {
+        let empty = build_blurred_backdrop_image(&[], 0, 0);
+        assert_eq!(empty.size, [1, 1]);
+
+        let short = build_blurred_backdrop_image(&[1, 2, 3], 4, 4);
+        assert_eq!(short.size, [1, 1]);
+
+        assert_eq!(downscale_rgba_if_exceeds(&[], 0, 10, 4096), (0, 0, None));
+        assert_eq!(downscale_rgba_if_exceeds(&[0; 8], 4, 4, 4096), (0, 0, None));
+
+        let big = vec![128_u8; 32 * 16 * 4];
+        let (dw, dh, resized) = downscale_rgba_if_exceeds(&big, 32, 16, 8);
+        assert_eq!((dw, dh), (8, 4));
+        assert_eq!(resized.expect("should downscale").len(), (8 * 4 * 4));
     }
 }

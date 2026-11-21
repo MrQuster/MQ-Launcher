@@ -25,9 +25,10 @@ pub use events::{
     PhaseProgress, ProgressSnapshot, DEFAULT_EVENT_BUS_CAPACITY,
 };
 pub use fs_util::{
-    async_remove_file_with_retry, async_rename_with_retry, is_cross_device_error,
-    is_transient_windows_lock_error, remove_dir_all_with_retry, remove_file_with_retry,
-    rename_with_retry, strip_windows_verbatim_prefix, validate_windows_safe_filename,
+    async_remove_file_with_retry, async_rename_with_retry, canonicalize_clean,
+    is_cross_device_error, is_transient_windows_lock_error, remove_dir_all_with_retry,
+    remove_file_with_retry, rename_with_retry, strip_windows_verbatim_prefix,
+    validate_windows_safe_filename,
 };
 pub use ids::{
     AccountId, InstanceId, ModLoaderKind, Sha1Digest, Sha1Hash, Sha512Digest, Sha512Hash,
@@ -35,8 +36,8 @@ pub use ids::{
 pub use paths::{resolve_safe_path, MqPaths};
 pub use platform::{
     atomic_write, classpath_separator, default_cache_dir, default_config_dir, default_data_dir,
-    ensure_long_path_prefix, is_windows_reserved_name, link_or_copy, open_folder, open_url,
-    os_name, sanitize_filename,
+    ensure_long_path_prefix, is_process_alive, is_windows_reserved_name, is_wrapper_available,
+    link_or_copy, open_folder, open_url, os_name, sanitize_filename, WINDOWS_CREATE_NO_WINDOW,
 };
 pub use secret::{redact_text, SecretString, REDACTED_PLACEHOLDER};
 

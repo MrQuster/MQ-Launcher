@@ -12,8 +12,8 @@ pub mod worlds;
 
 pub use manager::InstanceManager;
 pub use manifest::{
-    InstanceManifest, DEFAULT_MEMORY_MAX_MB, DEFAULT_MEMORY_MIN_MB, INSTANCE_MANIFEST_FILE,
-    INSTANCE_SUBDIRS, RESOLVED_VERSION_FILE,
+    windows_safe_instance_id, InstanceManifest, DEFAULT_MEMORY_MAX_MB, DEFAULT_MEMORY_MIN_MB,
+    INSTANCE_MANIFEST_FILE, INSTANCE_SUBDIRS, RESOLVED_VERSION_FILE,
 };
 pub use package::{
     export_instance_to_zip, import_instance_archive_detailed, import_instance_from_zip,
@@ -292,5 +292,95 @@ mod tests {
         assert_eq!(loaded_servers.len(), 1);
         assert_eq!(loaded_servers[0].name, "Hypixel");
         assert_eq!(loaded_servers[0].ip, "mc.hypixel.net");
+    }
+
+    #[test]
+    fn windows_reserved_and_invalid_instance_names_produce_safe_directories() {
+        use mq_core::fs_util::validate_windows_safe_filename;
+        use mq_core::InstanceId;
+
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let paths = MqPaths::with_root(tmp.path());
+        let mgr = InstanceManager::new(paths.clone());
+
+        for name in [
+            "CON",
+            "NUL",
+            "PRN",
+            "AUX",
+            "COM1",
+            "LPT9",
+            "con.pack",
+            r#"Bad<>:"/\|?*Name"#,
+            "TrailingDots...",
+            "TrailingSpaces   ",
+        ] {
+            let safe_id = windows_safe_instance_id(name);
+            assert!(
+                validate_windows_safe_filename(safe_id.as_str()),
+                "slug {:?} for display name {:?} must be Windows-safe",
+                safe_id.as_str(),
+                name
+            );
+        }
+
+        // End-to-end CRUD with a Windows reserved name (`CON`) works cleanly without failing on Windows
+        let con_inst = mgr
+            .create_instance("CON", "1.21.1", ModLoaderKind::Vanilla, None)
+            .expect("create CON instance with safe slug");
+        assert_ne!(con_inst.id.as_str(), "con");
+        assert!(validate_windows_safe_filename(con_inst.id.as_str()));
+        assert_eq!(
+            mgr.load_instance("CON").expect("load by CON").id,
+            con_inst.id
+        );
+
+        // Manually crafted reserved InstanceId must be rejected by create_from_manifest
+        let mut bad_manifest =
+            InstanceManifest::new("Valid", "1.21.1", ModLoaderKind::Vanilla, None);
+        bad_manifest.id = InstanceId::new("con").expect("raw slug");
+        assert!(mgr.create_from_manifest(bad_manifest).is_err());
+
+        // Delete works even when instance contains read-only files
+        let ro_file = con_inst.mods_dir(&paths).join("readonly.jar");
+        fs::write(&ro_file, b"jar").expect("write ro mod");
+        let mut perms = fs::metadata(&ro_file).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&ro_file, perms).expect("set readonly");
+        mgr.delete_instance("CON")
+            .expect("delete instance with read-only files");
+        assert!(!con_inst.instance_dir(&paths).exists());
+    }
+
+    #[test]
+    fn restore_world_rejects_windows_zip_slip_entries() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let inst_dir = tmp.path().join("inst");
+        let backups_root = tmp.path().join("backups");
+        let inst_backups = backups_root.join("my-inst");
+        fs::create_dir_all(&inst_backups).unwrap();
+
+        for (idx, evil) in [r"C:\Windows\evil.dat", r"..\escape.dat", r"\root.dat"]
+            .iter()
+            .enumerate()
+        {
+            let zip_name = format!("evil_{idx}.zip");
+            let zip_path = inst_backups.join(&zip_name);
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            zw.start_file(*evil, SimpleFileOptions::default()).unwrap();
+            zw.write_all(b"evil").unwrap();
+            zw.finish().unwrap();
+
+            let err = restore_world(&backups_root, "my-inst", &zip_name, &inst_dir, Some("Safe"))
+                .expect_err("windows zip slip must be rejected");
+            assert!(
+                matches!(err, MqError::ZipSlip { .. }),
+                "expected ZipSlip for {evil:?}, got {err:?}"
+            );
+        }
     }
 }

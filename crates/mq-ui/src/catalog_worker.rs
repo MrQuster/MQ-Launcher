@@ -185,9 +185,19 @@ pub async fn load_icon(cache_dir: &Path, url: &str, edge: u32) -> Option<egui::C
     }
     let img = decode_icon(&bytes, edge)?;
     if tokio::fs::create_dir_all(cache_dir).await.is_ok() {
-        let tmp = path.with_extension("part");
+        static ICON_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+        let seq = ICON_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("icon");
+        let tmp = cache_dir.join(format!("{file_name}.part.{}.{seq}", std::process::id()));
         if tokio::fs::write(&tmp, &bytes).await.is_ok() {
-            let _ = tokio::fs::rename(&tmp, &path).await;
+            // On Windows, `rename` fails if the destination already exists; fall back to
+            // remove + rename and clean up any leftover `.part` file on error.
+            if tokio::fs::rename(&tmp, &path).await.is_err() {
+                let _ = tokio::fs::remove_file(&path).await;
+                if tokio::fs::rename(&tmp, &path).await.is_err() {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                }
+            }
         }
     }
     Some(img)

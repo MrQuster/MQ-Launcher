@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::Path;
+#[cfg(not(target_os = "windows"))]
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -44,53 +45,143 @@ pub struct GpuDiagnostics {
 
 impl GpuDiagnostics {
     pub fn probe() -> Self {
-        let output = Command::new("glxinfo").arg("-B").output();
+        #[cfg(target_os = "windows")]
+        {
+            Self::probe_windows()
+        }
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let mut renderer = "Unknown GPU".to_string();
-                let mut opengl_version = "Unknown".to_string();
+        #[cfg(not(target_os = "windows"))]
+        {
+            let output = Command::new("glxinfo").arg("-B").output();
 
-                for line in text.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("OpenGL renderer string:") {
-                        renderer = trimmed
-                            .trim_start_matches("OpenGL renderer string:")
-                            .trim()
-                            .to_string();
-                    } else if (trimmed.starts_with("OpenGL core profile version string:")
-                        || trimmed.starts_with("OpenGL version string:"))
-                        && opengl_version == "Unknown"
-                    {
-                        opengl_version = trimmed
-                            .split(':')
-                            .nth(1)
-                            .unwrap_or("Unknown")
-                            .trim()
-                            .to_string();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    let mut renderer = "Unknown GPU".to_string();
+                    let mut opengl_version = "Unknown".to_string();
+
+                    for line in text.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("OpenGL renderer string:") {
+                            renderer = trimmed
+                                .trim_start_matches("OpenGL renderer string:")
+                                .trim()
+                                .to_string();
+                        } else if (trimmed.starts_with("OpenGL core profile version string:")
+                            || trimmed.starts_with("OpenGL version string:"))
+                            && opengl_version == "Unknown"
+                        {
+                            opengl_version = trimmed
+                                .split(':')
+                                .nth(1)
+                                .unwrap_or("Unknown")
+                                .trim()
+                                .to_string();
+                        }
+                    }
+
+                    let is_supported = !opengl_version.starts_with("1.")
+                        && !opengl_version.starts_with("2.")
+                        && !opengl_version.starts_with("3.0")
+                        && !opengl_version.starts_with("3.1")
+                        && !opengl_version.starts_with("3.2");
+
+                    Self {
+                        renderer,
+                        opengl_version,
+                        is_supported,
+                        raw_info: text.to_string(),
                     }
                 }
+                _ => Self {
+                    renderer: "OpenGL probe unavailable (glxinfo not found)".to_string(),
+                    opengl_version: "Unknown".to_string(),
+                    is_supported: true,
+                    raw_info: String::new(),
+                },
+            }
+        }
+    }
 
-                let is_supported = !opengl_version.starts_with("1.")
-                    && !opengl_version.starts_with("2.")
-                    && !opengl_version.starts_with("3.0")
-                    && !opengl_version.starts_with("3.1")
-                    && !opengl_version.starts_with("3.2");
+    #[cfg(target_os = "windows")]
+    fn probe_windows() -> Self {
+        const DISPLAY_DEVICE_ACTIVE: u32 = 0x0000_0001;
+        const DISPLAY_DEVICE_PRIMARY_DEVICE: u32 = 0x0000_0004;
 
-                Self {
-                    renderer,
-                    opengl_version,
-                    is_supported,
-                    raw_info: text.to_string(),
+        #[repr(C)]
+        struct DisplayDeviceW {
+            cb: u32,
+            device_name: [u16; 32],
+            device_string: [u16; 128],
+            state_flags: u32,
+            device_id: [u16; 128],
+            device_key: [u16; 128],
+        }
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn EnumDisplayDevicesW(
+                lp_device: *const u16,
+                i_dev_num: u32,
+                lp_display_device: *mut DisplayDeviceW,
+                dw_flags: u32,
+            ) -> i32;
+        }
+
+        let decode_wide = |buf: &[u16]| -> String {
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            String::from_utf16_lossy(&buf[..len]).trim().to_string()
+        };
+
+        let mut primary_adapter: Option<String> = None;
+        let mut active_adapter: Option<String> = None;
+        let mut all_adapters: Vec<String> = Vec::new();
+
+        for idx in 0..16u32 {
+            let mut dd = DisplayDeviceW {
+                cb: std::mem::size_of::<DisplayDeviceW>() as u32,
+                device_name: [0u16; 32],
+                device_string: [0u16; 128],
+                state_flags: 0,
+                device_id: [0u16; 128],
+                device_key: [0u16; 128],
+            };
+            // SAFETY: `dd` is properly initialized with exact `cb` size for `EnumDisplayDevicesW`.
+            let ok = unsafe { EnumDisplayDevicesW(std::ptr::null(), idx, &mut dd, 0) };
+            if ok == 0 {
+                break;
+            }
+            let adapter = decode_wide(&dd.device_string);
+            if adapter.is_empty() {
+                continue;
+            }
+            if (dd.state_flags & DISPLAY_DEVICE_ACTIVE) != 0 {
+                if !all_adapters.contains(&adapter) {
+                    all_adapters.push(adapter.clone());
+                }
+                if (dd.state_flags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0
+                    && primary_adapter.is_none()
+                {
+                    primary_adapter = Some(adapter.clone());
+                }
+                if active_adapter.is_none() {
+                    active_adapter = Some(adapter);
                 }
             }
-            _ => Self {
-                renderer: "OpenGL probe unavailable (glxinfo not found)".to_string(),
-                opengl_version: "Unknown".to_string(),
-                is_supported: true,
-                raw_info: String::new(),
-            },
+        }
+
+        let renderer = primary_adapter
+            .or(active_adapter)
+            .unwrap_or_else(|| "Windows Display Adapter".to_string());
+        let is_software = renderer
+            .to_ascii_lowercase()
+            .contains("microsoft basic display");
+
+        Self {
+            renderer,
+            opengl_version: "Windows WGL / OpenGL".to_string(),
+            is_supported: !is_software,
+            raw_info: all_adapters.join("\n"),
         }
     }
 }
@@ -177,9 +268,9 @@ impl ShaderManager {
             "# Generated by MQ Launcher\nenableShaders={enabled_str}\nshaderPack={pack_str}\n"
         );
 
-        fs::write(config_dir.join("iris.properties"), &content)
+        mq_core::platform::atomic_write(&config_dir.join("iris.properties"), content.as_bytes())
             .context("Failed to write iris.properties")?;
-        fs::write(config_dir.join("oculus.properties"), &content)
+        mq_core::platform::atomic_write(&config_dir.join("oculus.properties"), content.as_bytes())
             .context("Failed to write oculus.properties")?;
         Ok(())
     }

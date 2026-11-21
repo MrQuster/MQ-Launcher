@@ -354,25 +354,27 @@ pub struct FlexibleLoggingClient {
     pub logging_type: Option<String>,
 }
 
-/// Helper that evaluates a rule against the current platform.
-fn evaluate_rule(rule: &FlexibleRule, ctx: &RuleContext) -> bool {
-    let action_allow = rule.action.as_deref().unwrap_or("allow") == "allow";
-
+/// Evaluates whether a single rule's OS/arch/version/feature conditions match `ctx`.
+fn rule_matches(rule: &FlexibleRule, ctx: &RuleContext) -> bool {
     if let Some(ref os) = rule.os {
         if let Some(ref os_name) = os.name {
-            let matches_os = match os_name.to_lowercase().as_str() {
-                "linux" => ctx.os_name == "linux",
-                "osx" | "macos" => ctx.os_name == "osx",
-                "windows" => ctx.os_name == "windows",
-                _ => false,
-            };
-            if !matches_os {
-                return !action_allow;
+            if mq_meta::rules::normalize_os_name(os_name)
+                != mq_meta::rules::normalize_os_name(&ctx.os_name)
+            {
+                return false;
             }
         }
         if let Some(ref arch) = os.arch {
-            if arch.to_lowercase() != ctx.os_arch.to_lowercase() {
-                return !action_allow;
+            if mq_meta::rules::normalize_arch(arch) != mq_meta::rules::normalize_arch(&ctx.os_arch)
+            {
+                return false;
+            }
+        }
+        if let Some(ref version_pattern) = os.version {
+            match ctx.os_version.as_deref() {
+                Some(actual_ver)
+                    if mq_meta::rules::os_version_matches(version_pattern, actual_ver) => {}
+                _ => return false,
             }
         }
     }
@@ -381,23 +383,28 @@ fn evaluate_rule(rule: &FlexibleRule, ctx: &RuleContext) -> bool {
         for (feat, &expected) in features {
             let actual = ctx.features.get(feat).copied().unwrap_or(false);
             if actual != expected {
-                return !action_allow;
+                return false;
             }
         }
     }
 
-    action_allow
+    true
 }
 
-/// Evaluates a list of rules: default is allowed if rules is empty.
+/// Evaluates a list of Mojang rules: default is allowed if `rules` is empty, otherwise
+/// starts disallowed and applies each matching rule in order.
 fn is_library_allowed(rules: &[FlexibleRule], ctx: &RuleContext) -> bool {
     if rules.is_empty() {
         return true;
     }
     let mut allowed = false;
     for rule in rules {
-        if evaluate_rule(rule, ctx) {
-            allowed = rule.action.as_deref().unwrap_or("allow") == "allow";
+        if rule_matches(rule, ctx) {
+            allowed = rule
+                .action
+                .as_deref()
+                .unwrap_or("allow")
+                .eq_ignore_ascii_case("allow");
         }
     }
     allowed
@@ -439,15 +446,31 @@ fn resolve_flexible_library(lib: &FlexibleLibrary, ctx: &RuleContext) -> Option<
             size: art.size.unwrap_or(0),
         });
 
+    let os_key = mq_meta::rules::normalize_os_name(&ctx.os_name);
+    let native_classifier_candidates: Vec<String> = if let Some(ref natives_map) = lib.natives {
+        if let Some(template) = natives_map.get(os_key) {
+            mq_meta::rules::expand_native_classifier_candidates(template, &ctx.os_arch)
+        } else {
+            Vec::new()
+        }
+    } else {
+        let mut fallback = vec![format!("natives-{os_key}")];
+        fallback.extend(mq_meta::rules::expand_native_classifier_candidates(
+            &format!("natives-{os_key}-${{arch}}"),
+            &ctx.os_arch,
+        ));
+        fallback.push(os_key.to_owned());
+        fallback
+    };
+
     let native_linux = lib
         .downloads
         .as_ref()
         .and_then(|d| d.classifiers.as_ref())
         .and_then(|classifiers| {
-            classifiers
-                .get("natives-linux")
-                .or_else(|| classifiers.get("natives-linux-x86_64"))
-                .or_else(|| classifiers.get("linux"))
+            native_classifier_candidates
+                .iter()
+                .find_map(|key| classifiers.get(key))
         })
         .map(|nat| ArtifactDownload {
             path: nat.path.clone().unwrap_or_default(),
@@ -1132,5 +1155,91 @@ mod tests {
         );
         assert_eq!(resolved.client_jar.size, 25000000); // Inherited from parent
         assert_eq!(resolved.libraries.len(), 2); // 1 child + 1 parent
+    }
+
+    #[test]
+    fn flexible_parser_evaluates_windows_rules_and_arch_natives_correctly() {
+        let json = r#"{
+            "id": "26.3-win-test",
+            "mainClass": "net.minecraft.client.main.Main",
+            "libraries": [
+                {
+                    "name": "org.lwjgl:lwjgl:3.3.3",
+                    "rules": [
+                        { "action": "allow" },
+                        { "action": "disallow", "os": { "name": "osx" } }
+                    ],
+                    "natives": {
+                        "windows": "natives-windows-${arch}",
+                        "linux": "natives-linux"
+                    },
+                    "downloads": {
+                        "artifact": {
+                            "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar",
+                            "url": "https://libraries.minecraft.net/lwjgl.jar",
+                            "size": 100
+                        },
+                        "classifiers": {
+                            "natives-windows-64": {
+                                "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows-64.jar",
+                                "url": "https://libraries.minecraft.net/lwjgl-win64.jar",
+                                "size": 200
+                            },
+                            "natives-windows-32": {
+                                "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows-32.jar",
+                                "url": "https://libraries.minecraft.net/lwjgl-win32.jar",
+                                "size": 190
+                            },
+                            "natives-linux": {
+                                "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar",
+                                "url": "https://libraries.minecraft.net/lwjgl-linux.jar",
+                                "size": 180
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "ca.weblite:java-objc-bridge:1.0.0",
+                    "rules": [
+                        { "action": "allow", "os": { "name": "osx" } }
+                    ],
+                    "downloads": {
+                        "artifact": {
+                            "path": "ca/weblite/java-objc-bridge/1.0.0/java-objc-bridge-1.0.0.jar",
+                            "url": "https://libraries.minecraft.net/objc.jar",
+                            "size": 50
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let doc = parse_version_document(json).expect("parse flexible doc");
+
+        let win64 = doc
+            .to_resolved_version(&RuleContext::windows_x86_64())
+            .expect("resolve win64");
+        assert_eq!(win64.libraries.len(), 1);
+        assert_eq!(
+            win64.libraries[0]
+                .native_linux
+                .as_ref()
+                .expect("win64 native")
+                .path,
+            "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows-64.jar"
+        );
+
+        let win32 = doc
+            .to_resolved_version(&RuleContext::windows_x86())
+            .expect("resolve win32");
+        assert_eq!(win32.libraries.len(), 1);
+        assert_eq!(
+            win32.libraries[0]
+                .native_linux
+                .as_ref()
+                .expect("win32 native")
+                .path,
+            "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows-32.jar"
+        );
     }
 }

@@ -177,12 +177,32 @@ fn diagnose_text(
         };
     }
 
-    // 7. Signal termination (SIGSEGV / SIGABRT / SIGTERM)
-    if matches!(exit_code, Some(139) | Some(134) | Some(143)) {
+    // 7. Signal / native exception termination (Unix SIGSEGV/SIGABRT/SIGTERM & Windows NTSTATUS)
+    if matches!(
+        exit_code,
+        Some(139)
+            | Some(134)
+            | Some(143)
+            | Some(-1_073_741_819) // 0xC0000005 STATUS_ACCESS_VIOLATION
+            | Some(-1_073_741_571) // 0xC00000FD STATUS_STACK_OVERFLOW
+            | Some(-1_073_740_791) // 0xC0000409 STATUS_STACK_BUFFER_OVERRUN
+    ) {
         let (sig_name, rec) = match exit_code {
             Some(139) => (
                 "SIGSEGV",
                 "Произошёл сбой нативной библиотеки или JVM (Segmentation Fault). Проверьте драйверы видеокарты, версию Java и нативные библиотеки.",
+            ),
+            Some(-1_073_741_819) => (
+                "ACCESS_VIOLATION / 0xC0000005",
+                "Произошёл сбой нативной библиотеки Windows (Access Violation, 0xC0000005). Чаще всего это связано с драйверами видеокарты (OpenGL/LWJGL), несовместимой Java или оверлеями.",
+            ),
+            Some(-1_073_741_571) => (
+                "STACK_OVERFLOW / 0xC00000FD",
+                "Переполнение стека нативного потока Windows (0xC00000FD). Проверьте моды и аргументы JVM (-Xss).",
+            ),
+            Some(-1_073_740_791) => (
+                "STACK_BUFFER_OVERRUN / 0xC0000409",
+                "Аварийное завершение процесса Windows (0xC0000409). Проверьте драйверы видеокарты и целостность нативных библиотек.",
             ),
             Some(134) => (
                 "SIGABRT",
@@ -241,8 +261,13 @@ fn extract_mod_candidates(text: &str, out: &mut Vec<String>) {
     for line in text.lines() {
         if line.contains(".jar") {
             for token in line.split_whitespace() {
-                if token.ends_with(".jar") || token.contains(".jar:") {
-                    let clean = token.trim_matches(|c: char| {
+                if token.ends_with(".jar") || token.contains(".jar:") || token.contains(".jar!") {
+                    let jar_part = token
+                        .split_once(".jar")
+                        .map(|(head, _)| format!("{head}.jar"))
+                        .unwrap_or_else(|| token.to_owned());
+                    let file_name = jar_part.rsplit(['/', '\\']).next().unwrap_or(&jar_part);
+                    let clean = file_name.trim_matches(|c: char| {
                         !c.is_alphanumeric() && c != '.' && c != '-' && c != '_'
                     });
                     if !clean.is_empty() && !out.contains(&clean.to_string()) && out.len() < 5 {

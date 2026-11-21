@@ -23,14 +23,17 @@ scoop install mq
 
 ## Portable Archive Layout (`mq-windows-x86_64-portable.zip`)
 
-The portable ZIP archive extracts into `mq-windows-x86_64-portable/` containing:
+The portable ZIP archive uses a flat root layout (compatible with Scoop, `install.ps1 -Portable`, and Windows Explorer "Extract All..."):
 
 ```text
-mq-windows-x86_64-portable/
-├── mq.exe          # Statically linked Windows x86_64 binary
-├── portable.flag   # Empty marker file enabling portable mode (data/ next to mq.exe)
-├── README.txt      # Quick-start and portable mode instructions
-└── LICENSE         # MIT License
+mq-windows-x86_64-portable.zip
+├── mq.exe                    # Statically linked Windows x86_64 binary
+├── portable.flag             # Marker file enabling portable mode (data/ next to mq.exe)
+├── mq.ico                    # Application icon
+├── run.bat                   # Quick-launch helper script
+├── README.txt                # Quick-start and portable mode instructions
+├── THIRD_PARTY_LICENSES.md   # Third-party license notices
+└── data/                     # Empty portable data root (preserved on upgrades)
 ```
 
 When `portable.flag` is present next to `mq.exe`, MQ stores all launcher data, instances, configs, and caches under `<exe_dir>\data\` (`data/config`, `data/cache`, `data/instances`, etc.) and writes nothing to the Windows Registry.
@@ -38,15 +41,5 @@ When `portable.flag` is present next to `mq.exe`, MQ stores all launcher data, i
 ### Building the Portable Archive Locally (PowerShell)
 
 ```powershell
-New-Item -ItemType Directory -Force dist/mq-windows-x86_64-portable | Out-Null
-Copy-Item target/x86_64-pc-windows-msvc/release/mq.exe dist/mq-windows-x86_64-portable/
-New-Item -ItemType File -Force dist/mq-windows-x86_64-portable/portable.flag | Out-Null
-Copy-Item LICENSE dist/mq-windows-x86_64-portable/LICENSE
-@"
-MQ Launcher (Portable Edition)
-==============================
-All data, instances, configs, and caches are stored in the 'data\' folder next to mq.exe
-because 'portable.flag' is present. Nothing is written to the Windows Registry.
-"@ | Set-Content -Encoding UTF8 dist/mq-windows-x86_64-portable/README.txt
-Compress-Archive -Path dist/mq-windows-x86_64-portable -DestinationPath dist/mq-windows-x86_64-portable.zip -Force
+pwsh -NoProfile -File packaging\windows\package-portable.ps1
 ```

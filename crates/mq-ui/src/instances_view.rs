@@ -517,7 +517,8 @@ impl InstancesView {
         }
 
         if let Some(picked) = state.picked_import_path.take() {
-            self.import_file_path = picked.display().to_string();
+            self.import_file_path =
+                crate::opener::strip_windows_verbatim_prefix(&picked.display().to_string());
             self.import_error = None;
             if !self.show_import_dialog {
                 self.show_import_dialog = true;
@@ -574,7 +575,8 @@ impl InstancesView {
                 None
             };
             if let Some(p) = dropped_file {
-                self.import_file_path = p.display().to_string();
+                self.import_file_path =
+                    crate::opener::strip_windows_verbatim_prefix(&p.display().to_string());
                 self.import_error = None;
             }
 
@@ -636,10 +638,15 @@ impl InstancesView {
                     );
                     ui.horizontal(|ui| {
                         let input_w = (modal_w - 148.0).max(180.0);
+                        let import_hint = if cfg!(target_os = "windows") {
+                            r"C:\Users\...\modpack.mrpack"
+                        } else {
+                            "/path/to/modpack.mrpack"
+                        };
                         if ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.import_file_path)
-                                    .hint_text("/path/to/modpack.mrpack")
+                                    .hint_text(import_hint)
                                     .desired_width(input_w),
                             )
                             .changed()
@@ -675,11 +682,9 @@ impl InstancesView {
                         if primary_emerald_button(ui, Some(VectorIcon::Check), "Импортировать")
                             .clicked()
                         {
-                            let trimmed_path = self
-                                .import_file_path
-                                .trim()
-                                .trim_matches('"')
-                                .trim_matches('\'');
+                            let cleaned_path =
+                                crate::opener::clean_user_path(&self.import_file_path);
+                            let trimmed_path = cleaned_path.as_str();
                             let path = std::path::Path::new(trimmed_path);
                             if trimmed_path.is_empty() {
                                 self.import_error =
@@ -3103,12 +3108,10 @@ impl InstancesView {
                 || submitted)
                 && can_add
             {
-                let trimmed = self
-                    .local_file_input
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'');
-                candidates.push(std::path::PathBuf::from(trimmed));
+                let cleaned = crate::opener::clean_user_path(&self.local_file_input);
+                if !cleaned.is_empty() {
+                    candidates.push(std::path::PathBuf::from(cleaned));
+                }
                 self.local_file_input.clear();
             }
         });
@@ -4775,7 +4778,12 @@ impl InstancesView {
             ui.add(egui::Slider::new(&mut inst.memory_max_mb, 1024..=16384).step_by(512.0));
 
             ui.add_space(8.0);
-            ui.label("Команда-враппер запуска (например, gamemoderun, mangohud, prime-run):");
+            let wrapper_label = if cfg!(target_os = "windows") {
+                "Команда-обёртка запуска (необязательно; на Windows обычно не требуется):"
+            } else {
+                "Команда-враппер запуска (например, gamemoderun, mangohud, prime-run):"
+            };
+            ui.label(wrapper_label);
             let mut wrapper_str = inst.wrapper_cmd.clone().unwrap_or_default();
             if ui.text_edit_singleline(&mut wrapper_str).changed() {
                 inst.wrapper_cmd = if wrapper_str.trim().is_empty() {
@@ -4911,13 +4919,22 @@ impl InstancesView {
     }
 }
 
+fn strip_disabled_suffix(filename: &str) -> Option<&str> {
+    let (stem, ext) = filename.rsplit_once('.')?;
+    if !stem.is_empty() && ext.eq_ignore_ascii_case("disabled") {
+        Some(stem)
+    } else {
+        None
+    }
+}
+
 fn list_packs_in_dir(dir: &std::path::Path) -> Vec<(String, bool, u64)> {
     let mut packs = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let is_disabled = name.ends_with(".disabled");
+            let is_disabled = strip_disabled_suffix(&name).is_some();
             let size = if path.is_file() {
                 entry.metadata().map(|m| m.len()).unwrap_or(0)
             } else {
@@ -4932,12 +4949,16 @@ fn list_packs_in_dir(dir: &std::path::Path) -> Vec<(String, bool, u64)> {
 
 fn toggle_pack_file(dir: &std::path::Path, filename: &str) {
     let src = dir.join(filename);
-    let dst = if filename.ends_with(".disabled") {
-        dir.join(filename.trim_end_matches(".disabled"))
+    let dst = if let Some(enabled_name) = strip_disabled_suffix(filename) {
+        dir.join(enabled_name)
     } else {
         dir.join(format!("{filename}.disabled"))
     };
-    let _ = std::fs::rename(src, dst);
+    if std::fs::rename(&src, &dst).is_err() && dst.is_file() {
+        // On Windows, `rename` fails if the destination file already exists.
+        let _ = std::fs::remove_file(&dst);
+        let _ = std::fs::rename(&src, &dst);
+    }
 }
 
 fn delete_pack_file(dir: &std::path::Path, filename: &str) {
@@ -4955,6 +4976,8 @@ fn install_local_content_file(
     src_path: &std::path::Path,
     allowed_exts: &[&str],
 ) -> Result<String, String> {
+    let cleaned_src = crate::opener::clean_user_path(&src_path.to_string_lossy());
+    let src_path = std::path::Path::new(&cleaned_src);
     if !src_path.exists() || !src_path.is_file() {
         return Err(format!("Файл не найден: {}", src_path.display()));
     }
@@ -4964,15 +4987,22 @@ fn install_local_content_file(
         .map(str::to_string)
         .ok_or_else(|| "Некорректное имя файла".to_string())?;
     let lower = file_name.to_ascii_lowercase();
-    if !allowed_exts.iter().any(|ext| lower.ends_with(ext)) {
+    if !allowed_exts
+        .iter()
+        .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()))
+    {
         return Err(format!(
             "Неподдерживаемый формат файла «{}» (ожидается {})",
             file_name,
             allowed_exts.join(", ")
         ));
     }
-    std::fs::create_dir_all(target_dir)
-        .map_err(|e| format!("Не удалось создать папку {}: {e}", target_dir.display()))?;
+    std::fs::create_dir_all(target_dir).map_err(|e| {
+        format!(
+            "Не удалось создать папку {}: {e}",
+            crate::opener::strip_windows_verbatim_prefix(&target_dir.display().to_string())
+        )
+    })?;
     let dst_path = target_dir.join(&file_name);
     let same_file = matches!(
         (
@@ -5151,6 +5181,29 @@ mod tests {
         let err = install_local_content_file(&dst_dir, &txt_path, &[".jar"])
             .expect_err("txt should be rejected");
         assert!(err.contains(".jar"), "unexpected error: {err}");
+
+        // Windows case-insensitive uppercase `.JAR` and `.DISABLED` suffix handling
+        let upper_jar = src_dir.join("IRIS-SHADER.JAR");
+        std::fs::write(&upper_jar, b"upper-jar").expect("write upper jar");
+        let installed_upper =
+            install_local_content_file(&dst_dir, &upper_jar, &[".JAR"]).expect("case-insensitive");
+        assert_eq!(installed_upper, "IRIS-SHADER.JAR");
+
+        toggle_pack_file(&dst_dir, "IRIS-SHADER.JAR");
+        assert!(dst_dir.join("IRIS-SHADER.JAR.disabled").is_file());
+        std::fs::rename(
+            dst_dir.join("IRIS-SHADER.JAR.disabled"),
+            dst_dir.join("IRIS-SHADER.JAR.DISABLED"),
+        )
+        .expect("rename to uppercase DISABLED");
+        let packs = list_packs_in_dir(&dst_dir);
+        let iris_entry = packs
+            .iter()
+            .find(|(n, _, _)| n == "IRIS-SHADER.JAR.DISABLED")
+            .expect("listed uppercase disabled pack");
+        assert!(!iris_entry.1, "uppercase .DISABLED must report as disabled");
+        toggle_pack_file(&dst_dir, "IRIS-SHADER.JAR.DISABLED");
+        assert!(dst_dir.join("IRIS-SHADER.JAR").is_file());
     }
 
     #[test]

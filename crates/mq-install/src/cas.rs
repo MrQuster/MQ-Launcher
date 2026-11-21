@@ -213,6 +213,7 @@ impl CasStore {
         }
 
         if target_path.exists() || target_path.symlink_metadata().is_ok() {
+            clear_readonly_if_set(target_path);
             remove_file_with_retry(target_path)?;
         }
 
@@ -270,6 +271,7 @@ pub fn copy_chunked_atomic(src: &Path, target_path: &Path) -> MqResult<u64> {
         drop(writer);
 
         if target_path.exists() || target_path.symlink_metadata().is_ok() {
+            clear_readonly_if_set(target_path);
             let _ = remove_file_with_retry(target_path);
         }
         rename_with_retry(&tmp_path, target_path)?;
@@ -282,6 +284,19 @@ pub fn copy_chunked_atomic(src: &Path, target_path: &Path) -> MqResult<u64> {
     }
 
     write_res.map_err(MqError::Io)
+}
+
+/// Clears the read-only permission bit on `path` when present so Windows overwrites and unlinks
+/// succeed immediately without waiting for retry backoff.
+fn clear_readonly_if_set(path: &Path) {
+    if let Ok(meta) = fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(path, perms);
+        }
+    }
 }
 
 /// Computes the SHA-1 digest of `path` using a 64 KiB stack buffer without allocating
@@ -391,5 +406,40 @@ mod tests {
         let written = copy_chunked_atomic(&src, &dst).expect("copy_chunked_atomic");
         assert_eq!(written, data.len() as u64);
         assert_eq!(fs::read(&dst).expect("read dst"), data);
+    }
+
+    #[test]
+    fn cas_link_and_atomic_copy_overwrite_readonly_targets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path());
+        paths.ensure_dirs().expect("ensure dirs");
+        let cas = CasStore::new(paths.clone());
+
+        let payload = b"fresh-jar-contents";
+        let digest = sha1_of(payload);
+        let staging = tmp.path().join("fresh.jar");
+        fs::write(&staging, payload).expect("write staging");
+        cas.store_verified_file(&staging, digest)
+            .expect("store in cas");
+
+        let target = tmp.path().join("readonly_target.jar");
+        fs::write(&target, b"old-readonly-bytes").expect("write stale");
+        let mut perms = fs::metadata(&target).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&target, perms).expect("set readonly");
+
+        cas.link_to_target(&digest, &target)
+            .expect("link_to_target must overwrite readonly target");
+        assert_eq!(fs::read(&target).expect("read linked"), payload);
+
+        let copy_target = tmp.path().join("readonly_copy_target.jar");
+        fs::write(&copy_target, b"old-copy").expect("write copy stale");
+        let mut perms2 = fs::metadata(&copy_target).unwrap().permissions();
+        perms2.set_readonly(true);
+        fs::set_permissions(&copy_target, perms2).expect("set readonly");
+
+        copy_chunked_atomic(&staging, &copy_target)
+            .expect("copy_chunked_atomic must overwrite readonly target");
+        assert_eq!(fs::read(&copy_target).expect("read copied"), payload);
     }
 }

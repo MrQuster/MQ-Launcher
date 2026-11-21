@@ -4,12 +4,15 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use dashmap::DashMap;
-use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry, strip_windows_verbatim_prefix};
 use mq_core::{MqError, MqResult};
 use serde::{Deserialize, Serialize};
+
+static STATE_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Installation stages representing the end-to-end installation lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -235,13 +238,17 @@ impl InstallState {
     pub fn save(&self, instance_dir: &Path) -> MqResult<()> {
         let path = instance_dir.join(INSTALL_STATE_FILENAME);
         let pid = std::process::id();
-        let tmp_path = instance_dir.join(format!(".{INSTALL_STATE_FILENAME}.{pid}.tmp"));
+        let seq = STATE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = instance_dir.join(format!(".{INSTALL_STATE_FILENAME}.{pid}.{seq}.tmp"));
 
         let json = serde_json::to_string_pretty(self).map_err(MqError::Json)?;
 
         std::fs::create_dir_all(instance_dir)?;
         std::fs::write(&tmp_path, json.as_bytes())?;
-        rename_with_retry(&tmp_path, &path)?;
+        if let Err(err) = rename_with_retry(&tmp_path, &path) {
+            let _ = remove_file_with_retry(&tmp_path);
+            return Err(MqError::Io(err));
+        }
         Ok(())
     }
 
@@ -293,6 +300,12 @@ pub fn available_disk_space(path: &Path) -> MqResult<u64> {
                 check_path = Path::new(".");
                 break;
             }
+        }
+    }
+    // Windows `GetDiskFreeSpaceExW` requires a directory path rather than a regular file path.
+    if check_path.is_file() {
+        if let Some(parent) = check_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            check_path = parent;
         }
     }
 
@@ -376,15 +389,16 @@ static IN_PROCESS_LOCKS: LazyLock<DashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>
 #[derive(Debug)]
 pub struct InstanceInstallLock {
     lock_file_path: PathBuf,
-    file: File,
+    file: Option<File>,
     _permit: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl InstanceInstallLock {
     pub async fn acquire(instance_dir: &Path, instance_id: &str) -> MqResult<Self> {
         std::fs::create_dir_all(instance_dir)?;
-        let canonical_dir =
-            std::fs::canonicalize(instance_dir).unwrap_or_else(|_| instance_dir.to_path_buf());
+        let canonical_dir = strip_windows_verbatim_prefix(
+            &std::fs::canonicalize(instance_dir).unwrap_or_else(|_| instance_dir.to_path_buf()),
+        );
 
         // 1. In-process locking
         let mutex = IN_PROCESS_LOCKS
@@ -437,7 +451,7 @@ impl InstanceInstallLock {
 
         Ok(Self {
             lock_file_path,
-            file,
+            file: Some(file),
             _permit: permit,
         })
     }
@@ -445,8 +459,13 @@ impl InstanceInstallLock {
 
 impl Drop for InstanceInstallLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        let _ = rustix::fs::flock(&self.file, rustix::fs::FlockOperation::Unlock);
+        // Close the file handle BEFORE removing `.install.lock` so Windows does not fail
+        // deletion with ERROR_SHARING_VIOLATION while holding an exclusive `share_mode(0)` handle.
+        if let Some(file) = self.file.take() {
+            #[cfg(unix)]
+            let _ = rustix::fs::flock(&file, rustix::fs::FlockOperation::Unlock);
+            drop(file);
+        }
         let _ = remove_file_with_retry(&self.lock_file_path);
     }
 }

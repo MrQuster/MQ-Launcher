@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
 use flate2::read::GzDecoder;
-use mq_core::{MqError, MqResult};
+use mq_core::fs_util::{remove_dir_all_with_retry, validate_windows_safe_filename};
+use mq_core::platform::sanitize_filename;
+use mq_core::{resolve_safe_path, MqError, MqResult};
 use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
@@ -217,7 +219,8 @@ pub fn backup_world(
     fs::create_dir_all(&target_dir)?;
 
     let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S");
-    let zip_name = format!("{world_folder}_{timestamp}.zip");
+    let safe_world = sanitize_filename(world_folder);
+    let zip_name = format!("{safe_world}_{timestamp}.zip");
     let zip_path = target_dir.join(&zip_name);
 
     export_world_to_zip(instance_dir, world_folder, &zip_path)?;
@@ -234,7 +237,12 @@ pub fn list_backups(backups_root: &Path, instance_id: &str) -> MqResult<Vec<Worl
     let mut backups = Vec::new();
     for entry in fs::read_dir(&target_dir)?.flatten() {
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("zip") {
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+        {
             let file_name = entry.file_name().to_string_lossy().into_owned();
             let meta = entry.metadata()?;
             let size_bytes = meta.len();
@@ -277,39 +285,84 @@ pub fn restore_world(
         .unwrap_or_else(|| {
             backup_file_name
                 .trim_end_matches(".zip")
+                .trim_end_matches(".ZIP")
                 .split('_')
                 .next()
                 .unwrap_or("RestoredWorld")
                 .to_string()
         });
+    let safe_folder = if validate_windows_safe_filename(&resolved_folder) {
+        resolved_folder
+    } else {
+        sanitize_filename(&resolved_folder)
+    };
 
     let saves_dir = instance_dir.join("saves");
     fs::create_dir_all(&saves_dir)?;
-    let dest_dir = saves_dir.join(&resolved_folder);
-
-    if dest_dir.exists() {
-        fs::remove_dir_all(&dest_dir)?;
-    }
-    fs::create_dir_all(&dest_dir)?;
+    let dest_dir = resolve_safe_path(&saves_dir, &safe_folder)?;
 
     let file = File::open(&backup_path)?;
     let mut archive = ZipArchive::new(file)
         .map_err(|e| MqError::Internal(format!("failed to open backup ZIP archive: {e}")))?;
+
+    // Pre-validate every entry against Zip-Slip, Windows drive prefixes, NUL bytes, and symlinks
+    // before touching any existing world save directory.
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index_raw(i)
+            .map_err(|e| MqError::Internal(format!("corrupted entry in backup ZIP: {e}")))?;
+        let raw_name = entry.name();
+        if entry.is_symlink()
+            || entry
+                .unix_mode()
+                .is_some_and(|m| (m & 0o170000) == 0o120000)
+        {
+            return Err(MqError::ZipSlip {
+                entry: raw_name.to_owned(),
+            });
+        }
+        let has_windows_drive = raw_name.len() >= 2
+            && raw_name.as_bytes()[0].is_ascii_alphabetic()
+            && raw_name.as_bytes()[1] == b':';
+        if raw_name.contains('\0')
+            || has_windows_drive
+            || raw_name.starts_with('/')
+            || raw_name.starts_with('\\')
+        {
+            return Err(MqError::ZipSlip {
+                entry: raw_name.to_owned(),
+            });
+        }
+        let normalized = raw_name.replace('\\', "/");
+        if normalized.split('/').any(|seg| seg == "..") {
+            return Err(MqError::ZipSlip {
+                entry: raw_name.to_owned(),
+            });
+        }
+        let trimmed = normalized.trim_end_matches('/');
+        if !trimmed.is_empty() {
+            let _ = resolve_safe_path(&dest_dir, trimmed)?;
+        }
+    }
+
+    if dest_dir.exists() {
+        remove_dir_all_with_retry(&dest_dir)?;
+    }
+    fs::create_dir_all(&dest_dir)?;
 
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| MqError::Internal(format!("corrupted entry in backup ZIP: {e}")))?;
 
-        let entry_name = entry.name().to_string();
-        // Prevent Zip Slip
-        if entry_name.contains("..") || entry_name.starts_with('/') || entry_name.starts_with('\\')
-        {
+        let raw_name = entry.name().to_string();
+        let normalized = raw_name.replace('\\', "/");
+        let trimmed = normalized.trim_end_matches('/');
+        if trimmed.is_empty() {
             continue;
         }
-
-        let out_path = dest_dir.join(&entry_name);
-        if entry.is_dir() {
+        let out_path = resolve_safe_path(&dest_dir, trimmed)?;
+        if entry.is_dir() || raw_name.ends_with('/') || raw_name.ends_with('\\') {
             fs::create_dir_all(&out_path)?;
         } else {
             if let Some(parent) = out_path.parent() {
@@ -383,7 +436,7 @@ pub fn export_world_to_zip(
 pub fn delete_world(instance_dir: &Path, world_folder: &str) -> MqResult<()> {
     let world_dir = instance_dir.join("saves").join(world_folder);
     if world_dir.exists() {
-        fs::remove_dir_all(&world_dir)?;
+        remove_dir_all_with_retry(&world_dir)?;
     }
     Ok(())
 }

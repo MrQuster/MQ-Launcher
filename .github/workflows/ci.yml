@@ -43,7 +43,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test-linux:
     name: Test Linux (x86_64)
@@ -76,18 +76,20 @@ jobs:
             ${{ runner.os }}-cargo-test-linux-
 
       - name: Run workspace tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Run installer tests
         run: bash scripts/test-installer.sh
 
       - name: Build release binary
-        run: cargo build --release -p mq-cli
+        run: cargo build --release --locked -p mq-cli
 
-      - name: Dry-run launch verification
+      - name: CLI smoke verification
         run: |
           ./target/release/mq --version
-          ./target/release/mq launch --dry-run || true
+          ./target/release/mq --help >/dev/null
+          ./target/release/mq launch --help >/dev/null
+          ./target/release/mq about >/dev/null
 
       - name: Verify no test-hooks in release binary
         run: |
@@ -119,6 +121,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: stable
+          components: clippy
 
       - name: Rust Cache
         uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca
@@ -133,6 +136,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-win-
 
+      - name: Clippy workspace (Windows)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
       - name: Windows Unit Tests
         run: cargo test --workspace --locked
 
@@ -141,7 +147,7 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked -p mq-cli
 
-      - name: Verify static CRT and PE metadata
+      - name: Verify static CRT, PE metadata, and application manifest
         shell: pwsh
         run: |
           $exe = ".\target\release\mq.exe"
@@ -149,6 +155,13 @@ jobs:
           Write-Host "PE CompanyName=$($vi.CompanyName) ProductName=$($vi.ProductName) FileVersion=$($vi.FileVersion)"
           if ($vi.CompanyName -ne "MrQuster") {
             throw "Expected PE CompanyName 'MrQuster', got '$($vi.CompanyName)'"
+          }
+          $rawText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($exe))
+          if ($rawText -notmatch "<longPathAware[^>]*>true</longPathAware>") {
+            throw "mq.exe is missing <longPathAware>true</longPathAware> in embedded Windows manifest"
+          }
+          if ($rawText -notmatch "<dpiAwareness[^>]*>PerMonitorV2") {
+            throw "mq.exe is missing PerMonitorV2 <dpiAwareness> in embedded Windows manifest"
           }
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (Test-Path $vswhere) {
@@ -167,13 +180,28 @@ jobs:
       - name: Verify Windows binary & CLI smoke checks
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $env:MQ_DATA_DIR = Join-Path $env:RUNNER_TEMP "mq-win-ci-data"
           New-Item -ItemType Directory -Force -Path $env:MQ_DATA_DIR | Out-Null
-          .\target\release\mq.exe --version
+          $verOut = (& .\target\release\mq.exe --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $verOut -notmatch "^mq\s+\d+\.\d+") {
+            throw "mq.exe --version failed (exit=$LASTEXITCODE, out='$verOut')"
+          }
+          Write-Host "mq.exe --version => $verOut"
+          $helpOut = (& .\target\release\mq.exe --help | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $helpOut -notmatch "Windows") {
+            throw "mq.exe --help failed (exit=$LASTEXITCODE)"
+          }
+          .\target\release\mq.exe launch --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "mq.exe launch --help failed" }
           .\target\release\mq.exe instances list
+          if ($LASTEXITCODE -ne 0) { throw "mq.exe instances list failed" }
           .\target\release\mq.exe instances create "WinTest 1.20.1" --version 1.20.1 --loader vanilla
+          if ($LASTEXITCODE -ne 0) { throw "mq.exe instances create failed" }
           .\target\release\mq.exe instances list
-          .\target\release\mq.exe launch --dry-run || $true
+          if ($LASTEXITCODE -ne 0) { throw "mq.exe instances list (2) failed" }
+          .\target\release\mq.exe doctor
+          if ($LASTEXITCODE -ne 0) { throw "mq.exe doctor failed" }
           .\target\release\mq.exe doctor --install 1.21.1 --json || $true
 
       - name: Test Windows Inno Setup Installer

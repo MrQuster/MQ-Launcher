@@ -160,7 +160,8 @@ impl ModLockFile {
         let path = mods_dir.join(LOCKFILE_NAME);
         let content =
             serde_json::to_string_pretty(self).context("Failed to serialize mod lockfile")?;
-        fs::write(&path, content).context("Failed to write mod lockfile")?;
+        mq_core::platform::atomic_write(&path, content.as_bytes())
+            .context("Failed to write mod lockfile")?;
         Ok(())
     }
 

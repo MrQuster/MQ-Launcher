@@ -1,21 +1,133 @@
 //! Self-update engine for MQ Launcher.
 //! Implements GitHub Releases polling, minisign signature verification, SHA-256 integrity,
 //! atomic `<exe>.new` substitution, downgrade protection, smoke-testing, rollback,
-//! and package-manager safety.
+//! and package-manager safety across Linux and Windows.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use mq_core::fs_util::{
+    is_transient_windows_lock_error, remove_dir_all_with_retry, remove_file_with_retry,
+    rename_with_retry, strip_windows_verbatim_prefix, RETRY_DELAYS_MS,
+};
+#[cfg(target_os = "windows")]
+use mq_core::WINDOWS_CREATE_NO_WINDOW;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
 /// Embedded minisign public key for validating release checksums and binaries.
 pub const MQ_RELEASE_PUBLIC_KEY: &str = "RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt";
+
+/// Appends `suffix` (such as `".old"` or `".failed"`) to `exe` without replacing an existing `.exe` extension.
+///
+/// - Linux: `/home/user/.local/bin/mq` + `".old"` -> `/home/user/.local/bin/mq.old`
+/// - Windows: `C:\MQ\mq.exe` + `".old"` -> `C:\MQ\mq.exe.old`
+pub fn binary_sidecar_path(exe: &Path, suffix: &str) -> PathBuf {
+    let mut os = exe.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+/// Computes the staged new-binary path adjacent to `exe`.
+///
+/// On Windows binaries ending with `.exe`, preserves the `.exe` extension (`mq.exe` -> `mq.new.exe`)
+/// so Windows `CreateProcess`, AppLocker, and antivirus scanners recognize it as a valid executable
+/// during the `--version` smoke-test. On Unix, appends `.new` (`mq` -> `mq.new`).
+pub fn staged_new_binary_path(exe: &Path) -> PathBuf {
+    if let Some(name) = exe.file_name().and_then(|n| n.to_str()) {
+        let bytes = name.as_bytes();
+        if bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
+            let split = bytes.len() - 4;
+            let stem = &name[..split];
+            let ext = &name[split..];
+            return exe.with_file_name(format!("{stem}.new{ext}"));
+        }
+    }
+    binary_sidecar_path(exe, ".new")
+}
+
+/// If `exe` ends with a `.old` backup suffix (for example after renaming the running binary
+/// to `<exe>.old` before restarting), returns the path with `.old` stripped.
+pub fn strip_old_backup_suffix(exe: &Path) -> Option<PathBuf> {
+    let clean = strip_windows_verbatim_prefix(exe);
+    let name = clean.file_name()?.to_str()?;
+    let stripped = name.strip_suffix(".old")?;
+    if stripped.is_empty() {
+        return None;
+    }
+    Some(clean.with_file_name(stripped))
+}
+
+fn run_command_output_with_av_retry(
+    mut build_cmd: impl FnMut() -> Command,
+) -> std::io::Result<Output> {
+    let mut attempt = 0;
+    loop {
+        let mut cmd = build_cmd();
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+        }
+        match cmd.output() {
+            Ok(out) => return Ok(out),
+            Err(err)
+                if is_transient_windows_lock_error(&err) && attempt < RETRY_DELAYS_MS.len() =>
+            {
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn spawn_command_with_av_retry(
+    mut build_cmd: impl FnMut() -> Command,
+) -> std::io::Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        let mut cmd = build_cmd();
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(err)
+                if is_transient_windows_lock_error(&err) && attempt < RETRY_DELAYS_MS.len() =>
+            {
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Performs the atomic binary swap `current_exe -> old_exe`, `new_exe -> current_exe`,
+/// with transient Windows Defender retry and immediate rollback if moving `new_exe` fails.
+pub fn swap_binary_files(current_exe: &Path, new_exe: &Path, old_exe: &Path) -> Result<()> {
+    if old_exe.exists() {
+        let _ = remove_file_with_retry(old_exe);
+    }
+
+    if let Err(e) = rename_with_retry(current_exe, old_exe) {
+        let _ = remove_file_with_retry(new_exe);
+        bail!("Failed to rename current binary to old: {e}");
+    }
+
+    if let Err(e) = rename_with_retry(new_exe, current_exe) {
+        // Rollback immediately so the launcher binary is never left missing.
+        let _ = rename_with_retry(old_exe, current_exe);
+        let _ = remove_file_with_retry(new_exe);
+        bail!("Failed to install new binary: {e}. Restored old binary.");
+    }
+
+    Ok(())
+}
 
 /// Minisign signature verifier for release manifests and checksums.
 pub struct MinisignVerifier;
@@ -67,22 +179,50 @@ pub fn inno_silent_args() -> [&'static str; 3] {
     ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
 }
 
-/// Extracts the SHA-256 hex digest for the first matching filename in `SHA256SUMS`.
+/// Extracts the SHA-256 hex digest for the highest-priority matching filename in `SHA256SUMS`.
+///
+/// Handles UTF-8 BOM (`\u{FEFF}`), CRLF (`\r\n`) and LF (`\n`) line endings, binary-mode `*`
+/// markers (`<hash> *file`), relative prefixes (`./file`, `.\file`), and filenames with spaces.
 pub fn extract_sha256_for_targets(
     checksums_text: &str,
     target_filenames: &[&str],
 ) -> Option<String> {
-    for line in checksums_text.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let hash = parts[0];
-            let filename = parts[1].trim_start_matches('*');
-            if target_filenames.contains(&filename) {
-                return Some(hash.to_string());
+    let mut best_match: Option<(usize, String)> = None;
+
+    for raw_line in checksums_text.trim_start_matches('\u{FEFF}').lines() {
+        let line = raw_line.trim_start_matches('\u{FEFF}').trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(ws_idx) = line.find(char::is_whitespace) else {
+            continue;
+        };
+        let hash = &line[..ws_idx];
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let rest = line[ws_idx..].trim_start();
+        let filename = rest
+            .strip_prefix('*')
+            .unwrap_or(rest)
+            .trim_start_matches("./")
+            .trim_start_matches(r".\");
+
+        if let Some(priority) = target_filenames.iter().position(|&t| t == filename) {
+            let normalized = hash.to_ascii_lowercase();
+            if priority == 0 {
+                return Some(normalized);
+            }
+            if best_match
+                .as_ref()
+                .is_none_or(|(best_prio, _)| priority < *best_prio)
+            {
+                best_match = Some((priority, normalized));
             }
         }
     }
-    None
+
+    best_match.map(|(_, hash)| hash)
 }
 
 /// Verifies `SHA256SUMS` against a Minisign signature using `public_key_base64` and extracts the SHA-256 for `target_filenames`.
@@ -167,8 +307,9 @@ pub struct UpdateManager {
 impl UpdateManager {
     pub fn new(repo_owner: &str, repo_name: &str) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("mq-updater")
-            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(concat!("mq-updater/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
 
@@ -187,18 +328,50 @@ impl UpdateManager {
 
     /// Check if the binary is located under `/usr/` or an unwriteable system directory.
     pub fn is_packaged_install() -> bool {
-        if let Ok(exe_path) = std::env::current_exe() {
-            let path_str = exe_path.to_string_lossy();
+        if let Ok(raw_exe) = std::env::current_exe() {
+            let exe_path = strip_windows_verbatim_prefix(&raw_exe);
+
             #[cfg(unix)]
             {
+                let path_str = exe_path.to_string_lossy();
                 if path_str.starts_with("/usr/") || path_str.starts_with("/var/") {
                     return true;
                 }
+                if let Some(parent) = exe_path.parent() {
+                    if let Ok(metadata) = fs::metadata(parent) {
+                        if metadata.permissions().readonly() {
+                            return true;
+                        }
+                    }
+                }
             }
-            if let Some(parent) = exe_path.parent() {
-                if let Ok(metadata) = fs::metadata(parent) {
-                    if metadata.permissions().readonly() {
-                        return true;
+
+            #[cfg(target_os = "windows")]
+            {
+                // Inno Setup installations manage their own updates via MQ-Setup-*-x64.exe.
+                if Self::is_windows_inno_setup() {
+                    return false;
+                }
+                // On Windows, directory `FILE_ATTRIBUTE_READONLY` is used by Explorer for
+                // desktop.ini / OneDrive customization and does NOT indicate ACL write-protection.
+                // Probe actual write access in the binary's parent directory instead.
+                if let Some(parent) = exe_path.parent() {
+                    let probe = parent.join(format!(".mq-write-probe.{}", std::process::id()));
+                    match fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&probe)
+                    {
+                        Ok(file) => {
+                            drop(file);
+                            let _ = remove_file_with_retry(&probe);
+                            return false;
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                            let _ = remove_file_with_retry(&probe);
+                            return false;
+                        }
+                        Err(_) => return true,
                     }
                 }
             }
@@ -210,7 +383,8 @@ impl UpdateManager {
     pub fn is_windows_inno_setup() -> bool {
         if cfg!(target_os = "windows") {
             if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
+                let clean_exe = strip_windows_verbatim_prefix(&exe);
+                if let Some(dir) = clean_exe.parent() {
                     return select_windows_update_strategy(dir)
                         == WindowsUpdateStrategy::InnoSetupInstaller;
                 }
@@ -219,12 +393,23 @@ impl UpdateManager {
         false
     }
 
-    /// Removes `.old` backup binaries left over from prior atomic swaps on Windows.
+    /// Removes `.old`, `.failed`, and stale `.new` binaries left over from prior atomic swaps.
+    /// Uses retry backoff on Windows so an exiting parent `mq.exe.old` finishes releasing its handle.
     pub fn clean_old_binary_backups() {
-        if let Ok(current_exe) = std::env::current_exe() {
-            let old_exe = current_exe.with_extension("old");
-            if old_exe.exists() {
-                let _ = fs::remove_file(old_exe);
+        if let Ok(raw_exe) = std::env::current_exe() {
+            let current_exe = strip_windows_verbatim_prefix(&raw_exe);
+            let candidates = [
+                binary_sidecar_path(&current_exe, ".old"),
+                current_exe.with_extension("old"),
+                binary_sidecar_path(&current_exe, ".failed"),
+                current_exe.with_extension("failed"),
+                staged_new_binary_path(&current_exe),
+                binary_sidecar_path(&current_exe, ".new"),
+            ];
+            for candidate in candidates {
+                if candidate != current_exe && candidate.exists() {
+                    let _ = remove_file_with_retry(&candidate);
+                }
             }
         }
     }
@@ -283,15 +468,22 @@ impl UpdateManager {
             return Ok(None);
         }
 
-        let target_binary_name = if cfg!(target_os = "windows") {
-            "mq-windows-x86_64.exe"
+        let target_binary_candidates: &[&str] = if cfg!(target_os = "windows") {
+            &["mq-windows-x86_64.exe", "mq.exe"]
         } else {
-            "mq-linux-x86_64"
+            &["mq-linux-x86_64", "mq"]
+        };
+        let preferred_archive_ext = if cfg!(target_os = "windows") {
+            ".zip"
+        } else {
+            ".tar.gz"
         };
         let expected_installer = expected_inno_installer_name(remote_ver_str);
 
         let mut binary_url = String::new();
+        let mut binary_priority = usize::MAX;
         let mut tarball_url = String::new();
+        let mut has_preferred_archive = false;
         let mut binary_sha256 = String::new();
         let mut installer_url = None;
         let mut installer_sha256 = None;
@@ -301,13 +493,25 @@ impl UpdateManager {
         let mut signature_asset = None;
 
         for asset in &release.assets {
-            if asset.name == target_binary_name || asset.name == "mq" || asset.name == "mq.exe" {
-                binary_url = asset.browser_download_url.clone();
+            if let Some(prio) = target_binary_candidates
+                .iter()
+                .position(|&name| asset.name == name)
+            {
+                if prio < binary_priority {
+                    binary_priority = prio;
+                    binary_url = asset.browser_download_url.clone();
+                }
             } else if asset.name == expected_installer {
                 installer_url = Some(asset.browser_download_url.clone());
                 installer_filename = Some(asset.name.clone());
             } else if asset.name.ends_with(".tar.gz") || asset.name.ends_with(".zip") {
-                tarball_url = asset.browser_download_url.clone();
+                let is_preferred = asset.name.ends_with(preferred_archive_ext);
+                if is_preferred || !has_preferred_archive {
+                    tarball_url = asset.browser_download_url.clone();
+                    if is_preferred {
+                        has_preferred_archive = true;
+                    }
+                }
             } else if asset.name == "SHA256SUMS" {
                 checksums_asset = Some(asset);
             } else if asset.name == "SHA256SUMS.minisig" {
@@ -357,9 +561,7 @@ impl UpdateManager {
             }
 
             let chk_text = String::from_utf8_lossy(&chk_bytes);
-            if let Some(hash) =
-                extract_sha256_for_targets(&chk_text, &[target_binary_name, "mq", "mq.exe"])
-            {
+            if let Some(hash) = extract_sha256_for_targets(&chk_text, target_binary_candidates) {
                 binary_sha256 = hash;
             }
             if let Some(ref inst_name) = installer_filename {
@@ -400,18 +602,11 @@ impl UpdateManager {
                 .await;
         }
 
-        let current_exe =
-            std::env::current_exe().context("Failed to determine current exe path")?;
-        let exe_dir = current_exe
-            .parent()
-            .context("Failed to get exe directory")?;
-
-        let exe_file_name = current_exe
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let new_exe = exe_dir.join(format!("{exe_file_name}.new"));
-        let old_exe = exe_dir.join(format!("{exe_file_name}.old"));
+        let current_exe = strip_windows_verbatim_prefix(
+            &std::env::current_exe().context("Failed to determine current exe path")?,
+        );
+        let new_exe = staged_new_binary_path(&current_exe);
+        let old_exe = binary_sidecar_path(&current_exe, ".old");
 
         info!(
             "Downloading new binary from {} to {:?}",
@@ -451,13 +646,14 @@ impl UpdateManager {
         }
 
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
+        file.sync_all().await?;
         drop(file);
 
         // Verify SHA-256 checksum if provided
         let computed_hash = hex::encode(hasher.finalize());
         if !asset.binary_sha256.is_empty() {
             if !computed_hash.eq_ignore_ascii_case(&asset.binary_sha256) {
-                let _ = fs::remove_file(&new_exe);
+                let _ = remove_file_with_retry(&new_exe);
                 bail!(
                     "SHA-256 checksum mismatch! Expected: {}, Computed: {}",
                     asset.binary_sha256,
@@ -476,15 +672,17 @@ impl UpdateManager {
             fs::set_permissions(&new_exe, perms)?;
         }
 
-        // Smoke-test `<exe>.new --version`
+        // Smoke-test `<new_exe> --version` (hidden console & AV-scan retry on Windows)
         info!("Running smoke-test on {:?}", new_exe);
-        let smoke_output = Command::new(&new_exe)
-            .arg("--version")
-            .output()
-            .context("Failed to execute smoke-test on downloaded binary")?;
+        let smoke_output = run_command_output_with_av_retry(|| {
+            let mut cmd = Command::new(&new_exe);
+            cmd.arg("--version");
+            cmd
+        })
+        .context("Failed to execute smoke-test on downloaded binary")?;
 
         if !smoke_output.status.success() {
-            let _ = fs::remove_file(&new_exe);
+            let _ = remove_file_with_retry(&new_exe);
             bail!(
                 "Smoke test failed on downloaded binary with code: {:?}",
                 smoke_output.status.code()
@@ -496,22 +694,8 @@ impl UpdateManager {
             String::from_utf8_lossy(&smoke_output.stdout).trim()
         );
 
-        // Atomic swap
-        if old_exe.exists() {
-            let _ = fs::remove_file(&old_exe);
-        }
-
-        if let Err(e) = fs::rename(&current_exe, &old_exe) {
-            let _ = fs::remove_file(&new_exe);
-            bail!("Failed to rename current binary to old: {}", e);
-        }
-
-        if let Err(e) = fs::rename(&new_exe, &current_exe) {
-            // Rollback immediately
-            let _ = fs::rename(&old_exe, &current_exe);
-            let _ = fs::remove_file(&new_exe);
-            bail!("Failed to install new binary: {}. Restored old binary.", e);
-        }
+        // Atomic swap with rollback on failure
+        swap_binary_files(&current_exe, &new_exe, &old_exe)?;
 
         info!("Update successfully installed to {:?}", current_exe);
         Ok(current_exe)
@@ -537,12 +721,18 @@ impl UpdateManager {
             .as_deref()
             .filter(|h| !h.is_empty())
             .context("Missing verified SHA-256 checksum for Windows Inno Setup installer")?;
-        let filename = asset
+        let raw_filename = asset
             .installer_filename
             .clone()
             .unwrap_or_else(|| expected_inno_installer_name(&asset.version));
+        let safe_filename = Path::new(&raw_filename)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .context("Invalid installer filename")?;
 
-        let installer_path = std::env::temp_dir().join(&filename);
+        let installer_path =
+            strip_windows_verbatim_prefix(&std::env::temp_dir().join(safe_filename));
         info!(
             "Downloading Inno Setup installer from {} to {:?}",
             installer_url, installer_path
@@ -578,11 +768,12 @@ impl UpdateManager {
         }
 
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
+        file.sync_all().await?;
         drop(file);
 
         let computed_hash = hex::encode(hasher.finalize());
         if !computed_hash.eq_ignore_ascii_case(expected_sha256) {
-            let _ = fs::remove_file(&installer_path);
+            let _ = remove_file_with_retry(&installer_path);
             bail!(
                 "Inno Setup installer SHA-256 mismatch! Expected: {}, Computed: {}",
                 expected_sha256,
@@ -591,40 +782,60 @@ impl UpdateManager {
         }
         info!("Inno Setup installer SHA-256 verified: {}", computed_hash);
 
-        Command::new(&installer_path)
-            .args(inno_silent_args())
-            .spawn()
-            .context("Failed to launch Inno Setup installer")?;
+        spawn_command_with_av_retry(|| {
+            let mut cmd = Command::new(&installer_path);
+            cmd.args(inno_silent_args());
+            cmd
+        })
+        .context("Failed to launch Inno Setup installer")?;
 
         std::process::exit(0);
     }
 
     /// Roll back to `<exe>.old` if available.
     pub fn rollback() -> Result<()> {
-        let current_exe = std::env::current_exe().context("Failed to determine current exe")?;
-        let old_exe = current_exe.with_extension("old");
+        let current_exe = strip_windows_verbatim_prefix(
+            &std::env::current_exe().context("Failed to determine current exe")?,
+        );
+        let primary_old = binary_sidecar_path(&current_exe, ".old");
+        let legacy_old = current_exe.with_extension("old");
+        let old_exe = if primary_old.exists() {
+            primary_old
+        } else if legacy_old.exists() {
+            legacy_old
+        } else {
+            bail!("No previous version backup found at {:?}", primary_old);
+        };
 
-        if !old_exe.exists() {
-            bail!("No previous version backup found at {:?}", old_exe);
+        let backup_of_failed = binary_sidecar_path(&current_exe, ".failed");
+        if backup_of_failed.exists() {
+            let _ = remove_file_with_retry(&backup_of_failed);
         }
 
-        let backup_of_failed = current_exe.with_extension("failed");
-        fs::rename(&current_exe, &backup_of_failed)?;
-        if let Err(e) = fs::rename(&old_exe, &current_exe) {
-            let _ = fs::rename(&backup_of_failed, &current_exe);
-            bail!("Failed to restore old binary: {}", e);
+        rename_with_retry(&current_exe, &backup_of_failed)?;
+        if let Err(e) = rename_with_retry(&old_exe, &current_exe) {
+            let _ = rename_with_retry(&backup_of_failed, &current_exe);
+            bail!("Failed to restore old binary: {e}");
         }
-        let _ = fs::remove_file(&backup_of_failed);
+        let _ = remove_file_with_retry(&backup_of_failed);
         info!("Successfully rolled back to previous version");
         Ok(())
     }
 
     /// Restart launcher process cleanly across platforms.
     pub fn restart_process(args: &[String]) -> Result<()> {
-        let current_exe = std::env::current_exe().context("Failed to determine current exe")?;
-        info!("Restarting process: {:?} {:?}", current_exe, args);
+        let raw_exe = strip_windows_verbatim_prefix(
+            &std::env::current_exe().context("Failed to determine current exe")?,
+        );
+        // After an in-place swap (`mq` -> `mq.old`, `mq.new` -> `mq`), `/proc/self/exe` on Linux
+        // resolves to `mq.old`; target the restored binary path when it exists.
+        let target_exe = match strip_old_backup_suffix(&raw_exe) {
+            Some(restored) if restored.is_file() => restored,
+            _ => raw_exe,
+        };
+        info!("Restarting process: {:?} {:?}", target_exe, args);
 
-        let mut cmd = Command::new(current_exe);
+        let mut cmd = Command::new(target_exe);
         cmd.args(args);
         cmd.arg("--after-update");
 
@@ -638,6 +849,16 @@ impl UpdateManager {
                     Ok(())
                 });
             }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            // DETACHED_PROCESS (0x0000_0008) | CREATE_NEW_PROCESS_GROUP (0x0000_0200):
+            // detaches cleanly without inheriting or flashing a console window.
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         }
 
         cmd.spawn().context("Failed to spawn updated process")?;
@@ -657,7 +878,9 @@ impl UpdateManager {
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .context("Failed to determine user home directory")?;
-        let current_exe = std::env::current_exe().ok();
+        let current_exe = std::env::current_exe()
+            .ok()
+            .map(|p| strip_windows_verbatim_prefix(&p));
         execute_uninstall_with_roots(
             &home_dir,
             current_exe.as_deref(),
@@ -702,14 +925,18 @@ pub fn collect_user_install_artifacts(home_dir: &Path, current_exe: Option<&Path
     ];
 
     if let Some(exe) = current_exe {
-        if !is_dev_or_system_exe(exe) {
-            let exe_buf = exe.to_path_buf();
-            if !targets.contains(&exe_buf) {
-                targets.push(exe_buf);
+        let clean_exe = strip_windows_verbatim_prefix(exe);
+        if !is_dev_or_system_exe(&clean_exe) {
+            if !targets.contains(&clean_exe) {
+                targets.push(clean_exe.clone());
             }
-            let old_buf = exe.with_extension("old");
-            if !targets.contains(&old_buf) {
-                targets.push(old_buf);
+            let sidecar_old = binary_sidecar_path(&clean_exe, ".old");
+            if !targets.contains(&sidecar_old) {
+                targets.push(sidecar_old);
+            }
+            let legacy_old = clean_exe.with_extension("old");
+            if !targets.contains(&legacy_old) {
+                targets.push(legacy_old);
             }
         }
     }
@@ -733,7 +960,7 @@ pub fn execute_uninstall_with_roots(
         if path.exists() {
             if !dry_run {
                 // On Windows, a running .exe cannot be unlinked in-place; deferred cleanup handles it.
-                let _ = fs::remove_file(&path);
+                let _ = remove_file_with_retry(&path);
             }
             outcome.removed_files.push(path);
         }
@@ -743,7 +970,8 @@ pub fn execute_uninstall_with_roots(
     if !dry_run {
         let mut unins_candidates: Vec<PathBuf> = Vec::new();
         if let Some(exe) = current_exe {
-            if let Some(parent) = exe.parent() {
+            let clean_exe = strip_windows_verbatim_prefix(exe);
+            if let Some(parent) = clean_exe.parent() {
                 unins_candidates.push(parent.join("unins000.exe"));
             }
         }
@@ -773,21 +1001,26 @@ pub fn execute_uninstall_with_roots(
             for sc_name in ["MQ.lnk", "MQ Launcher.lnk"] {
                 let sc = start_menu.join(sc_name);
                 if sc.exists() {
-                    let _ = fs::remove_file(&sc);
+                    let _ = remove_file_with_retry(&sc);
                     outcome.removed_files.push(sc);
                 }
             }
         }
 
-        if let Some(exe) = current_exe {
-            if !is_dev_or_system_exe(exe) {
-                let exe_quoted = exe.to_string_lossy().replace('"', "\"\"");
-                let _ = Command::new("cmd.exe")
-                    .args([
-                        "/C",
-                        &format!("ping 127.0.0.1 -n 2 > nul & del /F /Q \"{exe_quoted}\""),
-                    ])
-                    .spawn();
+        if !outcome.spawned_external_uninstaller {
+            if let Some(exe) = current_exe {
+                let clean_exe = strip_windows_verbatim_prefix(exe);
+                if !is_dev_or_system_exe(&clean_exe) {
+                    use std::os::windows::process::CommandExt;
+                    let exe_quoted = clean_exe.to_string_lossy().replace('"', "\"\"");
+                    let _ = Command::new("cmd.exe")
+                        .creation_flags(WINDOWS_CREATE_NO_WINDOW)
+                        .args([
+                            "/C",
+                            &format!("ping 127.0.0.1 -n 2 > nul & del /F /Q \"{exe_quoted}\""),
+                        ])
+                        .spawn();
+                }
             }
         }
     }
@@ -796,7 +1029,7 @@ pub fn execute_uninstall_with_roots(
         for dir in [data_dir, config_dir, cache_dir] {
             if dir.exists() && !outcome.removed_dirs.iter().any(|d| d == dir) {
                 if !dry_run {
-                    let _ = fs::remove_dir_all(dir);
+                    let _ = remove_dir_all_with_retry(dir);
                 }
                 outcome.removed_dirs.push(dir.to_path_buf());
             }
@@ -840,6 +1073,85 @@ mod tests {
         assert!(!is_version_newer("2.1.0", "2.0.0"));
         assert!(is_version_newer("1.20.1", "1.21.1"));
         assert!(!is_version_newer("2.2.0", "2.1.0"));
+    }
+
+    #[test]
+    fn test_windows_and_unix_sidecar_staging_and_restart_paths() {
+        let win_exe = Path::new(r"C:\Users\Иван Петров\AppData\Local\Programs\MQ\mq.exe");
+        assert_eq!(
+            binary_sidecar_path(win_exe, ".old"),
+            PathBuf::from(r"C:\Users\Иван Петров\AppData\Local\Programs\MQ\mq.exe.old")
+        );
+        assert_eq!(
+            staged_new_binary_path(win_exe),
+            PathBuf::from(r"C:\Users\Иван Петров\AppData\Local\Programs\MQ\mq.new.exe")
+        );
+        assert_eq!(
+            strip_old_backup_suffix(Path::new(r"\\?\C:\MQ\mq.exe.old")),
+            Some(PathBuf::from(r"C:\MQ\mq.exe"))
+        );
+
+        let unix_exe = Path::new("/home/player/.local/bin/mq");
+        assert_eq!(
+            binary_sidecar_path(unix_exe, ".old"),
+            PathBuf::from("/home/player/.local/bin/mq.old")
+        );
+        assert_eq!(
+            staged_new_binary_path(unix_exe),
+            PathBuf::from("/home/player/.local/bin/mq.new")
+        );
+        assert_eq!(
+            strip_old_backup_suffix(Path::new("/home/player/.local/bin/mq.old")),
+            Some(PathBuf::from("/home/player/.local/bin/mq"))
+        );
+        assert_eq!(strip_old_backup_suffix(unix_exe), None);
+    }
+
+    #[test]
+    fn test_extract_sha256_handles_crlf_bom_binary_asterisk_and_priority() {
+        let h_win = "1111111111111111111111111111111111111111111111111111111111111111";
+        let h_fallback = "2222222222222222222222222222222222222222222222222222222222222222";
+        let h_setup = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+
+        let sums = format!(
+            "\u{FEFF}# generated on Windows\r\n\
+             not-a-valid-hash  mq-windows-x86_64.exe\r\n\
+             {h_fallback}  mq.exe\r\n\
+             {h_win} *./mq-windows-x86_64.exe\r\n\
+             {h_setup}  .\\MQ-Setup-2.7.3-x64.exe\r\n"
+        );
+
+        // Priority order must choose mq-windows-x86_64.exe over earlier mq.exe fallback.
+        assert_eq!(
+            extract_sha256_for_targets(&sums, &["mq-windows-x86_64.exe", "mq.exe"]).as_deref(),
+            Some(h_win)
+        );
+        assert_eq!(
+            extract_sha256_for_targets(&sums, &["MQ-Setup-2.7.3-x64.exe"]).as_deref(),
+            Some(h_setup.to_ascii_lowercase().as_str())
+        );
+    }
+
+    #[test]
+    fn test_swap_binary_files_succeeds_and_rolls_back_on_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("mq.exe");
+        let new_bin = tmp.path().join("mq.new.exe");
+        let old_bin = binary_sidecar_path(&current, ".old");
+
+        fs::write(&current, b"v1-old-binary").unwrap();
+        fs::write(&new_bin, b"v2-new-binary").unwrap();
+
+        swap_binary_files(&current, &new_bin, &old_bin).expect("binary swap should succeed");
+        assert_eq!(fs::read(&current).unwrap(), b"v2-new-binary");
+        assert_eq!(fs::read(&old_bin).unwrap(), b"v1-old-binary");
+        assert!(!new_bin.exists());
+
+        // Rollback when `new_exe` is missing must restore original `current`.
+        let missing_new = tmp.path().join("does-not-exist.new.exe");
+        let err = swap_binary_files(&current, &missing_new, &old_bin).unwrap_err();
+        assert!(err.to_string().contains("Restored old binary"));
+        assert_eq!(fs::read(&current).unwrap(), b"v2-new-binary");
     }
 
     #[test]

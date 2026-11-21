@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 #  MQ Launcher — Portable Windows Archive Builder
-#  Produces: dist/mq-windows-x86_64-portable.zip
+#  Produces: dist/mq-windows-x86_64-portable.zip (flat root layout)
 # ==============================================================================
 
 set -euo pipefail
@@ -41,21 +41,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-TARGET_DIR="${STAGE_DIR}/${PACKAGE_NAME}"
-mkdir -p "${TARGET_DIR}"
-
-# Copy payload items
-cp "${EXE_CANDIDATE}" "${TARGET_DIR}/mq.exe"
-cp "${SCRIPT_DIR}/portable.flag" "${TARGET_DIR}/portable.flag"
-cp "${SCRIPT_DIR}/mq.ico" "${TARGET_DIR}/mq.ico"
-cp "${SCRIPT_DIR}/run.bat" "${TARGET_DIR}/run.bat"
-cp "${SCRIPT_DIR}/README-portable.txt" "${TARGET_DIR}/README.txt"
+# Copy payload items flat at archive root (matches release.yml, Scoop, and Explorer Extract All)
+cp "${EXE_CANDIDATE}" "${STAGE_DIR}/mq.exe"
+cp "${SCRIPT_DIR}/portable.flag" "${STAGE_DIR}/portable.flag"
+cp "${SCRIPT_DIR}/mq.ico" "${STAGE_DIR}/mq.ico"
+cp "${SCRIPT_DIR}/run.bat" "${STAGE_DIR}/run.bat"
+cp "${SCRIPT_DIR}/README-portable.txt" "${STAGE_DIR}/README.txt"
+if [[ -f "${REPO_ROOT}/THIRD_PARTY_LICENSES.md" ]]; then
+    cp "${REPO_ROOT}/THIRD_PARTY_LICENSES.md" "${STAGE_DIR}/THIRD_PARTY_LICENSES.md"
+fi
+if [[ -f "${REPO_ROOT}/LICENSE" ]]; then
+    cp "${REPO_ROOT}/LICENSE" "${STAGE_DIR}/LICENSE"
+fi
+mkdir -p "${STAGE_DIR}/data"
 
 # Build zip archive
 rm -f "${ARCHIVE_PATH}"
 (
     cd "${STAGE_DIR}"
-    zip -r -9 "${ARCHIVE_PATH}" "${PACKAGE_NAME}"
+    zip -r -9 "${ARCHIVE_PATH}" .
 )
 
 echo "Portable package created successfully:"

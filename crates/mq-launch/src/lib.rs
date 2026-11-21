@@ -505,10 +505,10 @@ IMPLEMENTOR="Oracle Corporation"
 
         let selected = select_java_runtime(&[], 21, Some(Path::new(&custom_java)))
             .expect("select custom java override");
-        assert_eq!(
-            selected.path,
-            fs::canonicalize(&custom_java).unwrap_or(custom_java)
+        let expected_path = mq_core::fs_util::strip_windows_verbatim_prefix(
+            &fs::canonicalize(&custom_java).unwrap_or(custom_java),
         );
+        assert_eq!(selected.path, expected_path);
         assert_eq!(selected.major_version, 21);
     }
 
@@ -541,6 +541,151 @@ IMPLEMENTOR="Oracle Corporation"
 
         let sigterm = analyze_crash(tmp.path(), Some(143), &[]);
         assert!(sigterm.summary.contains("SIGTERM"));
+
+        let win_av = analyze_crash(
+            tmp.path(),
+            Some(-1_073_741_819),
+            &["# EXCEPTION_ACCESS_VIOLATION (0xc0000005)".to_owned()],
+        );
+        assert!(win_av.summary.contains("0xC0000005"));
+
+        let win_mod_crash = analyze_crash(
+            tmp.path(),
+            Some(1),
+            &[
+                "java.lang.NoClassDefFoundError: net/fabricmc/api/ClientModInitializer".to_owned(),
+                r"at file:///C:\Users\Player\AppData\Local\MQ\instances\test\mods\sodium-fabric-0.5.11.jar!/net/caffeinemc/Test.class".to_owned(),
+            ],
+        );
+        assert!(
+            win_mod_crash
+                .suspected_mods
+                .iter()
+                .any(|m| m == "sodium-fabric-0.5.11.jar"),
+            "expected clean jar name from Windows path, got {:?}",
+            win_mod_crash.suspected_mods
+        );
+    }
+
+    #[test]
+    fn windows_java_version_crlf_vendor_and_nested_mojang_discovery_prefer_java_exe() {
+        // 1. CRLF java -version output + Windows vendors (Microsoft, BellSoft Liberica, IBM Semeru)
+        let ms_out = "openjdk version \"21.0.4\" 2024-07-16 LTS\r\nOpenJDK Runtime Environment Microsoft-9889606 (build 21.0.4+7-LTS)\r\n";
+        let (maj, full, vendor) = parse_java_version_output(ms_out).expect("parse Microsoft JDK");
+        assert_eq!(maj, 21);
+        assert_eq!(full, "21.0.4");
+        assert_eq!(vendor, "Microsoft");
+
+        let bellsoft_out = "openjdk version \"17.0.12\" 2024-07-16 LTS\r\nOpenJDK Runtime Environment Liberica-17.0.12+10 (build 17.0.12+10-LTS)\r\n";
+        let (maj_b, _, vendor_b) =
+            parse_java_version_output(bellsoft_out).expect("parse BellSoft Liberica");
+        assert_eq!(maj_b, 17);
+        assert_eq!(vendor_b, "BellSoft Liberica");
+
+        // 2. Nested Mojang runtime layout (and preferring java.exe over javaw.exe on Windows)
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mojang_rt = tmp
+            .path()
+            .join("runtime")
+            .join("java-runtime-delta")
+            .join(if cfg!(target_os = "windows") {
+                "windows-x64"
+            } else {
+                "linux"
+            })
+            .join("java-runtime-delta");
+        let bin_dir = mojang_rt.join("bin");
+        fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        #[cfg(target_os = "windows")]
+        {
+            fs::write(bin_dir.join("java.exe"), b"MZ").expect("write java.exe");
+            fs::write(bin_dir.join("javaw.exe"), b"MZ").expect("write javaw.exe");
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let java_bin = bin_dir.join("java");
+            fs::write(&java_bin, b"#!/bin/sh\nexit 0\n").expect("write java");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&java_bin).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&java_bin, perms).unwrap();
+            }
+        }
+        fs::write(
+            mojang_rt.join("release"),
+            "JAVA_VERSION=\"21.0.3\"\r\nIMPLEMENTOR=\"Microsoft\"\r\n",
+        )
+        .expect("write release");
+
+        let discovered =
+            discover_java_runtimes_from_sources(&[&tmp.path().join("runtime")], None, None);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].major_version, 21);
+        assert_eq!(discovered[0].vendor, "Microsoft");
+        let expected_bin = if cfg!(target_os = "windows") {
+            "java.exe"
+        } else {
+            "java"
+        };
+        assert_eq!(
+            discovered[0].path.file_name().and_then(|n| n.to_str()),
+            Some(expected_bin),
+            "must discover nested Mojang runtime and prefer java.exe over javaw.exe on Windows"
+        );
+    }
+
+    #[test]
+    fn build_launch_command_strips_windows_verbatim_prefixes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path());
+        let instance = InstanceManifest::new(
+            "Verbatim Test",
+            "1.21.1",
+            ModLoaderKind::Fabric,
+            Some("0.16.9".to_owned()),
+        );
+        let ely_account = AccountProfile {
+            id: AccountId::new_v4(),
+            kind: AccountKind::ElyBy,
+            username: "Steve".to_owned(),
+            uuid: compute_offline_uuid("Steve"),
+            access_token: SecretString::new("tok"),
+            refresh_token: None,
+            client_token: None,
+            expires_at: None,
+            skin_url: None,
+            avatar_head: None,
+        };
+        let ctx = LaunchContext {
+            paths,
+            instance,
+            version: sample_resolved_version(),
+            account: ely_account,
+            java_bin: PathBuf::from(r"\\?\C:\Program Files\Java\jdk-21\bin\java.exe"),
+            authlib_injector_jar: Some(PathBuf::from(
+                r"\\?\C:\Users\Alice\MQ\authlib-injector.jar",
+            )),
+            extra_secrets_to_redact: Vec::new(),
+        };
+
+        let cmd = build_launch_command(&ctx).expect("build launch command");
+        assert_eq!(
+            cmd.program,
+            PathBuf::from(r"C:\Program Files\Java\jdk-21\bin\java.exe")
+        );
+        assert!(
+            !cmd.args[0].contains(r"\\?\"),
+            "-javaagent must not contain Windows verbatim prefix: {}",
+            cmd.args[0]
+        );
+        for arg in &cmd.args {
+            assert!(
+                !arg.contains(r"\\?\"),
+                "launch arg must not contain Windows verbatim prefix: {arg}"
+            );
+        }
     }
 
     #[cfg(unix)]

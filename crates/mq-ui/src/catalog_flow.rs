@@ -806,10 +806,54 @@ impl ManualDownloadState {
     }
 }
 
-/// Default folder to watch for manual downloads (`~/Downloads`).
+/// Resolves a fallback Downloads folder from environment variables when the OS
+/// Known Folder / XDG lookup is unavailable.
+pub fn resolve_downloads_dir_fallback(
+    is_windows: bool,
+    userprofile: Option<&std::ffi::OsStr>,
+    homedrive: Option<&std::ffi::OsStr>,
+    homepath: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    let base = if is_windows {
+        userprofile
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let drive = homedrive.filter(|v| !v.is_empty())?.to_string_lossy();
+                let path = homepath.filter(|v| !v.is_empty())?.to_string_lossy();
+                Some(std::path::PathBuf::from(format!("{drive}{path}")))
+            })
+            .or_else(|| home.filter(|v| !v.is_empty()).map(std::path::PathBuf::from))
+    } else {
+        home.filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                userprofile
+                    .filter(|v| !v.is_empty())
+                    .map(std::path::PathBuf::from)
+            })
+    }?;
+    Some(base.join("Downloads"))
+}
+
+/// Default folder to watch for manual downloads (Windows `FOLDERID_Downloads` / Linux
+/// `XDG_DOWNLOAD_DIR` via `directories::UserDirs`, falling back to `%USERPROFILE%\Downloads`
+/// or `~/Downloads`).
 pub fn default_downloads_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(std::path::PathBuf::from(home).join("Downloads"))
+    if let Some(dir) = directories::UserDirs::new()
+        .and_then(|u| u.download_dir().map(std::path::Path::to_path_buf))
+    {
+        let cleaned = crate::opener::strip_windows_verbatim_prefix(&dir.to_string_lossy());
+        return Some(std::path::PathBuf::from(cleaned));
+    }
+    resolve_downloads_dir_fallback(
+        cfg!(target_os = "windows"),
+        std::env::var_os("USERPROFILE").as_deref(),
+        std::env::var_os("HOMEDRIVE").as_deref(),
+        std::env::var_os("HOMEPATH").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -1069,5 +1113,51 @@ mod tests {
         assert_eq!(s.completed, ["a.jar"]);
         s.apply_progress(vec![], vec!["b.jar".into()]);
         assert!(s.message.is_some());
+    }
+
+    #[test]
+    fn downloads_dir_fallback_resolves_windows_and_unix_env_vars() {
+        use std::ffi::OsStr;
+
+        let win_profile = resolve_downloads_dir_fallback(
+            true,
+            Some(OsStr::new(r"C:\Users\Player")),
+            Some(OsStr::new("D:")),
+            Some(OsStr::new(r"\Alt")),
+            Some(OsStr::new("/home/msys")),
+        )
+        .expect("USERPROFILE should win on Windows");
+        assert_eq!(
+            win_profile,
+            std::path::PathBuf::from(r"C:\Users\Player").join("Downloads")
+        );
+
+        let win_drive = resolve_downloads_dir_fallback(
+            true,
+            None,
+            Some(OsStr::new("D:")),
+            Some(OsStr::new(r"\Users\Player")),
+            None,
+        )
+        .expect("HOMEDRIVE+HOMEPATH fallback on Windows");
+        assert_eq!(
+            win_drive,
+            std::path::PathBuf::from(r"D:\Users\Player").join("Downloads")
+        );
+
+        let unix = resolve_downloads_dir_fallback(
+            false,
+            Some(OsStr::new(r"C:\Users\Player")),
+            None,
+            None,
+            Some(OsStr::new("/home/player")),
+        )
+        .expect("HOME should win on Unix");
+        assert_eq!(unix, std::path::PathBuf::from("/home/player/Downloads"));
+
+        assert_eq!(
+            resolve_downloads_dir_fallback(true, None, None, None, None),
+            None
+        );
     }
 }
