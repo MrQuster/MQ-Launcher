@@ -51,12 +51,9 @@ pub struct AccountsView {
     pub ely_cancel_flag: Arc<AtomicBool>,
     // MSA form
     pub msa_device_code_prompt: Option<String>,
-    // 3D Skin preview & Library state
-    pub skin_3d_state: crate::skin_3d::Skin3DState,
+    // Skin Library state
     pub cached_skins: Option<Vec<SkinLibraryEntry>>,
     pub selected_skin_id: Option<String>,
-    pub loaded_skin_image: Option<image::RgbaImage>,
-    pub loaded_skin_id: Option<String>,
     pub import_skin_path: String,
     pub import_skin_name: String,
     pub import_skin_slim: bool,
@@ -72,11 +69,8 @@ impl Default for AccountsView {
             ely_waiting_browser: false,
             ely_cancel_flag: Arc::new(AtomicBool::new(false)),
             msa_device_code_prompt: None,
-            skin_3d_state: crate::skin_3d::Skin3DState::default(),
             cached_skins: None,
             selected_skin_id: None,
-            loaded_skin_image: None,
-            loaded_skin_id: None,
             import_skin_path: String::new(),
             import_skin_name: String::new(),
             import_skin_slim: false,
@@ -455,22 +449,6 @@ impl AccountsView {
             self.cached_skins = Some(list_local_skins(&skins_dir));
         }
 
-        // React to selected skin changes and load image
-        if self.selected_skin_id != self.loaded_skin_id {
-            if let Some(ref sel_id) = self.selected_skin_id {
-                if let Some(ref list) = self.cached_skins {
-                    if let Some(entry) = list.iter().find(|s| &s.id == sel_id) {
-                        self.skin_3d_state.slim = entry.slim;
-                        self.loaded_skin_image =
-                            image::open(&entry.file_path).map(|img| img.to_rgba8()).ok();
-                    }
-                }
-            } else {
-                self.loaded_skin_image = None;
-            }
-            self.loaded_skin_id = self.selected_skin_id.clone();
-        }
-
         let form_card = crate::theme::solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(12));
 
@@ -484,107 +462,14 @@ impl AccountsView {
             |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
-                    RichText::new(tr_acc(
-                        is_en,
-                        "Библиотека скинов и 3D-превью",
-                        "Skin Library & 3D Preview",
-                    ))
-                    .color(TEXT_PRIMARY)
-                    .strong()
-                    .size(15.0),
+                    RichText::new(tr_acc(is_en, "Библиотека скинов", "Skin Library"))
+                        .color(TEXT_PRIMARY)
+                        .strong()
+                        .size(15.0),
                 );
                 ui.add_space(8.0);
 
-                let is_wide = ui.available_width() >= 540.0;
-                if is_wide {
-                    ui.horizontal_top(|ui| {
-                        // 3D Canvas
-                        ui.vertical(|ui| {
-                            ui.set_width(260.0);
-                            crate::skin_3d::render_skin_3d_preview(
-                                ui,
-                                &mut self.skin_3d_state,
-                                self.loaded_skin_image.as_ref(),
-                                Vec2::new(260.0, 260.0),
-                            );
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.checkbox(
-                                    &mut self.skin_3d_state.animate,
-                                    tr_acc(is_en, "Анимация", "Animate"),
-                                );
-                                ui.checkbox(
-                                    &mut self.skin_3d_state.show_cape,
-                                    tr_acc(is_en, "Плащ", "Cape"),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                let model_label = if self.skin_3d_state.slim {
-                                    tr_acc(is_en, "Модель: Alex (3px)", "Model: Alex (3px)")
-                                } else {
-                                    tr_acc(is_en, "Модель: Steve (4px)", "Model: Steve (4px)")
-                                };
-                                if secondary_glass_button(ui, None, model_label).clicked() {
-                                    self.skin_3d_state.slim = !self.skin_3d_state.slim;
-                                }
-                                if secondary_glass_button(
-                                    ui,
-                                    None,
-                                    tr_acc(is_en, "Сброс ракурса", "Reset View"),
-                                )
-                                .clicked()
-                                {
-                                    self.skin_3d_state.yaw = -0.42;
-                                    self.skin_3d_state.pitch = 0.12;
-                                }
-                            });
-                        });
-
-                        ui.add_space(14.0);
-
-                        // Skins list and import form
-                        ui.vertical(|ui| {
-                            self.render_skin_list_and_import(ui, state, &skins_dir, &tokens, is_en);
-                        });
-                    });
-                } else {
-                    ui.vertical(|ui| {
-                        let w = ui.available_width().min(280.0);
-                        crate::skin_3d::render_skin_3d_preview(
-                            ui,
-                            &mut self.skin_3d_state,
-                            self.loaded_skin_image.as_ref(),
-                            Vec2::new(w, 240.0),
-                        );
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.checkbox(
-                                &mut self.skin_3d_state.animate,
-                                tr_acc(is_en, "Анимация", "Animate"),
-                            );
-                            ui.checkbox(
-                                &mut self.skin_3d_state.show_cape,
-                                tr_acc(is_en, "Плащ", "Cape"),
-                            );
-                            if ui
-                                .button(if self.skin_3d_state.slim {
-                                    "Alex 3px"
-                                } else {
-                                    "Steve 4px"
-                                })
-                                .clicked()
-                            {
-                                self.skin_3d_state.slim = !self.skin_3d_state.slim;
-                            }
-                            if ui.button(tr_acc(is_en, "Сброс", "Reset")).clicked() {
-                                self.skin_3d_state.yaw = -0.42;
-                                self.skin_3d_state.pitch = 0.12;
-                            }
-                        });
-                        ui.add_space(10.0);
-                        self.render_skin_list_and_import(ui, state, &skins_dir, &tokens, is_en);
-                    });
-                }
+                self.render_skin_list_and_import(ui, state, &skins_dir, &tokens, is_en);
             },
         );
     }
@@ -641,7 +526,6 @@ impl AccountsView {
                         let _ = delete_local_skin(skins_dir, &del_id);
                         if self.selected_skin_id.as_deref() == Some(&del_id) {
                             self.selected_skin_id = None;
-                            self.loaded_skin_image = None;
                         }
                         self.cached_skins = None;
                     }

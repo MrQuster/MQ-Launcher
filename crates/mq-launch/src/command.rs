@@ -598,6 +598,27 @@ fn sanitize_custom_jvm_args(
         out.push(raw.clone());
     }
 
+    let is_experimental_flag = |arg: &str| -> bool {
+        arg.contains("G1NewSizePercent")
+            || arg.contains("G1MaxNewSizePercent")
+            || arg.contains("G1MixedGCLiveThresholdPercent")
+            || arg.contains("G1HeapWastePercent")
+            || arg.contains("UseShenandoahGC")
+            || arg.contains("ZGenerational")
+    };
+
+    if let Some(first_exp_idx) = out.iter().position(|a| is_experimental_flag(a)) {
+        let has_unlock_before = out[..first_exp_idx]
+            .iter()
+            .any(|a| a.trim() == "-XX:+UnlockExperimentalVMOptions");
+        if !has_unlock_before {
+            out.retain(|a| a.trim() != "-XX:+UnlockExperimentalVMOptions");
+            if let Some(new_exp_idx) = out.iter().position(|a| is_experimental_flag(a)) {
+                out.insert(new_exp_idx, "-XX:+UnlockExperimentalVMOptions".to_string());
+            }
+        }
+    }
+
     out
 }
 
@@ -1847,11 +1868,15 @@ mod tests {
             vec!["-XX:+UseG1GC".to_owned()]
         );
 
-        // Java 21 Generational ZGC preset stays intact on Java 21
+        // Java 21 Generational ZGC preset unlocks experimental VM options on Java 21
         let zgc_gen = vec!["-XX:+UseZGC".to_owned(), "-XX:+ZGenerational".to_owned()];
         assert_eq!(
             sanitize_custom_jvm_args(&zgc_gen, 4096, 21, ModLoaderKind::NeoForge),
-            zgc_gen
+            vec![
+                "-XX:+UseZGC".to_owned(),
+                "-XX:+UnlockExperimentalVMOptions".to_owned(),
+                "-XX:+ZGenerational".to_owned(),
+            ]
         );
 
         // Java 21 Generational ZGC preset drops `-XX:+ZGenerational` on Java 17
@@ -1875,6 +1900,41 @@ mod tests {
                 ModLoaderKind::Vanilla
             ),
             vec!["-XX:+UseSerialGC".to_owned()]
+        );
+
+        // Automatic repositioning of UnlockExperimentalVMOptions before experimental flags
+        let misplaced_experimental = vec![
+            "-XX:+UseG1GC".to_owned(),
+            "-XX:G1NewSizePercent=30".to_owned(),
+            "-XX:G1MaxNewSizePercent=40".to_owned(),
+            "-XX:+UnlockExperimentalVMOptions".to_owned(),
+        ];
+        assert_eq!(
+            sanitize_custom_jvm_args(&misplaced_experimental, 4096, 21, ModLoaderKind::Vanilla),
+            vec![
+                "-XX:+UseG1GC".to_owned(),
+                "-XX:+UnlockExperimentalVMOptions".to_owned(),
+                "-XX:G1NewSizePercent=30".to_owned(),
+                "-XX:G1MaxNewSizePercent=40".to_owned(),
+            ]
+        );
+
+        let missing_unlock_experimental = vec![
+            "-XX:+UseG1GC".to_owned(),
+            "-XX:G1NewSizePercent=20".to_owned(),
+        ];
+        assert_eq!(
+            sanitize_custom_jvm_args(
+                &missing_unlock_experimental,
+                4096,
+                21,
+                ModLoaderKind::Vanilla
+            ),
+            vec![
+                "-XX:+UseG1GC".to_owned(),
+                "-XX:+UnlockExperimentalVMOptions".to_owned(),
+                "-XX:G1NewSizePercent=20".to_owned(),
+            ]
         );
     }
 }

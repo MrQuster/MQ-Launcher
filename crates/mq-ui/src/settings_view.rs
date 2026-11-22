@@ -1055,8 +1055,11 @@ impl SettingsView {
                     if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Java 21 Generational ZGC")
                         .clicked()
                     {
-                        state.config.default_jvm_args =
-                            vec!["-XX:+UseZGC".to_string(), "-XX:+ZGenerational".to_string()];
+                        state.config.default_jvm_args = vec![
+                            "-XX:+UnlockExperimentalVMOptions".to_string(),
+                            "-XX:+UseZGC".to_string(),
+                            "-XX:+ZGenerational".to_string(),
+                        ];
                     }
 
                     if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Low-End PC (Low Memory)")

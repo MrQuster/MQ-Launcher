@@ -5,6 +5,17 @@
 
 ---
 
+## [v2.8.1] — 2026-11-23 ("JVM Experimental Flags Fix & UI Cleanup")
+
+### Исправлено и улучшено / Fixed and improved
+- **Исправление аргументов запуска JVM (`mq-launch`, `mq-ui`):**
+  - Исправлен краш запуска JVM (`VM option 'G1NewSizePercent' is experimental and must be enabled via -XX:+UnlockExperimentalVMOptions`) на Java 21+: `-XX:+UnlockExperimentalVMOptions` гарантированно предшествует `-XX:G1NewSizePercent`, `-XX:+ZGenerational` и другим экспериментальным флагам в рекомендациях оптимизатора, санитизации пользовательских аргументов и пресетах настроек.
+  - Автоматическое исправление уже сохранённых конфигураций инстансов при запуске.
+- **Интерфейс аккаунтов (`mq-ui`):**
+  - Удалён экспериментальный 3D-просмотр скинов для повышения стабильности и чистоты кода при сохранении локальной библиотеки скинов и 2D-аватаров.
+
+---
+
 ## [v2.8.0] — 2026-11-22 ("3D Skin Preview, Mod Profiles, World Backups & External Launcher Import")
 
 ### Добавлено и улучшено / Added and improved
