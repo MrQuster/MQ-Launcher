@@ -6,8 +6,10 @@
 //! - Background tasks communicate via bounded `flume` channels.
 //! - Frame times are monitored by `UiWatchdog` (>8 ms logs warning).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mq_auth::AccountStore;
 use mq_core::{
@@ -149,6 +151,25 @@ pub enum UiWorkerResponse {
         exit_code: i32,
     },
     ImportArchivePicked(Option<std::path::PathBuf>),
+    MclogsUploaded(Result<String, String>),
+    ServerPingReady {
+        ip: String,
+        result: Result<mq_instances::ServerPingResult, String>,
+    },
+    JavaRuntimesDiscovered(Vec<mq_launch::JavaRuntime>),
+    UpdateCheckFinished(Result<Option<mq_update::ReleaseAssetInfo>, String>),
+    UpdateDownloadFailed(String),
+    InstanceExported(Result<std::path::PathBuf, String>),
+    InstanceDeleted {
+        instance_id: InstanceId,
+        name: String,
+        error: Option<String>,
+    },
+    CrashAnalysisReady {
+        instance_id: InstanceId,
+        analysis: mq_launch::CrashAnalysis,
+    },
+    ElyByLoginFinished(Result<String, String>),
 }
 
 /// Successful result of an install job.
@@ -279,6 +300,31 @@ pub enum UiWorkerCommand {
         instance_id: InstanceId,
         dry_run: bool,
     },
+    UploadMclogs {
+        log_text: String,
+    },
+    PingServer {
+        ip: String,
+    },
+    DiscoverJavaRuntimes,
+    CheckLauncherUpdate {
+        current_version: String,
+    },
+    DownloadLauncherUpdate {
+        asset: Box<mq_update::ReleaseAssetInfo>,
+    },
+    ExportInstance {
+        instance_id: InstanceId,
+    },
+    DeleteInstance {
+        instance_id: InstanceId,
+        name: String,
+    },
+    AnalyzeCrash {
+        instance_id: InstanceId,
+        exit_code: i32,
+        lines: Vec<String>,
+    },
 }
 
 /// Central state model consumed by `eframe::App` in `mq-ui`.
@@ -369,6 +415,7 @@ pub struct UiState {
 
     // Crash Diagnostics
     pub crash_analysis: Option<mq_launch::CrashAnalysis>,
+    pub crash_analysis_instance: Option<InstanceId>,
     pub mclogs_url: Option<String>,
     pub is_uploading_mclogs: bool,
 
@@ -378,6 +425,19 @@ pub struct UiState {
 
     // Live Server Pings
     pub server_pings: HashMap<String, mq_instances::ServerPingResult>,
+    pub pinging_servers: HashSet<String>,
+
+    // Cached Java runtime discovery (offloaded from UI thread)
+    pub discovered_java_runtimes: Option<Vec<mq_launch::JavaRuntime>>,
+    pub is_discovering_java: bool,
+
+    // Pending async results consumed by Settings / Accounts views
+    pub pending_update_check: Option<Result<Option<mq_update::ReleaseAssetInfo>, String>>,
+    pub pending_update_error: Option<String>,
+    pub ely_login_done: Option<Result<String, String>>,
+
+    // Cached per-instance install readiness to avoid per-frame disk I/O on the UI thread
+    install_status_cache: RefCell<HashMap<InstanceId, (bool, Instant)>>,
 
     // Favorites
     pub favorite_instances: HashSet<String>,
@@ -502,11 +562,19 @@ impl UiState {
             remote_versions: Vec::new(),
             is_fetching_manifest: false,
             crash_analysis: None,
+            crash_analysis_instance: None,
             mclogs_url: None,
             is_uploading_mclogs: false,
             mod_updates: BTreeMap::new(),
             is_checking_mod_updates: false,
             server_pings: HashMap::new(),
+            pinging_servers: HashSet::new(),
+            discovered_java_runtimes: None,
+            is_discovering_java: false,
+            pending_update_check: None,
+            pending_update_error: None,
+            ely_login_done: None,
+            install_status_cache: RefCell::new(HashMap::new()),
             favorite_instances: HashSet::new(),
             show_import_dialog: false,
             import_archive_path: String::new(),
@@ -623,6 +691,7 @@ impl UiState {
 
         match result {
             Ok(out) => {
+                self.invalidate_install_cache(out.instance_id.as_ref());
                 self.jobs.finish(job_id, Ok(()));
                 let _ = self.cmd_sender.send(UiWorkerCommand::RefreshInstances);
                 let target_id = out
@@ -868,6 +937,7 @@ impl UiState {
                     self.is_fetching_manifest = false;
                 }
                 UiWorkerResponse::InstanceInstallStarted(id) => {
+                    self.invalidate_install_cache(Some(&id));
                     self.installing_instance = Some(id);
                     self.last_failed_install_instance = None;
                     self.install_error = None;
@@ -878,6 +948,7 @@ impl UiState {
                     self.current_install_stage = InstallStage::Manifest;
                 }
                 UiWorkerResponse::InstanceInstallCompleted(id) => {
+                    self.invalidate_install_cache(Some(&id));
                     if self.installing_instance.as_ref() == Some(&id) {
                         self.installing_instance = None;
                     }
@@ -908,6 +979,7 @@ impl UiState {
                     self.status_message = Some(("Инстанс успешно установлен".to_string(), false));
                 }
                 UiWorkerResponse::InstanceError { instance_id, error } => {
+                    self.invalidate_install_cache(Some(&instance_id));
                     self.installing_instance = None;
                     self.last_failed_install_instance = Some(instance_id.clone());
                     let op = self
@@ -936,7 +1008,13 @@ impl UiState {
                     self.is_launching = false;
                     self.game_running = true;
                     self.running_instances.entry(id.clone()).or_insert(None);
-                    self.running_instance = Some(id);
+                    self.running_instance = Some(id.clone());
+                    if self.crash_analysis_instance.as_ref() == Some(&id) {
+                        self.crash_analysis = None;
+                        self.crash_analysis_instance = None;
+                        self.mclogs_url = None;
+                        self.is_uploading_mclogs = false;
+                    }
                 }
                 UiWorkerResponse::GamePid { instance_id, pid } => {
                     self.running_instances.insert(instance_id, Some(pid));
@@ -953,27 +1031,114 @@ impl UiState {
                     if was_stopped {
                         self.status_message =
                             Some(("Игра остановлена пользователем".to_string(), false));
-                        self.crash_analysis = None;
+                        if self.crash_analysis_instance.as_ref() == Some(&instance_id) {
+                            self.crash_analysis = None;
+                            self.crash_analysis_instance = None;
+                        }
                     } else {
                         self.status_message = Some((
                             format!("Игра завершилась с кодом выхода {}", exit_code),
                             exit_code != 0,
                         ));
                         if exit_code != 0 {
-                            let inst_dir = self.paths.instance_dir(instance_id.as_str());
                             let lines: Vec<String> = self
                                 .game_logs
                                 .iter()
                                 .filter(|l| l.instance == instance_id.as_str())
                                 .map(|l| l.line.clone())
                                 .collect();
-                            let analysis =
-                                mq_launch::analyze_crash(&inst_dir, Some(exit_code), &lines);
-                            self.crash_analysis = Some(analysis);
-                        } else {
+                            let _ = self.cmd_sender.send(UiWorkerCommand::AnalyzeCrash {
+                                instance_id,
+                                exit_code,
+                                lines,
+                            });
+                        } else if self.crash_analysis_instance.as_ref() == Some(&instance_id) {
                             self.crash_analysis = None;
+                            self.crash_analysis_instance = None;
                         }
                     }
+                }
+                UiWorkerResponse::MclogsUploaded(res) => {
+                    self.is_uploading_mclogs = false;
+                    match res {
+                        Ok(url) => {
+                            self.mclogs_url = Some(url);
+                            self.status_message =
+                                Some(("Лог загружен на mclogs".to_string(), false));
+                        }
+                        Err(e) => {
+                            self.status_message =
+                                Some((format!("Не удалось загрузить лог на mclogs: {e}"), true));
+                        }
+                    }
+                }
+                UiWorkerResponse::ServerPingReady { ip, result } => {
+                    self.pinging_servers.remove(&ip);
+                    match result {
+                        Ok(ping) => {
+                            self.server_pings.insert(ip, ping);
+                        }
+                        Err(e) => {
+                            self.status_message =
+                                Some((format!("Сервер {ip} не отвечает: {e}"), true));
+                        }
+                    }
+                }
+                UiWorkerResponse::JavaRuntimesDiscovered(runtimes) => {
+                    self.discovered_java_runtimes = Some(runtimes);
+                    self.is_discovering_java = false;
+                }
+                UiWorkerResponse::UpdateCheckFinished(result) => {
+                    self.pending_update_check = Some(result);
+                }
+                UiWorkerResponse::UpdateDownloadFailed(err) => {
+                    self.pending_update_error = Some(err.clone());
+                    self.status_message =
+                        Some((format!("Ошибка обновления лаунчера: {err}"), true));
+                }
+                UiWorkerResponse::InstanceExported(result) => match result {
+                    Ok(path) => {
+                        self.status_message =
+                            Some((format!("Экспортировано в {}", path.display()), false));
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Ошибка экспорта: {e}"), true));
+                    }
+                },
+                UiWorkerResponse::InstanceDeleted {
+                    instance_id,
+                    name,
+                    error,
+                } => {
+                    self.invalidate_install_cache(Some(&instance_id));
+                    if let Some(err) = error {
+                        self.status_message =
+                            Some((format!("Ошибка при удалении «{name}»: {err}"), true));
+                    } else {
+                        self.status_message =
+                            Some((format!("Инстанс «{name}» успешно удален"), false));
+                    }
+                    let _ = self.cmd_sender.send(UiWorkerCommand::RefreshInstances);
+                }
+                UiWorkerResponse::CrashAnalysisReady {
+                    instance_id,
+                    analysis,
+                } => {
+                    self.crash_analysis = Some(analysis);
+                    self.crash_analysis_instance = Some(instance_id);
+                }
+                UiWorkerResponse::ElyByLoginFinished(result) => {
+                    match &result {
+                        Ok(username) => {
+                            let _ = self.cmd_sender.send(UiWorkerCommand::RefreshAccounts);
+                            self.status_message =
+                                Some((format!("Вход Ely.by выполнен: {username}"), false));
+                        }
+                        Err(e) => {
+                            self.status_message = Some((format!("Ошибка входа Ely.by: {e}"), true));
+                        }
+                    }
+                    self.ely_login_done = Some(result);
                 }
             }
         }
@@ -1004,10 +1169,13 @@ impl UiState {
                         self.phase_progress = None;
                         self.install_eta_secs = None;
                     }
-                    self.status_message = Some((
-                        format!("Фаза '{phase}' успешно завершена за {elapsed_ms} мс"),
-                        false,
-                    ));
+                    if let Some(url) = phase.strip_prefix("mclogs:") {
+                        self.is_uploading_mclogs = false;
+                        self.mclogs_url = Some(url.to_string());
+                        self.status_message = Some(("Лог загружен на mclogs".to_string(), false));
+                    } else if let Some(msg) = format_phase_completed_toast(&phase, elapsed_ms) {
+                        self.status_message = Some((msg, false));
+                    }
                 }
                 Event::TaskError { context, message } => {
                     if self.installing_instance.is_some() {
@@ -1055,8 +1223,33 @@ impl UiState {
         self.instances.iter().find(|i| i.id == *sel_id)
     }
 
+    /// Invalidates cached install readiness for one instance (or all instances when `None`).
+    pub fn invalidate_install_cache(&self, id: Option<&InstanceId>) {
+        let mut cache = self.install_status_cache.borrow_mut();
+        if let Some(target) = id {
+            cache.remove(target);
+        } else {
+            cache.clear();
+        }
+    }
+
     /// Checks whether an instance has already been installed into the local CAS and instance directory.
+    /// Cached briefly (2s) so hot UI loops do not hammer the filesystem every frame.
     pub fn is_instance_installed(&self, id: &InstanceId) -> bool {
+        const INSTALL_CACHE_TTL: Duration = Duration::from_secs(2);
+        if let Some(&(installed, checked_at)) = self.install_status_cache.borrow().get(id) {
+            if checked_at.elapsed() < INSTALL_CACHE_TTL {
+                return installed;
+            }
+        }
+        let installed = self.probe_instance_installed_on_disk(id);
+        self.install_status_cache
+            .borrow_mut()
+            .insert(id.clone(), (installed, Instant::now()));
+        installed
+    }
+
+    fn probe_instance_installed_on_disk(&self, id: &InstanceId) -> bool {
         let inst_dir = self.paths.instance_dir(id.as_str());
         let state_file = inst_dir.join("install_state.json");
         if state_file.is_file() {
@@ -1073,6 +1266,38 @@ impl UiState {
             }
         }
         inst_dir.join("resolved_version.json").exists() && inst_dir.join("client.jar").exists()
+    }
+}
+
+/// Converts a completed phase identifier into an optional user-facing Russian toast message.
+///
+/// Internal background phases (`catalog_search`, `manifest_fetch`, `mods_scan`, download sub-stages,
+/// and unrecognized internal ASCII identifiers) return `None` so they never spam raw internal names.
+pub fn format_phase_completed_toast(phase: &str, elapsed_ms: u64) -> Option<String> {
+    let trimmed = phase.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let _ = elapsed_ms;
+    match trimmed {
+        // Silent internal/background phases and sub-phases already covered by dedicated completion events
+        "catalog_search" | "manifest_fetch" | "mods_scan" | "manifest" | "assets" | "libraries"
+        | "natives" | "client" | "java" | "install_game" | "install_mods" | "install_cfpack"
+        | "install_mrpack" => None,
+        // User-initiated verification / repair / reinstall operations
+        "verify" => Some("Проверка целостности файлов завершена".to_string()),
+        "verify_and_repair" => Some("Проверка и восстановление файлов завершены".to_string()),
+        "reinstall" => Some("Переустановка инстанса завершена".to_string()),
+        // Already-localized Russian status strings (e.g. Adoptium Java installation)
+        other
+            if other
+                .chars()
+                .any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)) =>
+        {
+            Some(other.to_string())
+        }
+        // Suppress any other raw internal ASCII phase name
+        _ => None,
     }
 }
 
@@ -1363,5 +1588,94 @@ mod tests {
             let clip = err.format_for_clipboard();
             assert!(!clip.is_empty());
         }
+    }
+
+    #[test]
+    fn phase_completed_toast_suppresses_catalog_search_and_localizes_user_phases() {
+        for silent in [
+            "catalog_search",
+            "manifest_fetch",
+            "mods_scan",
+            "manifest",
+            "assets",
+            "libraries",
+            "natives",
+            "client",
+            "java",
+            "install_game",
+            "install_mods",
+            "unknown_internal_phase",
+            "",
+        ] {
+            assert_eq!(
+                format_phase_completed_toast(silent, 10009),
+                None,
+                "internal phase '{silent}' must never produce a user toast"
+            );
+        }
+
+        let verify_msg =
+            format_phase_completed_toast("verify", 420).expect("verify should produce toast");
+        assert!(verify_msg.contains("Проверка"));
+        assert!(!verify_msg.contains("Фаза '"));
+
+        let repair_msg = format_phase_completed_toast("verify_and_repair", 1200)
+            .expect("verify_and_repair should produce toast");
+        assert!(repair_msg.contains("восстановление"));
+
+        let reinstall_msg = format_phase_completed_toast("reinstall", 3100)
+            .expect("reinstall should produce toast");
+        assert!(reinstall_msg.contains("Переустановка"));
+
+        let java_msg = format_phase_completed_toast("Java 21 успешно установлена: 21.0.6", 0)
+            .expect("already localized Russian phase should pass through");
+        assert_eq!(java_msg, "Java 21 успешно установлена: 21.0.6");
+    }
+
+    #[test]
+    fn drain_events_ignores_catalog_search_phase_and_handles_mclogs_response() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path().to_path_buf());
+        let cfg = AppConfig::default();
+        let pool = Arc::new(ComputePool::new(1));
+        let mut state = UiState::new(paths, cfg, pool).expect("state");
+
+        state.status_message = None;
+        state.event_bus.publish(Event::PhaseCompleted {
+            phase: "catalog_search".to_string(),
+            elapsed_ms: 10009,
+        });
+        state.drain_events();
+        assert_eq!(
+            state.status_message, None,
+            "catalog_search PhaseCompleted must never set status_message toast"
+        );
+
+        state.is_uploading_mclogs = true;
+        state
+            .resp_sender
+            .send(UiWorkerResponse::MclogsUploaded(Ok(
+                "https://mclo.gs/test123".to_string(),
+            )))
+            .expect("send ok");
+        state.drain_events();
+        assert!(!state.is_uploading_mclogs);
+        assert_eq!(state.mclogs_url.as_deref(), Some("https://mclo.gs/test123"));
+        assert!(state
+            .status_message
+            .as_ref()
+            .is_some_and(|(msg, is_err)| !is_err && msg.contains("mclogs")));
+
+        state.is_uploading_mclogs = true;
+        state
+            .resp_sender
+            .send(UiWorkerResponse::MclogsUploaded(Err("timeout".to_string())))
+            .expect("send err");
+        state.drain_events();
+        assert!(!state.is_uploading_mclogs);
+        assert!(state
+            .status_message
+            .as_ref()
+            .is_some_and(|(msg, is_err)| *is_err && msg.contains("timeout")));
     }
 }

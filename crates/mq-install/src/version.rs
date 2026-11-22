@@ -203,7 +203,14 @@ impl FlexibleVersionJson {
                     path: c
                         .file
                         .as_ref()
-                        .and_then(|f| f.path.clone())
+                        .and_then(|f| {
+                            f.path.clone().filter(|p| !p.trim().is_empty()).or_else(|| {
+                                f.id.as_deref()
+                                    .map(str::trim)
+                                    .filter(|id| !id.is_empty())
+                                    .map(|id| format!("log_configs/{id}"))
+                            })
+                        })
                         .unwrap_or_default(),
                     url: c
                         .file
@@ -270,6 +277,8 @@ pub struct FlexibleDownloads {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct FlexibleArtifact {
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]

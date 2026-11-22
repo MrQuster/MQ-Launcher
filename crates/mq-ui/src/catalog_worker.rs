@@ -4,11 +4,14 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use mq_core::AppConfig;
 use mq_mods::{
     CatalogHit, CatalogSource, CatalogSourceFilter, ContentProvider, CurseForgeClient,
-    ModrinthClient, SearchQuery, MQ_USER_AGENT,
+    ModrinthClient, SearchQuery, DEFAULT_CURSEFORGE_API_URL, DEFAULT_MODRINTH_API_URL,
+    MODRINTH_USER_AGENT, MQ_USER_AGENT,
 };
 
 use crate::catalog_state::{
@@ -20,6 +23,8 @@ const MAX_ICON_BYTES: usize = 2 * 1024 * 1024;
 pub const ICON_EDGE: u32 = 96;
 /// Decoded edge length for gallery images.
 pub const GALLERY_EDGE: u32 = 512;
+/// Hard per-provider timeout so one slow/unreachable API never stalls catalog search for 10s+.
+const PROVIDER_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
 /// Hosts icons may be fetched from.
 const ICON_HOSTS: &[&str] = &[
     "cdn.modrinth.com",
@@ -27,6 +32,93 @@ const ICON_HOSTS: &[&str] = &[
     "media.curseforge.com",
     "mediafilez.forgecdn.net",
 ];
+
+fn modrinth_search_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(MODRINTH_USER_AGENT)
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(PROVIDER_SEARCH_TIMEOUT)
+            .pool_max_idle_per_host(4)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+fn curseforge_search_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(MQ_USER_AGENT)
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(PROVIDER_SEARCH_TIMEOUT)
+            .pool_max_idle_per_host(4)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+fn icon_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(MQ_USER_AGENT)
+            .connect_timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(8)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+fn resolve_modrinth_base_url(config: &AppConfig) -> String {
+    let env_override = std::env::var(mq_core::config::ENV_MODRINTH_BASE_URL)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    match env_override.as_deref().or_else(|| {
+        config
+            .mock_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }) {
+        Some(mock) => {
+            let trimmed = mock.trim_end_matches('/');
+            if trimmed.ends_with("/modrinth/v2") || trimmed.ends_with("/v2") {
+                trimmed.to_owned()
+            } else {
+                format!("{trimmed}/modrinth/v2")
+            }
+        }
+        None => DEFAULT_MODRINTH_API_URL.to_owned(),
+    }
+}
+
+fn resolve_curseforge_base_url(config: &AppConfig) -> String {
+    let env_override = std::env::var(mq_core::config::ENV_CURSEFORGE_BASE_URL)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    match env_override.as_deref().or_else(|| {
+        config
+            .mock_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }) {
+        Some(mock) => {
+            let trimmed = mock.trim_end_matches('/');
+            if trimmed.ends_with("/curseforge/v1") || trimmed.ends_with("/v1") {
+                trimmed.to_owned()
+            } else {
+                format!("{trimmed}/curseforge/v1")
+            }
+        }
+        None => DEFAULT_CURSEFORGE_API_URL.to_owned(),
+    }
+}
 
 /// Searches one provider and classifies a failure into a [`CatalogSourceError`].
 pub async fn search_source<P: ContentProvider>(
@@ -42,6 +134,23 @@ pub async fn search_source<P: ContentProvider>(
             kind: CatalogErrorKind::classify(&e),
             message: config.sanitize_cf_api_key(&e.to_string()),
         })
+}
+
+/// Searches one provider bounded by `timeout` so a stalled upstream cannot block the whole query.
+pub async fn search_source_with_timeout<P: ContentProvider>(
+    provider: &P,
+    query: &SearchQuery,
+    config: &AppConfig,
+    timeout: Duration,
+) -> Result<Vec<CatalogHit>, CatalogSourceError> {
+    match tokio::time::timeout(timeout, search_source(provider, query, config)).await {
+        Ok(res) => res,
+        Err(_) => Err(CatalogSourceError {
+            source: provider.source(),
+            kind: CatalogErrorKind::Network,
+            message: "Превышено время ожидания ответа сервера".to_string(),
+        }),
+    }
 }
 
 /// Combines per-source outcomes into one page. `has_next` is set when a source filled the page.
@@ -95,35 +204,31 @@ pub async fn run_search(
         if !filter.includes(CatalogSource::Modrinth) {
             return None;
         }
-        Some(match ModrinthClient::from_config(config) {
-            Ok(c) => search_source(&c, query, config).await,
-            Err(e) => Err(CatalogSourceError {
-                source: CatalogSource::Modrinth,
-                kind: CatalogErrorKind::classify(&e),
-                message: e.to_string(),
-            }),
-        })
+        let client = ModrinthClient::with_http_client(
+            modrinth_search_client().clone(),
+            resolve_modrinth_base_url(config),
+        )
+        .with_retry_policy(1, Duration::from_millis(200));
+        Some(search_source_with_timeout(&client, query, config, PROVIDER_SEARCH_TIMEOUT).await)
     };
     let curseforge_fut = async {
         if !filter.includes(CatalogSource::CurseForge) {
             return None;
         }
         // Without a key CurseForge is reported as `MissingKey`; Modrinth keeps working.
-        if config.effective_cf_api_key().is_none() {
+        let Some(api_key) = config.effective_cf_api_key() else {
             return Some(Err(CatalogSourceError {
                 source: CatalogSource::CurseForge,
                 kind: CatalogErrorKind::MissingKey,
                 message: String::new(),
             }));
-        }
-        Some(match CurseForgeClient::from_config(config) {
-            Ok(c) => search_source(&c, query, config).await,
-            Err(e) => Err(CatalogSourceError {
-                source: CatalogSource::CurseForge,
-                kind: CatalogErrorKind::classify(&e),
-                message: config.sanitize_cf_api_key(&e.to_string()),
-            }),
-        })
+        };
+        let client = CurseForgeClient::with_http_client(
+            curseforge_search_client().clone(),
+            resolve_curseforge_base_url(config),
+            Some(api_key),
+        );
+        Some(search_source_with_timeout(&client, query, config, PROVIDER_SEARCH_TIMEOUT).await)
     };
 
     let (m, c) = tokio::join!(modrinth_fut, curseforge_fut);
@@ -167,12 +272,13 @@ pub async fn load_icon(cache_dir: &Path, url: &str, edge: u32) -> Option<egui::C
             return Some(img);
         }
     }
-    let client = reqwest::Client::builder()
-        .user_agent(MQ_USER_AGENT)
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
+    let resp = icon_http_client()
+        .get(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
         .ok()?;
-    let resp = client.get(url).send().await.ok()?.error_for_status().ok()?;
     if resp
         .content_length()
         .is_some_and(|n| n as usize > MAX_ICON_BYTES)
@@ -288,5 +394,63 @@ mod tests {
         let q = SearchQuery::new("x");
         let out = run_search(&cfg, 4, &latest, CatalogSourceFilter::All, &q).await;
         assert!(out.is_none());
+    }
+
+    struct SlowMockProvider(Duration);
+
+    impl ContentProvider for SlowMockProvider {
+        fn source(&self) -> CatalogSource {
+            CatalogSource::CurseForge
+        }
+
+        async fn search(&self, _query: &SearchQuery) -> mq_core::MqResult<Vec<CatalogHit>> {
+            tokio::time::sleep(self.0).await;
+            Ok(Vec::new())
+        }
+
+        async fn get_project(&self, _id: &str) -> mq_core::MqResult<CatalogHit> {
+            Err(mq_core::MqError::Network("mock".into()))
+        }
+
+        async fn get_versions(
+            &self,
+            _id: &str,
+            _mc: Option<&str>,
+            _loader: Option<mq_core::ModLoaderKind>,
+        ) -> mq_core::MqResult<Vec<mq_mods::ProjectVersion>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_version(
+            &self,
+            _project_id: &str,
+            _version_id: &str,
+        ) -> mq_core::MqResult<mq_mods::ProjectVersion> {
+            Err(mq_core::MqError::Network("mock".into()))
+        }
+
+        async fn identify_by_hashes(
+            &self,
+            _hashes: &[String],
+            _fingerprints: &[u32],
+        ) -> mq_core::MqResult<std::collections::HashMap<String, mq_mods::ProjectVersion>> {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_provider_times_out_cleanly_as_network_error() {
+        let slow = SlowMockProvider(Duration::from_millis(500));
+        let cfg = AppConfig::default();
+        let q = SearchQuery::new("sodium");
+        let started = std::time::Instant::now();
+        let res = search_source_with_timeout(&slow, &q, &cfg, Duration::from_millis(40)).await;
+        let err = res.expect_err("slow provider must time out");
+        assert_eq!(err.source, CatalogSource::CurseForge);
+        assert_eq!(err.kind, CatalogErrorKind::Network);
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "timeout should abort quickly instead of waiting for full upstream hang"
+        );
     }
 }

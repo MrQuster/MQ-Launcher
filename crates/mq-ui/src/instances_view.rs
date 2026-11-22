@@ -8,9 +8,9 @@ use egui::{
 };
 use mq_core::{GameLogLevel, ModLoaderKind};
 use mq_instances::{
-    backup_world, delete_world, export_instance_to_zip, export_world_to_zip,
-    import_instance_from_zip, list_backups, list_screenshots, list_worlds, load_servers_dat,
-    ping_server, restore_world, save_servers_dat, InstanceManifest, ServerEntry,
+    backup_world, delete_world, export_world_to_zip, import_instance_from_zip, list_backups,
+    list_screenshots, list_worlds, load_servers_dat, restore_world, save_servers_dat,
+    InstanceManifest, ServerEntry,
 };
 
 use crate::components::button::{button_primary, button_secondary};
@@ -832,12 +832,8 @@ impl InstancesView {
                         ui.add_enabled_ui(can_delete, |ui| {
                             if danger_button(ui, Some(VectorIcon::Trash), "Удалить").clicked()
                             {
-                                let inst_dir = state.paths.instance_dir(target_id.as_str());
-                                if inst_dir.exists() {
-                                    let _ = std::fs::remove_dir_all(&inst_dir);
-                                }
-                                let _ = state.instance_mgr.delete_instance(target_id.as_str());
                                 let id_to_remove = target_id.clone();
+                                state.invalidate_install_cache(Some(&id_to_remove));
                                 state.instances.retain(|i| i.id != id_to_remove);
                                 state.favorite_instances.remove(target_id.as_str());
                                 if state.selected_instance_id.as_ref() == Some(&id_to_remove) {
@@ -845,9 +841,13 @@ impl InstancesView {
                                         state.instances.first().map(|i| i.id.clone());
                                 }
                                 state.status_message = Some((
-                                    format!("Инстанс «{}» успешно удален", target_name),
+                                    format!("Удаление инстанса «{}»...", target_name),
                                     false,
                                 ));
+                                let _ = state.cmd_sender.send(UiWorkerCommand::DeleteInstance {
+                                    instance_id: id_to_remove,
+                                    name: target_name.clone(),
+                                });
                                 self.show_delete_dialog = false;
                                 self.instance_to_delete = None;
                             }
@@ -1079,7 +1079,16 @@ impl InstancesView {
 
                             let click_resp = resp.response.interact(egui::Sense::click());
                             if click_resp.clicked() {
+                                let switched =
+                                    state.selected_instance_id.as_ref() != Some(&inst.id);
                                 state.selected_instance_id = Some(inst.id.clone());
+                                if switched {
+                                    state.installed_mods.clear();
+                                    state.mod_conflicts.clear();
+                                    state.is_scanning_mods = true;
+                                    state.mclogs_url = None;
+                                    state.is_uploading_mclogs = false;
+                                }
                                 // Trigger scanning mods
                                 let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods {
                                     instance_id: inst.id.clone(),
@@ -1127,20 +1136,11 @@ impl InstancesView {
                             let _ = crate::opener::open_that(inst_dir);
                         }
                         if let Some(id) = action_export {
-                            let inst_dir = state.paths.instance_dir(id.as_str());
-                            let out_path = state
-                                .paths
-                                .backups_dir()
-                                .join(format!("{}.zip", id.as_str()));
-                            if let Err(e) = export_instance_to_zip(&inst_dir, &out_path) {
-                                state.status_message =
-                                    Some((format!("Ошибка экспорта: {e}"), true));
-                            } else {
-                                state.status_message = Some((
-                                    format!("Экспортировано в {}", out_path.display()),
-                                    false,
-                                ));
-                            }
+                            state.status_message =
+                                Some(("Экспорт инстанса в архив...".to_string(), false));
+                            let _ = state
+                                .cmd_sender
+                                .send(UiWorkerCommand::ExportInstance { instance_id: id });
                         }
                     });
             });
@@ -1280,7 +1280,7 @@ impl InstancesView {
                         let det_r = det_style.card_corner_radius(state.config.theme.corner_radius);
                         let compact_frame =
                             crate::theme::solid_card_frame_with_config(&tokens, &state.config.theme)
-                                .inner_margin(egui::Margin::symmetric(12, 6));
+                                .inner_margin(egui::Margin::symmetric(10, 4));
                         show_themed_card(
                             ui,
                             compact_frame,
@@ -1479,54 +1479,18 @@ impl InstancesView {
                                 }
                             };
 
-                            // Row 1: Instance Title on the left, Hero Action Button on the right
-                            let avail_w = ui.available_width();
-                            let hero_w = if is_downloading || !is_installed {
-                                210.0
-                            } else {
-                                160.0
-                            };
+                            // Row 1: Full-width Instance Title (Play button lives inline on the left of Row 3)
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&inst_name)
+                                        .color(TEXT_PRIMARY)
+                                        .size(20.0)
+                                        .strong(),
+                                )
+                                .truncate(),
+                            );
 
-                            if avail_w < 400.0 {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&inst_name)
-                                            .color(TEXT_PRIMARY)
-                                            .size(19.0)
-                                            .strong(),
-                                    )
-                                    .truncate(),
-                                );
-                                ui.add_space(6.0);
-                                render_hero_button(ui, state);
-                            } else {
-                                ui.horizontal(|ui| {
-                                    let title_w = (ui.available_width() - hero_w - 12.0).max(100.0);
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new(title_w, 40.0),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&inst_name)
-                                                        .color(TEXT_PRIMARY)
-                                                        .size(20.0)
-                                                        .strong(),
-                                                )
-                                                .truncate(),
-                                            );
-                                        },
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            render_hero_button(ui, state);
-                                        },
-                                    );
-                                });
-                            }
-
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
 
                             // Row 2: Loader & version text + neutral RAM badge + status (B8)
                             ui.horizontal_wrapped(|ui| {
@@ -1564,9 +1528,11 @@ impl InstancesView {
 
                             ui.add_space(8.0);
 
-                            // Row 3: Actions toolbar (B10, B9)
+                            // Row 3: Actions toolbar — Play button FIRST, directly to the LEFT of "Папка игры"
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+
+                                render_hero_button(ui, state);
 
                                 if secondary_glass_button(
                                     ui,
@@ -1580,16 +1546,21 @@ impl InstancesView {
                                     let _ = crate::opener::open_that(inst_dir);
                                 }
 
+                                let can_maintain = !is_downloading && !is_running;
                                 if is_installed {
-                                    if secondary_glass_button(
-                                        ui,
-                                        Some(VectorIcon::Verify),
-                                        "Проверить",
-                                    )
-                                    .on_hover_text(
-                                        "Проверить целостность и починить повреждённые файлы",
-                                    )
-                                    .clicked()
+                                    if ui
+                                        .add_enabled_ui(can_maintain, |ui| {
+                                            secondary_glass_button(
+                                                ui,
+                                                Some(VectorIcon::Verify),
+                                                "Проверить",
+                                            )
+                                            .on_hover_text(
+                                                "Проверить целостность и починить повреждённые файлы",
+                                            )
+                                        })
+                                        .inner
+                                        .clicked()
                                     {
                                         let _ = state.cmd_sender.send(
                                             UiWorkerCommand::VerifyAndRepairInstance {
@@ -1597,15 +1568,19 @@ impl InstancesView {
                                             },
                                         );
                                     }
-                                    if secondary_glass_button(
-                                        ui,
-                                        Some(VectorIcon::Refresh),
-                                        "Переустановить",
-                                    )
-                                    .on_hover_text(
-                                        "Переустановить версию без потери миров (saves) и настроек (options.txt)",
-                                    )
-                                    .clicked()
+                                    if ui
+                                        .add_enabled_ui(can_maintain, |ui| {
+                                            secondary_glass_button(
+                                                ui,
+                                                Some(VectorIcon::Refresh),
+                                                "Переустановить",
+                                            )
+                                            .on_hover_text(
+                                                "Переустановить версию без потери миров (saves) и настроек (options.txt)",
+                                            )
+                                        })
+                                        .inner
+                                        .clicked()
                                     {
                                         let _ = state.cmd_sender.send(
                                             UiWorkerCommand::ReinstallInstance {
@@ -1613,17 +1588,6 @@ impl InstancesView {
                                             },
                                         );
                                     }
-                                } else if !is_downloading
-                                    && secondary_glass_button(
-                                        ui,
-                                        Some(VectorIcon::Download),
-                                        "Установить",
-                                    )
-                                    .clicked()
-                                {
-                                    let _ = state.cmd_sender.send(UiWorkerCommand::InstallInstance {
-                                        instance_id: inst_id.clone(),
-                                    });
                                 }
 
                                 // Secondary actions menu
@@ -1643,6 +1607,17 @@ impl InstancesView {
                                     true,
                                     |ui| {
                                         ui.set_min_width(160.0);
+                                        if !is_installed
+                                            && !is_downloading
+                                            && ui.button("Установить без запуска").clicked()
+                                        {
+                                            let _ = state.cmd_sender.send(
+                                                UiWorkerCommand::InstallInstance {
+                                                    instance_id: inst_id.clone(),
+                                                },
+                                            );
+                                            ui.memory_mut(|mem| mem.close_popup());
+                                        }
                                         if ui.button("Папка модов").clicked() {
                                             let mods_dir = state
                                                 .paths
@@ -1650,36 +1625,35 @@ impl InstancesView {
                                                 .join("mods");
                                             let _ = std::fs::create_dir_all(&mods_dir);
                                             let _ = crate::opener::open_that(mods_dir);
+                                            ui.memory_mut(|mem| mem.close_popup());
                                         }
-                                        if is_installed && ui.button("Переустановить").clicked()
+                                        if is_installed
+                                            && can_maintain
+                                            && ui.button("Переустановить").clicked()
                                         {
                                             let _ = state.cmd_sender.send(
                                                 UiWorkerCommand::ReinstallInstance {
                                                     instance_id: inst_id.clone(),
                                                 },
                                             );
+                                            ui.memory_mut(|mem| mem.close_popup());
                                         }
                                         if ui.button("Экспорт").clicked() {
-                                            let inst_dir = state.paths.instance_dir(inst_id.as_str());
-                                            let out_path = state
-                                                .paths
-                                                .backups_dir()
-                                                .join(format!("{}.zip", inst_id.as_str()));
-                                            if let Err(e) =
-                                                export_instance_to_zip(&inst_dir, &out_path)
-                                            {
-                                                state.status_message =
-                                                    Some((format!("Ошибка экспорта: {e}"), true));
-                                            } else {
-                                                state.status_message = Some((
-                                                    format!("Экспортировано в {}", out_path.display()),
-                                                    false,
-                                                ));
-                                            }
+                                            state.status_message = Some((
+                                                "Экспорт инстанса в архив...".to_string(),
+                                                false,
+                                            ));
+                                            let _ = state.cmd_sender.send(
+                                                UiWorkerCommand::ExportInstance {
+                                                    instance_id: inst_id.clone(),
+                                                },
+                                            );
+                                            ui.memory_mut(|mem| mem.close_popup());
                                         }
                                         if ui.button("Дублировать").clicked() {
                                             self.show_duplicate_dialog = true;
                                             self.duplicate_name = format!("{} (Копия)", inst_name);
+                                            ui.memory_mut(|mem| mem.close_popup());
                                         }
                                         ui.separator();
                                         if ui
@@ -1692,6 +1666,7 @@ impl InstancesView {
                                             self.show_delete_dialog = true;
                                             self.instance_to_delete =
                                                 Some((inst_id.clone(), inst_name.clone()));
+                                            ui.memory_mut(|mem| mem.close_popup());
                                         }
                                     },
                                 );
@@ -3130,6 +3105,19 @@ impl InstancesView {
         }
 
         if !added_names.is_empty() {
+            invalidate_fs_cache::<Vec<(String, bool, u64)>>(
+                ui.ctx(),
+                ("mq_packs_dir_cache", target_dir.to_path_buf()),
+            );
+            let inst_dir = state.paths.instance_dir(inst_id.as_str());
+            invalidate_fs_cache::<(Vec<String>, Vec<String>)>(
+                ui.ctx(),
+                ("mq_resourcepacks_cache", inst_dir.clone()),
+            );
+            invalidate_fs_cache::<(Vec<String>, Option<String>)>(
+                ui.ctx(),
+                ("mq_shaderpacks_cache", inst_dir),
+            );
             let msg = if added_names.len() == 1 {
                 format!("Файл {} добавлен в инстанс", added_names[0])
             } else {
@@ -3758,8 +3746,19 @@ impl InstancesView {
         state: &mut UiState,
         inst_id: &mq_core::InstanceId,
     ) {
-        // 1. Crash Analysis Banner (if any failure detected)
-        if let Some(ref analysis) = state.crash_analysis {
+        let inst_key = inst_id.as_str();
+
+        // 1. Crash Analysis Banner (scoped to the active instance when known)
+        let crash_matches_instance = state
+            .crash_analysis_instance
+            .as_ref()
+            .is_none_or(|id| id == inst_id);
+        let crash_opt = if crash_matches_instance {
+            state.crash_analysis.as_ref()
+        } else {
+            None
+        };
+        if let Some(analysis) = crash_opt {
             let err_frame = egui::Frame::new()
                 .fill(Color32::from_rgb(0x28, 0x14, 0x16))
                 .stroke(Stroke::new(1.0_f32, STATUS_DANGER))
@@ -3793,7 +3792,7 @@ impl InstancesView {
                     });
                 }
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if state.is_uploading_mclogs {
                         ui.label(RichText::new("Загрузка на mclogs...").color(ACCENT_COBALT));
                     } else if let Some(ref url) = state.mclogs_url {
@@ -3804,6 +3803,10 @@ impl InstancesView {
                             .clicked()
                         {
                             ui.ctx().copy_text(url.clone());
+                            state.status_message = Some((
+                                "Ссылка mclogs скопирована в буфер обмена".to_string(),
+                                false,
+                            ));
                         }
                     } else if secondary_glass_button(
                         ui,
@@ -3812,48 +3815,83 @@ impl InstancesView {
                     )
                     .clicked()
                     {
-                        state.is_uploading_mclogs = true;
                         let full_log: String = state
                             .game_logs
                             .iter()
+                            .filter(|l| l.instance == inst_key)
                             .map(|l| l.line.as_str())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let bus = state.event_bus.clone();
-                        tokio::spawn(async move {
-                            let client = reqwest::Client::new();
-                            if let Ok(url) = mq_launch::upload_to_mclogs(&client, &full_log).await {
-                                bus.publish(mq_core::Event::PhaseCompleted {
-                                    phase: format!("mclogs:{url}"),
-                                    elapsed_ms: 0,
-                                });
-                            }
-                        });
+                        if full_log.trim().is_empty() {
+                            state.status_message =
+                                Some(("Лог пуст — нечего загружать".to_string(), true));
+                        } else {
+                            state.is_uploading_mclogs = true;
+                            let _ = state
+                                .cmd_sender
+                                .send(UiWorkerCommand::UploadMclogs { log_text: full_log });
+                        }
                     }
                 });
             });
             ui.add_space(8.0);
         }
 
+        // Single pass over logs for this instance: count levels and collect visible row indices.
+        let query = self.console_search.trim().to_lowercase();
+        let mut inst_total = 0usize;
+        let mut info_count = 0usize;
+        let mut warn_count = 0usize;
+        let mut error_count = 0usize;
+        let mut filtered_indices: Vec<usize> = Vec::new();
+        for (idx, entry) in state.game_logs.iter().enumerate() {
+            if entry.instance != inst_key {
+                continue;
+            }
+            inst_total += 1;
+            match entry.level {
+                GameLogLevel::Info => info_count += 1,
+                GameLogLevel::Warn => warn_count += 1,
+                GameLogLevel::Error => error_count += 1,
+                GameLogLevel::Debug => {}
+            }
+            if let Some(flt) = state.log_filter {
+                if entry.level != flt {
+                    continue;
+                }
+            }
+            if !query.is_empty() && !entry.line.to_lowercase().contains(&query) {
+                continue;
+            }
+            filtered_indices.push(idx);
+        }
+
         // Row 1: Line counter, autoscroll checkbox, action buttons
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-            ui.label(
-                RichText::new(format!("Строк в логе: {}", state.game_logs.len())).color(TEXT_MUTED),
-            );
+            ui.label(RichText::new(format!("Строк в логе: {inst_total}")).color(TEXT_MUTED));
             ui.checkbox(&mut self.console_autoscroll, "Автоскролл");
             if secondary_glass_button(ui, Some(VectorIcon::Copy), "Копировать лог").clicked()
             {
                 let full_log: String = state
                     .game_logs
                     .iter()
+                    .filter(|l| l.instance == inst_key)
                     .map(|l| l.line.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                ui.ctx().copy_text(full_log);
+                if full_log.is_empty() {
+                    state.status_message = Some(("Лог пуст".to_string(), false));
+                } else {
+                    ui.ctx().copy_text(full_log);
+                    state.status_message =
+                        Some(("Лог скопирован в буфер обмена".to_string(), false));
+                }
             }
             if secondary_glass_button(ui, None, "Очистить").clicked() {
-                state.game_logs.clear();
+                state.game_logs.retain(|l| l.instance != inst_key);
+                state.mclogs_url = None;
+                state.status_message = Some(("Лог очищен".to_string(), false));
             }
         });
 
@@ -3866,22 +3904,6 @@ impl InstancesView {
             SearchField::new(&mut self.console_search, "Поиск в логе...")
                 .width(150.0)
                 .show(ui, &tokens);
-
-            let info_count = state
-                .game_logs
-                .iter()
-                .filter(|l| l.level == GameLogLevel::Info)
-                .count();
-            let warn_count = state
-                .game_logs
-                .iter()
-                .filter(|l| l.level == GameLogLevel::Warn)
-                .count();
-            let error_count = state
-                .game_logs
-                .iter()
-                .filter(|l| l.level == GameLogLevel::Error)
-                .count();
 
             if FilterChip::new("INFO", state.log_filter == Some(GameLogLevel::Info))
                 .dot_color(tokens.text_muted)
@@ -3925,7 +3947,8 @@ impl InstancesView {
 
         ui.add_space(8.0);
 
-        // B3: Console occupies full remaining height, min 240px, monospace 12 font
+        // B3: Virtualized console (`show_rows`) occupies full remaining height so 10k log lines
+        // never stall the UI thread.
         let avail_h = (ui.available_height() - 12.0).max(240.0);
         let console_frame = egui::Frame::new()
             .fill(Color32::from_rgb(0x08, 0x0A, 0x0E))
@@ -3936,47 +3959,48 @@ impl InstancesView {
         console_frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.set_height(avail_h);
-            ScrollArea::vertical()
-                .id_salt("console_scroll")
-                .auto_shrink([false, false])
-                .stick_to_bottom(self.console_autoscroll)
-                .show(ui, |ui| {
-                    if state.game_logs.is_empty() {
-                        ui.label(
-                            RichText::new("Логи игры появятся здесь при запуске Minecraft")
-                                .color(TEXT_MUTED)
-                                .font(egui::FontId::monospace(12.0)),
-                        );
-                    } else {
-                        let query = self.console_search.to_lowercase();
-                        for entry in &state.game_logs {
-                            if entry.instance != inst_id.as_str() {
+            let font_id = egui::FontId::monospace(12.0);
+            let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(15.0);
+            if filtered_indices.is_empty() {
+                ScrollArea::vertical()
+                    .id_salt("console_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let empty_msg = if inst_total == 0 {
+                            "Логи игры появятся здесь при запуске Minecraft"
+                        } else {
+                            "Нет строк лога, подходящих под текущий фильтр"
+                        };
+                        ui.label(RichText::new(empty_msg).color(TEXT_MUTED).font(font_id));
+                    });
+            } else {
+                ScrollArea::vertical()
+                    .id_salt("console_scroll")
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(self.console_autoscroll)
+                    .show_rows(ui, row_height, filtered_indices.len(), |ui, row_range| {
+                        for row_idx in row_range {
+                            let Some(&log_idx) = filtered_indices.get(row_idx) else {
                                 continue;
-                            }
-                            if let Some(flt) = state.log_filter {
-                                if entry.level != flt {
-                                    continue;
-                                }
-                            }
-                            if !query.is_empty() && !entry.line.to_lowercase().contains(&query) {
+                            };
+                            let Some(entry) = state.game_logs.get(log_idx) else {
                                 continue;
-                            }
-
+                            };
                             let col = match entry.level {
                                 GameLogLevel::Info => TEXT_PRIMARY,
                                 GameLogLevel::Warn => STATUS_WARN,
                                 GameLogLevel::Error => STATUS_DANGER,
                                 GameLogLevel::Debug => TEXT_MUTED,
                             };
-
-                            ui.label(
-                                RichText::new(&entry.line)
-                                    .color(col)
-                                    .font(egui::FontId::monospace(12.0)),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&entry.line).color(col).font(font_id.clone()),
+                                )
+                                .truncate(),
                             );
                         }
-                    }
-                });
+                    });
+            }
         });
     }
 
@@ -4051,6 +4075,10 @@ impl InstancesView {
                             let mut is_on = enabled;
                             if crate::widgets::smooth_toggle(ui, &mut is_on).changed() {
                                 toggle_pack_file(packs_dir, &name);
+                                invalidate_fs_cache::<Vec<(String, bool, u64)>>(
+                                    ui.ctx(),
+                                    ("mq_packs_dir_cache", packs_dir.to_path_buf()),
+                                );
                             }
                             let name_col = if enabled {
                                 tokens.text
@@ -4075,6 +4103,10 @@ impl InstancesView {
                                         .clicked()
                                     {
                                         delete_pack_file(packs_dir, &name);
+                                        invalidate_fs_cache::<Vec<(String, bool, u64)>>(
+                                            ui.ctx(),
+                                            ("mq_packs_dir_cache", packs_dir.to_path_buf()),
+                                        );
                                     }
                                 },
                             );
@@ -4104,8 +4136,10 @@ impl InstancesView {
     ) {
         let tokens = Tokens::from_config(&state.config.theme);
         let dir = state.paths.instance_dir(inst_id.as_str()).join(subdir);
-        let _ = std::fs::create_dir_all(&dir);
-        let packs = list_packs_in_dir(&dir);
+        let packs = cached_fs_value(ui.ctx(), ("mq_packs_dir_cache", dir.clone()), || {
+            let _ = std::fs::create_dir_all(&dir);
+            list_packs_in_dir(&dir)
+        });
 
         self.render_content_sub_mode_bar(
             ui,
@@ -4194,19 +4228,27 @@ impl InstancesView {
         );
 
         let inst_dir = state.paths.instance_dir(inst_id.as_str());
-        let installed = mq_mods::shaders::ShaderManager::list_resourcepacks(&inst_dir);
+        let (installed, mut order) = cached_fs_value(
+            ui.ctx(),
+            ("mq_resourcepacks_cache", inst_dir.clone()),
+            || {
+                let installed = mq_mods::shaders::ShaderManager::list_resourcepacks(&inst_dir);
+                let options_path = inst_dir.join("options.txt");
+                let mut order =
+                    mq_launch::options::MinecraftOptionsManager::read_resource_packs(&options_path)
+                        .unwrap_or_default();
+                for pack in &installed {
+                    let entry = format!("file/{pack}");
+                    if !order.contains(&entry) {
+                        order.push(entry);
+                    }
+                }
+                (installed, order)
+            },
+        );
         if !installed.is_empty() {
             let tokens = Tokens::from_config(&state.config.theme);
             let options_path = inst_dir.join("options.txt");
-            let mut order =
-                mq_launch::options::MinecraftOptionsManager::read_resource_packs(&options_path)
-                    .unwrap_or_default();
-            for pack in &installed {
-                let entry = format!("file/{pack}");
-                if !order.contains(&entry) {
-                    order.push(entry);
-                }
-            }
             ui.add_space(10.0);
             egui::Frame::new()
                 .fill(tokens.bg_surface)
@@ -4243,6 +4285,10 @@ impl InstancesView {
                         let _ = mq_launch::options::MinecraftOptionsManager::update_resource_packs(
                             &options_path,
                             &order,
+                        );
+                        invalidate_fs_cache::<(Vec<String>, Vec<String>)>(
+                            ui.ctx(),
+                            ("mq_resourcepacks_cache", inst_dir.clone()),
                         );
                     }
                 });
@@ -4294,9 +4340,14 @@ impl InstancesView {
                         .small(),
                     );
                 });
-                let packs = mq_mods::shaders::ShaderManager::list_shaderpacks(&inst_dir);
+                let (packs, active) =
+                    cached_fs_value(ui.ctx(), ("mq_shaderpacks_cache", inst_dir.clone()), || {
+                        (
+                            mq_mods::shaders::ShaderManager::list_shaderpacks(&inst_dir),
+                            mq_mods::shaders::ShaderManager::read_active_shaderpack(&inst_dir),
+                        )
+                    });
                 if !packs.is_empty() {
-                    let active = mq_mods::shaders::ShaderManager::read_active_shaderpack(&inst_dir);
                     ui.add_space(4.0);
                     for pack in packs {
                         let mut is_active = active.as_deref() == Some(pack.as_str());
@@ -4307,6 +4358,10 @@ impl InstancesView {
                                 let next = if is_active { Some(pack.as_str()) } else { None };
                                 let _ = mq_mods::shaders::ShaderManager::set_active_shaderpack(
                                     &inst_dir, next,
+                                );
+                                invalidate_fs_cache::<(Vec<String>, Option<String>)>(
+                                    ui.ctx(),
+                                    ("mq_shaderpacks_cache", inst_dir.clone()),
                                 );
                             }
                             ui.label(RichText::new(&pack).color(tokens.text));
@@ -4361,7 +4416,9 @@ impl InstancesView {
 
         ui.add_space(6.0);
 
-        let worlds = list_worlds(&inst_dir).unwrap_or_default();
+        let worlds = cached_fs_value(ui.ctx(), ("mq_worlds_cache", inst_dir.clone()), || {
+            list_worlds(&inst_dir).unwrap_or_default()
+        });
         if worlds.is_empty() {
             ui.add_space(20.0);
             ui.label(
@@ -4416,6 +4473,10 @@ impl InstancesView {
                                 &w.folder_name,
                             ) {
                                 Ok(bp) => {
+                                    invalidate_fs_cache::<Vec<mq_instances::WorldBackupInfo>>(
+                                        ui.ctx(),
+                                        ("mq_backups_cache", inst_id.as_str().to_owned()),
+                                    );
                                     state.status_message = Some((
                                         format!(
                                             "Бэкап создан: {}",
@@ -4446,6 +4507,10 @@ impl InstancesView {
                         if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить").clicked()
                         {
                             let _ = delete_world(&inst_dir, &w.folder_name);
+                            invalidate_fs_cache::<Vec<mq_instances::WorldInfo>>(
+                                ui.ctx(),
+                                ("mq_worlds_cache", inst_dir.clone()),
+                            );
                             state.status_message =
                                 Some((format!("Мир '{}' удален", w.display_name), false));
                         }
@@ -4464,7 +4529,11 @@ impl InstancesView {
                 .strong()
                 .size(13.0),
         );
-        let backups = list_backups(&backups_root, inst_id.as_str()).unwrap_or_default();
+        let backups = cached_fs_value(
+            ui.ctx(),
+            ("mq_backups_cache", inst_id.as_str().to_owned()),
+            || list_backups(&backups_root, inst_id.as_str()).unwrap_or_default(),
+        );
         if backups.is_empty() {
             ui.label(
                 RichText::new("Резервных копий пока нет")
@@ -4490,6 +4559,10 @@ impl InstancesView {
                             None,
                         ) {
                             Ok(_) => {
+                                invalidate_fs_cache::<Vec<mq_instances::WorldInfo>>(
+                                    ui.ctx(),
+                                    ("mq_worlds_cache", inst_dir.clone()),
+                                );
                                 state.status_message = Some((
                                     format!("Мир успешно восстановлен из {}", b.file_name),
                                     false,
@@ -4513,7 +4586,9 @@ impl InstancesView {
         inst_id: &mq_core::InstanceId,
     ) {
         let inst_dir = state.paths.instance_dir(inst_id.as_str());
-        let mut servers = load_servers_dat(&inst_dir).unwrap_or_default();
+        let mut servers = cached_fs_value(ui.ctx(), ("mq_servers_cache", inst_dir.clone()), || {
+            load_servers_dat(&inst_dir).unwrap_or_default()
+        });
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
@@ -4575,12 +4650,19 @@ impl InstancesView {
 
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                        if secondary_glass_button(ui, Some(VectorIcon::Refresh), "Пинг").clicked()
+                        let is_pinging = state.pinging_servers.contains(&s.ip);
+                        let ping_label = if is_pinging {
+                            "Пинг..."
+                        } else {
+                            "Пинг"
+                        };
+                        if secondary_glass_button(ui, Some(VectorIcon::Refresh), ping_label)
+                            .clicked()
+                            && !is_pinging
                         {
                             let ip = s.ip.clone();
-                            if let Ok(res) = ping_server(&ip, 3000) {
-                                state.server_pings.insert(ip, res);
-                            }
+                            state.pinging_servers.insert(ip.clone());
+                            let _ = state.cmd_sender.send(UiWorkerCommand::PingServer { ip });
                         }
                         if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить").clicked()
                         {
@@ -4594,6 +4676,10 @@ impl InstancesView {
             if let Some(del_idx) = server_to_delete {
                 servers.remove(del_idx);
                 let _ = save_servers_dat(&inst_dir, &servers);
+                invalidate_fs_cache::<Vec<ServerEntry>>(
+                    ui.ctx(),
+                    ("mq_servers_cache", inst_dir.clone()),
+                );
             }
         }
 
@@ -4637,6 +4723,10 @@ impl InstancesView {
                                 accept_textures: 1,
                             });
                             let _ = save_servers_dat(&inst_dir, &servers);
+                            invalidate_fs_cache::<Vec<ServerEntry>>(
+                                ui.ctx(),
+                                ("mq_servers_cache", inst_dir.clone()),
+                            );
                             self.new_server_name.clear();
                             self.new_server_ip.clear();
                             self.show_add_server_dialog = false;
@@ -4657,7 +4747,10 @@ impl InstancesView {
         inst_id: &mq_core::InstanceId,
     ) {
         let inst_dir = state.paths.instance_dir(inst_id.as_str());
-        let screenshots = list_screenshots(&inst_dir).unwrap_or_default();
+        let screenshots =
+            cached_fs_value(ui.ctx(), ("mq_screenshots_cache", inst_dir.clone()), || {
+                list_screenshots(&inst_dir).unwrap_or_default()
+            });
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
@@ -4756,6 +4849,10 @@ impl InstancesView {
                     }
                     if let Some(path) = file_to_delete {
                         let _ = std::fs::remove_file(path);
+                        invalidate_fs_cache::<Vec<mq_instances::ScreenshotInfo>>(
+                            ui.ctx(),
+                            ("mq_screenshots_cache", inst_dir.clone()),
+                        );
                     }
                 });
         }
@@ -4917,6 +5014,45 @@ impl InstancesView {
             }
         }
     }
+}
+
+#[derive(Clone)]
+struct CachedFsValue<T> {
+    value: T,
+    refreshed_at: std::time::Instant,
+}
+
+fn cached_fs_value<T, K, F>(ctx: &egui::Context, key: K, compute: F) -> T
+where
+    T: Clone + Send + Sync + 'static,
+    K: std::hash::Hash,
+    F: FnOnce() -> T,
+{
+    const FS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    let id = egui::Id::new(key);
+    if let Some(entry) = ctx.data(|d| d.get_temp::<CachedFsValue<T>>(id)) {
+        if entry.refreshed_at.elapsed() < FS_CACHE_TTL {
+            return entry.value;
+        }
+    }
+    let value = compute();
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            id,
+            CachedFsValue {
+                value: value.clone(),
+                refreshed_at: std::time::Instant::now(),
+            },
+        );
+    });
+    value
+}
+
+fn invalidate_fs_cache<T: 'static>(ctx: &egui::Context, key: impl std::hash::Hash) {
+    let id = egui::Id::new(key);
+    ctx.data_mut(|d| {
+        d.remove::<CachedFsValue<T>>(id);
+    });
 }
 
 fn strip_disabled_suffix(filename: &str) -> Option<&str> {
@@ -5454,5 +5590,96 @@ mod tests {
             state.is_launching,
             "expected Скачать button click to trigger launch"
         );
+    }
+
+    #[test]
+    fn play_button_is_placed_left_of_game_folder_in_action_toolbar() {
+        let (_tmp, mut state) = test_ui_state();
+        let inst = state
+            .instance_mgr
+            .create_instance("Forge Dawn", "1.20.1", ModLoaderKind::Forge, None)
+            .expect("forge instance");
+        let inst_id = inst.id.clone();
+        state.instances.push(inst);
+        state.selected_instance_id = Some(inst_id.clone());
+
+        let mut view = InstancesView {
+            view_mode: InstanceViewMode::List,
+            current_tab: InstanceDetailTab::Console,
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        for width in [1180.0_f32, 760.0_f32] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(width, 740.0),
+                )),
+                ..Default::default()
+            };
+
+            // 1. Uninstalled instance: "Скачать и играть" is left of "Папка игры" on the same row.
+            let _ = ctx.run(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    view.ui(ui, &mut state);
+                });
+            });
+            let out_uninstalled = ctx.run(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    view.ui(ui, &mut state);
+                });
+            });
+            let play_pos = find_text_center(&out_uninstalled.shapes, "Скачать и играть");
+            let folder_pos = find_text_center(&out_uninstalled.shapes, "Папка игры");
+            assert!(
+                play_pos.x < folder_pos.x,
+                "at width {width}, expected 'Скачать и играть' ({}) to be left of 'Папка игры' ({})",
+                play_pos.x,
+                folder_pos.x
+            );
+            assert!(
+                (play_pos.y - folder_pos.y).abs() < 4.0,
+                "at width {width}, expected Play ({}) and Folder ({}) on the same toolbar row",
+                play_pos.y,
+                folder_pos.y
+            );
+
+            // 2. Installed instance: "Играть" is left of "Папка игры" on the same row.
+            let inst_dir = state.paths.instance_dir(inst_id.as_str());
+            std::fs::create_dir_all(&inst_dir).expect("inst dir");
+            std::fs::write(inst_dir.join("install_state.json"), r#"{"status":"ready"}"#)
+                .expect("write install_state");
+            state.invalidate_install_cache(Some(&inst_id));
+
+            let _ = ctx.run(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    view.ui(ui, &mut state);
+                });
+            });
+            let out_installed = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    view.ui(ui, &mut state);
+                });
+            });
+            let play_ready = find_text_center(&out_installed.shapes, "Играть");
+            let folder_ready = find_text_center(&out_installed.shapes, "Папка игры");
+            assert!(
+                play_ready.x < folder_ready.x,
+                "at width {width}, expected 'Играть' ({}) to be left of 'Папка игры' ({})",
+                play_ready.x,
+                folder_ready.x
+            );
+            assert!(
+                (play_ready.y - folder_ready.y).abs() < 4.0,
+                "at width {width}, expected 'Играть' ({}) and 'Папка игры' ({}) on the same row",
+                play_ready.y,
+                folder_ready.y
+            );
+
+            // Reset to uninstalled for next width iteration.
+            let _ = std::fs::remove_file(inst_dir.join("install_state.json"));
+            state.invalidate_install_cache(Some(&inst_id));
+        }
     }
 }

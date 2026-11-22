@@ -116,22 +116,24 @@ impl ThemeStyleParams {
         }
     }
 
-    /// Liquid Glass (`Serpantinum v2.5.1` 1:1 optical style):
-    /// clear crystal blurred wallpaper inside, Snell's-law bezel refraction on edges,
-    /// delicate 1px directional specular rim (`rim = 0.45`), and 10px continuous corners.
+    /// Liquid Glass optical style:
+    /// true transparent compositor glass with frosted translucency, optical bevel refraction,
+    /// prismatic chromatic rim dispersion, directional + cursor-reactive specular highlights,
+    /// and 10px continuous corners (plus optional Snell's-law refraction when a custom wallpaper
+    /// image is explicitly configured).
     pub fn liquid_glass(cfg: &ThemeConfig) -> Self {
         let win_a = crate::state::safe_clamp_f32(cfg.window_opacity, 0.35, 1.0);
-        let card_a = crate::state::safe_clamp_f32(cfg.card_opacity, 0.35, 1.0);
+        let card_a = crate::state::safe_clamp_f32(cfg.card_opacity, 0.18, 1.0);
         let glow_factor = crate::state::safe_clamp_f32(cfg.border_glow, 0.10, 1.0);
         Self {
             preset: ThemePreset::LiquidGlass,
             compositor_transparent: true,
             window_alpha: win_a,
-            sidebar_alpha: (win_a * 0.56).clamp(0.36, 0.80),
+            sidebar_alpha: (win_a * 0.52).clamp(0.28, 0.76),
             surface_alpha: card_a,
-            hud_alpha: (win_a * 0.62).clamp(0.40, 0.84),
+            hud_alpha: (win_a * 0.58).clamp(0.32, 0.80),
             modal_alpha: (card_a + 0.48).clamp(0.80, 0.94),
-            input_alpha: (card_a + 0.08).clamp(0.32, 0.72),
+            input_alpha: (card_a + 0.12).clamp(0.30, 0.74),
             backdrop_blur_strength: 0.88,
             refraction_border: true,
             refraction_top_left: Color32::from_rgba_unmultiplied(
@@ -146,7 +148,7 @@ impl ThemeStyleParams {
                 248,
                 (76.0 * (0.65 + 0.35 * glow_factor)).round().min(108.0) as u8,
             ),
-            inner_sheen_alpha: 0,
+            inner_sheen_alpha: 22,
             animated_ambient_bg: true,
             ambient_lobe_a: Color32::from_rgb(0x28, 0x2C, 0x36),
             ambient_lobe_b: Color32::from_rgb(0x1E, 0x22, 0x2B),
@@ -784,10 +786,9 @@ impl egui_wgpu::CallbackTrait for LiquidGlassCallback {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_gpu_liquid_glass_shape(
+fn compute_gpu_liquid_glass_uniforms(
     ctx: &Context,
     rect: Rect,
-    callback_rect: Rect,
     radius_pt: f32,
     bevel_pt: f32,
     tint_color: [f32; 4],
@@ -795,17 +796,16 @@ fn build_gpu_liquid_glass_shape(
     dispersion: f32,
     spec_radius_pt: f32,
     hover_t: f32,
-) -> Shape {
+) -> Option<(Option<Arc<ActiveGpuBackdrop>>, LiquidGlassUniforms, u64)> {
     let screen_rect = ctx.screen_rect();
     if !screen_rect.is_positive()
         || !rect.is_positive()
-        || !callback_rect.is_positive()
         || !rect.min.x.is_finite()
         || !rect.min.y.is_finite()
         || !rect.max.x.is_finite()
         || !rect.max.y.is_finite()
     {
-        return Shape::Noop;
+        return None;
     }
 
     let raw_ppp = ctx.pixels_per_point();
@@ -830,7 +830,7 @@ fn build_gpu_liquid_glass_shape(
         || !rect.max.x.is_finite()
         || !rect.max.y.is_finite()
     {
-        return Shape::Noop;
+        return None;
     }
     let radius_pt = if radius_pt.is_finite() {
         (radius_pt * scale).max(0.0)
@@ -869,6 +869,7 @@ fn build_gpu_liquid_glass_shape(
         .unwrap_or([-10000.0, -10000.0]);
 
     let backdrop_opt = active_gpu_backdrop(ctx).map(Arc::new);
+    let has_backdrop = if backdrop_opt.is_some() { 1.0 } else { 0.0 };
     let (uv_min, uv_size, backdrop_min, backdrop_size, backdrop_dim, generation) =
         if let Some(ref b) = backdrop_opt {
             (
@@ -894,7 +895,13 @@ fn build_gpu_liquid_glass_shape(
         };
 
     let mut effective_tint = tint_color;
-    effective_tint[3] = (effective_tint[3] + backdrop_dim * 0.18).clamp(0.0, 0.90);
+    effective_tint[3] = (effective_tint[3] + backdrop_dim * 0.18).clamp(0.08, 0.90);
+
+    let clamped_disp = if dispersion.is_finite() {
+        dispersion.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     let uniforms = LiquidGlassUniforms {
         rect_min: phys_min,
@@ -909,7 +916,7 @@ fn build_gpu_liquid_glass_shape(
         corner_radius,
         bevel_width,
         ior_strength,
-        dispersion,
+        dispersion: clamped_disp,
         cursor_pos,
         spec_radius: if spec_radius_pt.is_finite() {
             (spec_radius_pt * scale * ppp).max(0.0)
@@ -921,6 +928,40 @@ fn build_gpu_liquid_glass_shape(
         } else {
             0.0
         },
+        mode_params: [has_backdrop, effective_tint[3], clamped_disp, 0.0],
+    };
+
+    Some((backdrop_opt, uniforms, generation))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_gpu_liquid_glass_shape(
+    ctx: &Context,
+    rect: Rect,
+    callback_rect: Rect,
+    radius_pt: f32,
+    bevel_pt: f32,
+    tint_color: [f32; 4],
+    ior_strength: f32,
+    dispersion: f32,
+    spec_radius_pt: f32,
+    hover_t: f32,
+) -> Shape {
+    if !callback_rect.is_positive() {
+        return Shape::Noop;
+    }
+    let Some((backdrop_opt, uniforms, generation)) = compute_gpu_liquid_glass_uniforms(
+        ctx,
+        rect,
+        radius_pt,
+        bevel_pt,
+        tint_color,
+        ior_strength,
+        dispersion,
+        spec_radius_pt,
+        hover_t,
+    ) else {
+        return Shape::Noop;
     };
 
     Shape::Callback(egui_wgpu::Callback::new_paint_callback(
@@ -934,8 +975,8 @@ fn build_gpu_liquid_glass_shape(
     ))
 }
 
-/// Collects Liquid Glass shapes (`egui_wgpu::CallbackTrait` on wgpu, or Serpantinum `Mesh` + border
-/// on `glow`/CPU fallback) strictly beneath child content.
+/// Collects Liquid Glass shapes (`egui_wgpu::CallbackTrait` on wgpu, or translucent `Mesh` + bevel
+/// border on `glow`/CPU fallback) strictly beneath child content.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_glass_underlay_shapes(
     ctx: &Context,
@@ -958,12 +999,27 @@ pub fn collect_glass_underlay_shapes(
 
     if is_wgpu_glass_available(ctx) {
         let bevel_pt = (rect.width().min(rect.height()) * 0.28).clamp(4.0, 12.0);
-        let veil_a = if is_button {
-            0.32 + 0.06 * hover_t
+        let has_custom_backdrop = active_gpu_backdrop(ctx).is_some();
+        let (tint, dispersion) = if has_custom_backdrop {
+            let veil_a = if is_button {
+                0.32 + 0.06 * hover_t
+            } else {
+                0.28 + 0.05 * hover_t
+            };
+            ([16.0 / 255.0, 18.0 / 255.0, 24.0 / 255.0, veil_a], 0.11)
         } else {
-            0.28 + 0.05 * hover_t
+            let body_a = if is_button {
+                (style.surface_alpha + 0.14 + 0.08 * hover_t).clamp(0.32, 0.84)
+            } else {
+                (style.surface_alpha + 0.06 + 0.05 * hover_t).clamp(0.24, 0.80)
+            };
+            let rgb = if is_button {
+                [28.0 / 255.0, 33.0 / 255.0, 44.0 / 255.0]
+            } else {
+                [22.0 / 255.0, 26.0 / 255.0, 36.0 / 255.0]
+            };
+            ([rgb[0], rgb[1], rgb[2], body_a], 0.22)
         };
-        let tint = [16.0 / 255.0, 18.0 / 255.0, 24.0 / 255.0, veil_a];
         let spec_r = if is_button {
             style.specular_radius_button
         } else {
@@ -977,7 +1033,7 @@ pub fn collect_glass_underlay_shapes(
             bevel_pt,
             tint,
             if is_button { 0.036 } else { 0.045 },
-            0.11,
+            dispersion,
             spec_r,
             hover_t,
         );
@@ -989,7 +1045,7 @@ pub fn collect_glass_underlay_shapes(
 
     let cr = CornerRadius::same(r.round() as u8);
 
-    // Fallback (OpenGL / glow / unit tests): Subtle Serpantinum drop shadow
+    // Fallback (OpenGL / glow / unit tests): subtle drop shadow
     if rect.height() >= 18.0 {
         out.push(Shape::rect_stroke(
             rect.translate(egui::vec2(0.0, 1.5)).expand(1.0),
@@ -1002,7 +1058,8 @@ pub fn collect_glass_underlay_shapes(
         ));
     }
 
-    // Fallback: CPU-blurred wallpaper refraction mesh
+    // Fallback: custom wallpaper refraction mesh if an explicit CustomImage is active,
+    // otherwise true translucent frosted glass fill over the transparent window.
     if let Some(glass_mesh) =
         build_serpantinum_refracted_glass_mesh(ctx, rect, r, hover_t, is_button, None)
     {
@@ -1019,11 +1076,14 @@ pub fn collect_glass_underlay_shapes(
         ));
     } else {
         let fallback_a =
-            ((style.surface_alpha + 0.34 + 0.08 * hover_t).clamp(0.45, 0.84) * 255.0).round() as u8;
+            ((style.surface_alpha + if is_button { 0.14 } else { 0.06 } + 0.06 * hover_t)
+                .clamp(0.24, 0.82)
+                * 255.0)
+                .round() as u8;
         out.push(Shape::rect_filled(
             rect.shrink(0.5),
             cr,
-            Color32::from_rgba_unmultiplied(24, 27, 35, fallback_a),
+            Color32::from_rgba_unmultiplied(22, 26, 36, fallback_a),
         ));
     }
 
@@ -1125,11 +1185,17 @@ pub fn collect_tinted_glass_pill_shapes(
 
     if is_wgpu_glass_available(ctx) {
         let bevel_pt = (rect.width().min(rect.height()) * 0.28).clamp(4.0, 11.0);
+        let has_custom_backdrop = active_gpu_backdrop(ctx).is_some();
+        let pill_alpha = if has_custom_backdrop {
+            0.32 + 0.08 * hover_t
+        } else {
+            (style.surface_alpha + 0.16 + 0.09 * hover_t).clamp(0.36, 0.84)
+        };
         let tint_norm = [
             tint.r() as f32 / 255.0,
             tint.g() as f32 / 255.0,
             tint.b() as f32 / 255.0,
-            0.32 + 0.08 * hover_t,
+            pill_alpha,
         ];
         let shape = build_gpu_liquid_glass_shape(
             ctx,
@@ -1139,7 +1205,7 @@ pub fn collect_tinted_glass_pill_shapes(
             bevel_pt,
             tint_norm,
             0.036,
-            0.11,
+            if has_custom_backdrop { 0.11 } else { 0.22 },
             style.specular_radius_button,
             hover_t,
         );
@@ -1149,15 +1215,23 @@ pub fn collect_tinted_glass_pill_shapes(
         return;
     }
 
-    if let Some(mesh) =
+    let has_mesh = if let Some(mesh) =
         build_serpantinum_refracted_glass_mesh(ctx, rect, r, hover_t, true, Some(tint))
     {
         out.push(Shape::Mesh(mesh.into()));
-    }
+        true
+    } else {
+        false
+    };
+    let fill_a = if has_mesh {
+        64
+    } else {
+        ((style.surface_alpha + 0.14 + 0.08 * hover_t).clamp(0.34, 0.82) * 255.0).round() as u8
+    };
     out.push(Shape::rect_filled(
         rect.shrink(0.5),
         CornerRadius::same(r.round() as u8),
-        Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 64),
+        Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), fill_a),
     ));
     collect_refractive_gradient_border_shapes(
         rect,
@@ -1227,13 +1301,18 @@ pub fn paint_sidebar_glass_dock(
     }
 
     if is_wgpu_glass_available(ctx) {
+        let alpha = if active_gpu_backdrop(ctx).is_some() {
+            0.34
+        } else {
+            (style.sidebar_alpha * 0.82).clamp(0.24, 0.72)
+        };
         painter.add(build_gpu_liquid_glass_shape(
             ctx,
             rect,
             rect,
             0.0,
             0.0,
-            [14.0 / 255.0, 16.0 / 255.0, 22.0 / 255.0, 0.34],
+            [18.0 / 255.0, 22.0 / 255.0, 30.0 / 255.0, alpha],
             0.0,
             0.0,
             0.0,
@@ -1297,13 +1376,18 @@ pub fn paint_hud_glass_dock(
         return;
     }
     if is_wgpu_glass_available(ctx) {
+        let alpha = if active_gpu_backdrop(ctx).is_some() {
+            0.37
+        } else {
+            (style.hud_alpha * 0.84).clamp(0.26, 0.76)
+        };
         painter.add(build_gpu_liquid_glass_shape(
             ctx,
             rect,
             rect,
             0.0,
             0.0,
-            [14.0 / 255.0, 16.0 / 255.0, 22.0 / 255.0, 0.37],
+            [18.0 / 255.0, 22.0 / 255.0, 30.0 / 255.0, alpha],
             0.0,
             0.0,
             0.0,
@@ -1773,7 +1857,7 @@ mod tests {
 
     #[test]
     fn gpu_liquid_glass_uniforms_alignment_dpi_scaling_and_callback_dispatch() {
-        assert_eq!(std::mem::size_of::<LiquidGlassUniforms>(), 112);
+        assert_eq!(std::mem::size_of::<LiquidGlassUniforms>(), 128);
         assert_eq!(std::mem::size_of::<LiquidGlassUniforms>() % 16, 0);
 
         let ctx = Context::default();
@@ -1783,7 +1867,7 @@ mod tests {
         let tokens = Tokens::from_config(&cfg);
         let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), egui::vec2(200.0, 80.0));
 
-        // 1. Without wgpu initialized, falls back cleanly to non-Callback Mesh/border shapes
+        // 1. Without wgpu initialized, falls back cleanly to non-Callback translucent shapes
         let mut fallback_shapes = Vec::new();
         collect_glass_underlay_shapes(
             &ctx,
@@ -1798,9 +1882,73 @@ mod tests {
         assert!(fallback_shapes
             .iter()
             .all(|s| !matches!(s, Shape::Callback(_))));
+        let has_translucent_rect = fallback_shapes.iter().any(|s| {
+            matches!(
+                s,
+                Shape::Rect(rs) if rs.fill.a() > 40 && rs.fill.a() < 220
+            )
+        });
+        assert!(
+            has_translucent_rect,
+            "OpenGL/glow fallback must render translucent frosted glass fill (not opaque)"
+        );
 
-        // 2. When wgpu glass is active, emits PaintCallback with coordinates scaled by pixels_per_point (2.0)
+        // 2. Without custom wallpaper, GPU uniforms select transparent compositor glass mode (mode_params[0] == 0.0)
         crate::theme::mark_wgpu_glass_available_for_test(&ctx);
+        let (backdrop_opt, transparent_u, _) = compute_gpu_liquid_glass_uniforms(
+            &ctx,
+            rect,
+            10.0,
+            8.0,
+            [0.09, 0.10, 0.14, 0.38],
+            0.045,
+            0.22,
+            180.0,
+            0.5,
+        )
+        .expect("transparent uniforms");
+        assert!(backdrop_opt.is_none());
+        assert_eq!(transparent_u.mode_params[0], 0.0);
+        assert!(
+            transparent_u.mode_params[1] > 0.1 && transparent_u.mode_params[1] < 0.85,
+            "transparent glass body alpha must stay translucent, got {}",
+            transparent_u.mode_params[1]
+        );
+        assert!(transparent_u.mode_params[2] > 0.0);
+
+        // 3. With explicit CustomImage GPU backdrop, mode_params[0] switches to 1.0 (wallpaper refraction)
+        crate::theme::store_active_gpu_backdrop(
+            &ctx,
+            Some(ActiveGpuBackdrop {
+                source: crate::theme::GpuBackdropSource {
+                    key: "custom.png".to_string(),
+                    width: 4,
+                    height: 4,
+                    rgba: Arc::new(vec![128_u8; 4 * 4 * 4]),
+                },
+                screen_rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0)),
+                uv_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                backdrop_dim: 0.15,
+                generation: 1,
+            }),
+        );
+        let (backdrop_some, refracting_u, _) = compute_gpu_liquid_glass_uniforms(
+            &ctx,
+            rect,
+            10.0,
+            8.0,
+            [0.06, 0.07, 0.09, 0.28],
+            0.045,
+            0.11,
+            180.0,
+            0.5,
+        )
+        .expect("custom backdrop uniforms");
+        assert!(backdrop_some.is_some());
+        assert_eq!(refracting_u.mode_params[0], 1.0);
+        crate::theme::store_active_gpu_backdrop(&ctx, None);
+
+        // 4. When wgpu glass is active, emits PaintCallback with coordinates scaled by pixels_per_point (2.0)
         let shape = build_gpu_liquid_glass_shape(
             &ctx,
             rect,

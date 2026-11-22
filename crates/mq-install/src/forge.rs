@@ -245,7 +245,7 @@ async fn prepare_installer_loader(
                 fs::create_dir_all(parent)?;
             }
             let data = read_zip_entry_bytes(&mut archive, &name)?;
-            fs::write(&dest, &data)?;
+            mq_core::platform::atomic_write(&dest, &data)?;
         }
     }
 

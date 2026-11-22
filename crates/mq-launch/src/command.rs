@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 
 use mq_auth::{elyby_jvm_injection_args, AccountKind, AccountProfile};
 use mq_core::fs_util::strip_windows_verbatim_prefix;
-use mq_core::{redact_text, resolve_safe_path, MqError, MqPaths, MqResult};
+use mq_core::{redact_text, resolve_safe_path, ModLoaderKind, MqError, MqPaths, MqResult};
 use mq_instances::InstanceManifest;
-use mq_meta::{build_deterministic_classpath, format_classpath_string, ResolvedVersion};
+use mq_meta::{
+    build_deterministic_classpath, format_classpath_string, is_modular_bootstrap_main_class,
+    ResolvedVersion,
+};
 use serde::{Deserialize, Serialize};
 
 /// Conservative command-line character threshold below Windows's 32,767-char `CreateProcessW`
@@ -200,22 +203,34 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         ("path", log_path_str.as_str()),
     ];
 
-    // 3. User custom JVM arguments from `instance.toml` (sanitized against stray placeholders).
-    for custom_arg in &ctx.instance.jvm_args {
-        let expanded = expand_and_sanitize_arg(custom_arg, &jvm_subs);
-        let trimmed = expanded.trim();
-        if !trimmed.is_empty() {
-            jvm_flags.push(trimmed.to_owned());
-        }
-    }
-
-    // 4. Expanded version JVM arguments.
+    let is_modular_bootstrap = is_modular_bootstrap_main_class(&ctx.version.main_class);
     let mut has_library_path = false;
     let mut has_classpath = false;
     let mut has_logging_config = false;
 
-    for raw_jvm_arg in &ctx.version.jvm_arguments {
-        let expanded = expand_and_sanitize_arg(raw_jvm_arg, &jvm_subs);
+    // 3. User custom JVM arguments from `instance.toml` (sanitized against stray placeholders
+    //    and harmful/incompatible GC presets such as `-Xnoclassgc` or `-XX:+UseSerialGC` on large
+    //    or modded heaps).
+    let sanitized_custom_args = sanitize_custom_jvm_args(
+        &ctx.instance.jvm_args,
+        max_mb,
+        ctx.version.java_version.major_version,
+        ctx.version.loader,
+    );
+    for custom_arg in &sanitized_custom_args {
+        let mut expanded = expand_and_sanitize_arg(custom_arg, &jvm_subs)
+            .trim()
+            .to_owned();
+        if expanded.is_empty() {
+            continue;
+        }
+        if expanded.starts_with("-DignoreList=") {
+            expanded = ensure_ignore_list_covers_client_jar(
+                &expanded,
+                &client_jar_path,
+                &ctx.version.mc_version,
+            );
+        }
         if expanded.starts_with("-Djava.library.path=") {
             has_library_path = true;
         }
@@ -228,11 +243,39 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         jvm_flags.push(expanded);
     }
 
-    // Inject logging configuration if specified in version.json and not yet added
-    if !has_logging_config {
+    // 4. Expanded version JVM arguments.
+    for raw_jvm_arg in &ctx.version.jvm_arguments {
+        let mut expanded = expand_and_sanitize_arg(raw_jvm_arg, &jvm_subs);
+        if expanded.starts_with("-DignoreList=") {
+            expanded = ensure_ignore_list_covers_client_jar(
+                &expanded,
+                &client_jar_path,
+                &ctx.version.mc_version,
+            );
+        }
+        if expanded.starts_with("-Djava.library.path=") {
+            has_library_path = true;
+        }
+        if expanded == "-cp" || expanded == "-classpath" {
+            has_classpath = true;
+        }
+        if expanded.starts_with("-Dlog4j.configurationFile=") {
+            has_logging_config = true;
+        }
+        jvm_flags.push(expanded);
+    }
+
+    // Inject Mojang logging configuration only when:
+    // - not already provided via JVM args,
+    // - not a modular Forge/NeoForge bootstrap (`fmlloader` bundles its own `log4j2.xml`;
+    //   Mojang's inherited `client-1.12.xml` uses `<LegacyXMLLayout />` which breaks Forge's MCL logger),
+    // - and the referenced logging XML file actually exists on disk (pointing Log4j2 at a missing
+    //   file triggers `ERROR StatusLogger Reconfiguration failed: No configuration found`).
+    if !has_logging_config && !is_modular_bootstrap {
         if let Some(ref logging) = ctx.version.logging {
             if let Some(ref client) = logging.client {
-                if !client.argument.trim().is_empty() {
+                let file_exists = !log_path_str.is_empty() && Path::new(&log_path_str).is_file();
+                if file_exists && !client.argument.trim().is_empty() {
                     let log_flag = expand_and_sanitize_arg(&client.argument, &jvm_subs);
                     if !log_flag.is_empty() {
                         jvm_flags.push(log_flag);
@@ -373,6 +416,132 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         working_dir: instance_dir,
         env: BTreeMap::new(),
     })
+}
+
+/// Ensures a Forge/NeoForge `-DignoreList=...` JVM property covers the actual resolved client JAR
+/// filename (e.g. `client.jar` or `1.20.1.jar`) using `BootstrapLauncher`'s exact `startsWith`
+/// prefix matching rules, without adding broad prefixes like `client` that would match
+/// `client-<ver>-srg.jar` or `client-<ver>-extra.jar`.
+pub fn ensure_ignore_list_covers_client_jar(
+    flag: &str,
+    client_jar_path: &Path,
+    mc_version: &str,
+) -> String {
+    let Some(raw_list) = flag.strip_prefix("-DignoreList=") else {
+        return flag.to_owned();
+    };
+
+    let mut entries: Vec<String> = raw_list
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    let mut required_names: Vec<String> = Vec::with_capacity(3);
+    if let Some(fname) = client_jar_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        required_names.push(fname.to_owned());
+    }
+    required_names.push("client.jar".to_owned());
+    let mc_trimmed = mc_version.trim();
+    if !mc_trimmed.is_empty() {
+        required_names.push(format!("{mc_trimmed}.jar"));
+    }
+
+    for candidate in required_names {
+        let already_covered = entries
+            .iter()
+            .any(|prefix| candidate.starts_with(prefix.as_str()));
+        if !already_covered {
+            entries.push(candidate);
+        }
+    }
+
+    format!("-DignoreList={}", entries.join(","))
+}
+
+/// Sanitizes custom JVM arguments from `instance.toml` against unsafe or Java-version-incompatible
+/// GC presets:
+/// - Strips `-Xnoclassgc` (disabling class unloading causes Metaspace leaks/OOM in modded Minecraft).
+/// - Upgrades `-XX:+UseSerialGC` to `-XX:+UseG1GC` on large heaps (`>= 3072 MB`), Java 17+ modded
+///   instances, or when paired with `-Xnoclassgc` (MQ's legacy Low-End preset).
+/// - Drops `-XX:+ZGenerational` on Java < 21 and replaces `-XX:+UseZGC` with `-XX:+UseG1GC` on
+///   Java < 15 so global presets never crash older Minecraft versions with `Unrecognized VM option`.
+fn sanitize_custom_jvm_args(
+    raw_args: &[String],
+    max_mb: u32,
+    java_major: u32,
+    loader: ModLoaderKind,
+) -> Vec<String> {
+    let had_noclassgc = raw_args.iter().any(|a| a.trim() == "-Xnoclassgc");
+    let has_explicit_non_serial_gc = raw_args.iter().any(|a| {
+        let t = a.trim();
+        t.starts_with("-XX:+Use")
+            && t.ends_with("GC")
+            && t != "-XX:+UseSerialGC"
+            && !(t == "-XX:+UseZGC" && (1..15).contains(&java_major))
+    });
+    let should_upgrade_serial_gc =
+        had_noclassgc || max_mb >= 3072 || (java_major >= 17 && loader != ModLoaderKind::Vanilla);
+
+    let mut out = Vec::with_capacity(raw_args.len());
+    let mut injected_g1gc = false;
+
+    for raw in raw_args {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "-Xnoclassgc" {
+            tracing::warn!("Ignoring -Xnoclassgc JVM flag to prevent Metaspace OOM");
+            continue;
+        }
+        if trimmed == "-XX:+UseSerialGC" && should_upgrade_serial_gc {
+            tracing::warn!(
+                max_mb,
+                java_major,
+                ?loader,
+                "Upgrading -XX:+UseSerialGC to -XX:+UseG1GC for large/modded heap"
+            );
+            if !has_explicit_non_serial_gc && !injected_g1gc {
+                out.push("-XX:+UseG1GC".to_owned());
+                injected_g1gc = true;
+            }
+            continue;
+        }
+        if trimmed == "-XX:+ZGenerational" && (1..21).contains(&java_major) {
+            tracing::warn!(
+                java_major,
+                "Ignoring -XX:+ZGenerational on Java < 21 to prevent JVM startup failure"
+            );
+            continue;
+        }
+        if trimmed == "-XX:+UseZGC" && (1..15).contains(&java_major) {
+            tracing::warn!(
+                java_major,
+                "Replacing -XX:+UseZGC with -XX:+UseG1GC on Java < 15 to prevent JVM startup failure"
+            );
+            if !has_explicit_non_serial_gc && !injected_g1gc {
+                out.push("-XX:+UseG1GC".to_owned());
+                injected_g1gc = true;
+            }
+            continue;
+        }
+        if trimmed == "-XX:+UseG1GC" {
+            if injected_g1gc {
+                continue;
+            }
+            injected_g1gc = true;
+        }
+        out.push(raw.clone());
+    }
+
+    out
 }
 
 fn resolve_client_jar_path(
@@ -963,6 +1132,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = MqPaths::with_root(temp.path());
         paths.ensure_dirs().expect("dirs");
+        let log_cfg_path = paths.assets_dir().join("log_configs").join("client-26.xml");
+        std::fs::create_dir_all(log_cfg_path.parent().expect("log_configs dir"))
+            .expect("create log_configs");
+        std::fs::write(&log_cfg_path, b"<Configuration status=\"WARN\"/>")
+            .expect("write log config");
 
         let mut instance = InstanceManifest::new("Test 26", "26.3", ModLoaderKind::Vanilla, None);
         instance.memory_min_mb = 1024;
@@ -1191,6 +1365,459 @@ mod tests {
         assert!(
             rewritten_8[cp_idx + 1].len() < args[4].len(),
             "Java 8 classpath should shrink after compaction"
+        );
+    }
+
+    #[test]
+    fn forge_1_20_1_bootstrap_launcher_omits_client_jar_updates_ignore_list_and_sanitizes_gc() {
+        use mq_meta::{
+            ArtifactDownload, AssetIndexPointer, JavaVersionSpec, LoggingClientConfig,
+            LoggingConfig, ResolvedLibrary, ResolvedVersion,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path());
+        paths.ensure_dirs().expect("dirs");
+
+        let mut instance = InstanceManifest::new(
+            "The Last Dawn II - Remastered",
+            "1.20.1",
+            ModLoaderKind::Forge,
+            Some("47.4.10".to_owned()),
+        );
+        instance.memory_min_mb = 1024;
+        instance.memory_max_mb = 6144;
+        instance.jvm_args = vec!["-XX:+UseSerialGC".to_owned(), "-Xnoclassgc".to_owned()];
+
+        let inst_dir = instance.instance_dir(&paths);
+        std::fs::create_dir_all(&inst_dir).expect("inst dir");
+        std::fs::write(inst_dir.join("client.jar"), b"vanilla-client-jar").expect("client.jar");
+
+        let version = ResolvedVersion {
+            id: "1.20.1-forge-47.4.10".to_owned(),
+            mc_version: "1.20.1".to_owned(),
+            loader: ModLoaderKind::Forge,
+            loader_version: Some("47.4.10".to_owned()),
+            inherits_from: Some("1.20.1".to_owned()),
+            main_class: "cpw.mods.bootstraplauncher.BootstrapLauncher".to_owned(),
+            java_version: JavaVersionSpec {
+                component: "java-runtime-gamma".to_owned(),
+                major_version: 17,
+            },
+            asset_index: AssetIndexPointer {
+                id: "5".to_owned(),
+                sha1: None,
+                size: 100,
+                total_size: 1000,
+                url: String::new(),
+            },
+            client_jar: ArtifactDownload {
+                path: "versions/1.20.1/1.20.1.jar".to_owned(),
+                url: String::new(),
+                sha1: None,
+                size: 100,
+            },
+            libraries: vec![
+                ResolvedLibrary {
+                    name: "cpw.mods:bootstraplauncher:1.1.2".to_owned(),
+                    artifact: Some(ArtifactDownload {
+                        path: "cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar"
+                            .to_owned(),
+                        url: String::new(),
+                        sha1: None,
+                        size: 100,
+                    }),
+                    native_linux: None,
+                    extract_exclude: Vec::new(),
+                    include_in_classpath: true,
+                },
+                ResolvedLibrary {
+                    name: "net.minecraftforge:fmlloader:1.20.1-47.4.10".to_owned(),
+                    artifact: Some(ArtifactDownload {
+                        path: "net/minecraftforge/fmlloader/1.20.1-47.4.10/fmlloader-1.20.1-47.4.10.jar"
+                            .to_owned(),
+                        url: String::new(),
+                        sha1: None,
+                        size: 100,
+                    }),
+                    native_linux: None,
+                    extract_exclude: Vec::new(),
+                    include_in_classpath: true,
+                },
+            ],
+            jvm_arguments: vec![
+                "-Djava.library.path=${natives_directory}".to_owned(),
+                "-cp".to_owned(),
+                "${classpath}".to_owned(),
+                "-DignoreList=bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems,client-extra,fmlcore,javafmllanguage,lowcodelanguage,mclanguage,forge-,${version_name}.jar".to_owned(),
+                "-DlibraryDirectory=${library_directory}".to_owned(),
+                "-p".to_owned(),
+                "${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar".to_owned(),
+                "--add-modules".to_owned(),
+                "ALL-MODULE-PATH".to_owned(),
+            ],
+            game_arguments: vec![
+                "--username".to_owned(),
+                "${auth_player_name}".to_owned(),
+                "--launchTarget".to_owned(),
+                "forgeclient".to_owned(),
+                "--fml.forgeVersion".to_owned(),
+                "47.4.10".to_owned(),
+                "--fml.mcVersion".to_owned(),
+                "1.20.1".to_owned(),
+            ],
+            logging: Some(LoggingConfig {
+                client: Some(LoggingClientConfig {
+                    argument: "-Dlog4j.configurationFile=${path}".to_owned(),
+                    file: ArtifactDownload {
+                        path: "log_configs/client-1.12.xml".to_owned(),
+                        url: String::new(),
+                        sha1: None,
+                        size: 888,
+                    },
+                    logging_type: "log4j2-xml".to_owned(),
+                }),
+            }),
+        };
+
+        let ctx = LaunchContext {
+            paths,
+            instance,
+            version,
+            account: mq_auth::create_offline_account("Steve").expect("account"),
+            java_bin: PathBuf::from("/usr/lib/jvm/java-17-openjdk/bin/java"),
+            authlib_injector_jar: None,
+            extra_secrets_to_redact: Vec::new(),
+        };
+
+        let cmd = build_launch_command(&ctx).expect("build forge 1.20.1 command");
+
+        // 1. Classpath must omit vanilla `client.jar` to prevent split-module `client` vs `minecraft` crash.
+        let cp_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "-cp")
+            .expect("-cp present");
+        let cp_entries: Vec<&str> = cmd.args[cp_idx + 1]
+            .split(mq_core::platform::classpath_separator())
+            .collect();
+        assert!(
+            !cp_entries
+                .iter()
+                .any(|e| e.ends_with("client.jar") || e.ends_with("1.20.1.jar")),
+            "Forge 1.20.1 -cp must not contain vanilla client.jar: {cp_entries:?}"
+        );
+        assert!(cp_entries
+            .iter()
+            .any(|e| e.ends_with("fmlloader-1.20.1-47.4.10.jar")));
+
+        // 2. `-DignoreList` must cover `client.jar` and `1.20.1.jar` without broad `client` prefix.
+        let ignore_flag = cmd
+            .args
+            .iter()
+            .find(|a| a.starts_with("-DignoreList="))
+            .expect("-DignoreList present");
+        let ignore_entries: Vec<&str> = ignore_flag
+            .strip_prefix("-DignoreList=")
+            .unwrap()
+            .split(',')
+            .collect();
+        assert!(ignore_entries.contains(&"client.jar"));
+        assert!(ignore_entries.contains(&"1.20.1.jar"));
+        assert!(
+            !ignore_entries.contains(&"client"),
+            "must not inject broad 'client' prefix that matches client-*-srg.jar"
+        );
+
+        // 3. Unsafe legacy Low-End GC flags must be upgraded to G1GC without `-Xnoclassgc`.
+        assert!(!cmd.args.iter().any(|a| a == "-XX:+UseSerialGC"));
+        assert!(!cmd.args.iter().any(|a| a == "-Xnoclassgc"));
+        assert!(cmd.args.iter().any(|a| a == "-XX:+UseG1GC"));
+
+        // 4. Forge BootstrapLauncher must not inject Mojang's inherited client-1.12.xml log config.
+        assert!(
+            !cmd.args
+                .iter()
+                .any(|a| a.starts_with("-Dlog4j.configurationFile=")),
+            "Forge BootstrapLauncher should use fmlloader's bundled log4j2.xml"
+        );
+
+        // 5. No unexpanded placeholders remain.
+        for arg in &cmd.args {
+            assert!(!arg.contains("${"), "stray placeholder in arg: {arg}");
+        }
+    }
+
+    #[test]
+    fn neoforge_1_21_1_and_forge_1_20_4_bootstrap_launch_commands_are_clean() {
+        use mq_meta::{
+            ArtifactDownload, AssetIndexPointer, JavaVersionSpec, ResolvedLibrary, ResolvedVersion,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path());
+        paths.ensure_dirs().expect("dirs");
+
+        for (label, loader, mc_ver, ver_id, main_class, java_major, target) in [
+            (
+                "NeoForge 1.21.1",
+                ModLoaderKind::NeoForge,
+                "1.21.1",
+                "neoforge-21.1.72",
+                "cpw.mods.bootstraplauncher.BootstrapLauncher",
+                21,
+                "forgeclient",
+            ),
+            (
+                "Forge 1.20.4",
+                ModLoaderKind::Forge,
+                "1.20.4",
+                "1.20.4-forge-49.1.0",
+                "net.minecraftforge.bootstrap.ForgeBootstrap",
+                17,
+                "forge_client",
+            ),
+        ] {
+            let instance = InstanceManifest::new(label, mc_ver, loader, Some("1.0".to_owned()));
+            let inst_dir = instance.instance_dir(&paths);
+            std::fs::create_dir_all(&inst_dir).expect("inst dir");
+            std::fs::write(inst_dir.join("client.jar"), b"vanilla").expect("client.jar");
+
+            let version = ResolvedVersion {
+                id: ver_id.to_owned(),
+                mc_version: mc_ver.to_owned(),
+                loader,
+                loader_version: Some("1.0".to_owned()),
+                inherits_from: Some(mc_ver.to_owned()),
+                main_class: main_class.to_owned(),
+                java_version: JavaVersionSpec {
+                    component: "java-runtime-delta".to_owned(),
+                    major_version: java_major,
+                },
+                asset_index: AssetIndexPointer {
+                    id: "17".to_owned(),
+                    sha1: None,
+                    size: 100,
+                    total_size: 1000,
+                    url: String::new(),
+                },
+                client_jar: ArtifactDownload {
+                    path: format!("versions/{mc_ver}/{mc_ver}.jar"),
+                    url: String::new(),
+                    sha1: None,
+                    size: 100,
+                },
+                libraries: vec![ResolvedLibrary {
+                    name: "cpw.mods:securejarhandler:3.0.8".to_owned(),
+                    artifact: Some(ArtifactDownload {
+                        path: "cpw/mods/securejarhandler/3.0.8/securejarhandler-3.0.8.jar"
+                            .to_owned(),
+                        url: String::new(),
+                        sha1: None,
+                        size: 100,
+                    }),
+                    native_linux: None,
+                    extract_exclude: Vec::new(),
+                    include_in_classpath: true,
+                }],
+                jvm_arguments: vec![
+                    "-cp".to_owned(),
+                    "${classpath}".to_owned(),
+                    "-DignoreList=securejarhandler,client-extra,${version_name}.jar".to_owned(),
+                    "-DlibraryDirectory=${library_directory}".to_owned(),
+                ],
+                game_arguments: vec![
+                    "--launchTarget".to_owned(),
+                    target.to_owned(),
+                    "--fml.mcVersion".to_owned(),
+                    mc_ver.to_owned(),
+                ],
+                logging: None,
+            };
+
+            let ctx = LaunchContext {
+                paths: paths.clone(),
+                instance,
+                version,
+                account: mq_auth::create_offline_account("Alex").expect("account"),
+                java_bin: PathBuf::from("/usr/bin/java"),
+                authlib_injector_jar: None,
+                extra_secrets_to_redact: Vec::new(),
+            };
+
+            let cmd = build_launch_command(&ctx).expect("build bootstrap command");
+            let cp_idx = cmd.args.iter().position(|a| a == "-cp").expect("-cp");
+            assert!(
+                !cmd.args[cp_idx + 1].contains("client.jar"),
+                "{label} must omit vanilla client.jar from -cp"
+            );
+            let ignore_flag = cmd
+                .args
+                .iter()
+                .find(|a| a.starts_with("-DignoreList="))
+                .expect("-DignoreList");
+            assert!(ignore_flag.contains("client.jar"), "{label}: {ignore_flag}");
+            assert!(
+                ignore_flag.contains(&format!("{mc_ver}.jar")),
+                "{label}: {ignore_flag}"
+            );
+            // Idempotency check on ensure_ignore_list_covers_client_jar
+            let reapplied = ensure_ignore_list_covers_client_jar(
+                ignore_flag,
+                &inst_dir.join("client.jar"),
+                mc_ver,
+            );
+            assert_eq!(reapplied, *ignore_flag);
+        }
+    }
+
+    #[test]
+    fn fabric_vanilla_and_legacy_forge_1_12_2_retain_client_jar_and_skip_missing_log4j() {
+        use mq_meta::{
+            ArtifactDownload, AssetIndexPointer, JavaVersionSpec, LoggingClientConfig,
+            LoggingConfig, ResolvedVersion,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = MqPaths::with_root(tmp.path());
+        paths.ensure_dirs().expect("dirs");
+
+        for (name, mc_ver, loader, main_class, java_major) in [
+            (
+                "Vanilla 1.20.1",
+                "1.20.1",
+                ModLoaderKind::Vanilla,
+                "net.minecraft.client.main.Main",
+                17,
+            ),
+            (
+                "Fabric 1.21.1",
+                "1.21.1",
+                ModLoaderKind::Fabric,
+                "net.fabricmc.loader.impl.launch.knot.KnotClient",
+                21,
+            ),
+            (
+                "Forge 1.12.2",
+                "1.12.2",
+                ModLoaderKind::Forge,
+                "net.minecraft.launchwrapper.Launch",
+                8,
+            ),
+        ] {
+            let instance = InstanceManifest::new(name, mc_ver, loader, None);
+            let inst_dir = instance.instance_dir(&paths);
+            std::fs::create_dir_all(&inst_dir).expect("inst dir");
+            std::fs::write(inst_dir.join("client.jar"), b"jar").expect("client.jar");
+
+            let version = ResolvedVersion {
+                id: mc_ver.to_owned(),
+                mc_version: mc_ver.to_owned(),
+                loader,
+                loader_version: None,
+                inherits_from: None,
+                main_class: main_class.to_owned(),
+                java_version: JavaVersionSpec {
+                    component: "jre-legacy".to_owned(),
+                    major_version: java_major,
+                },
+                asset_index: AssetIndexPointer {
+                    id: "5".to_owned(),
+                    sha1: None,
+                    size: 10,
+                    total_size: 100,
+                    url: String::new(),
+                },
+                client_jar: ArtifactDownload {
+                    path: format!("versions/{mc_ver}/{mc_ver}.jar"),
+                    url: String::new(),
+                    sha1: None,
+                    size: 100,
+                },
+                libraries: Vec::new(),
+                jvm_arguments: vec!["-cp".to_owned(), "${classpath}".to_owned()],
+                game_arguments: vec!["--username".to_owned(), "${auth_player_name}".to_owned()],
+                logging: Some(LoggingConfig {
+                    client: Some(LoggingClientConfig {
+                        argument: "-Dlog4j.configurationFile=${path}".to_owned(),
+                        file: ArtifactDownload {
+                            path: "log_configs/missing-client.xml".to_owned(),
+                            url: String::new(),
+                            sha1: None,
+                            size: 100,
+                        },
+                        logging_type: "log4j2-xml".to_owned(),
+                    }),
+                }),
+            };
+
+            let ctx = LaunchContext {
+                paths: paths.clone(),
+                instance,
+                version,
+                account: mq_auth::create_offline_account("Steve").expect("account"),
+                java_bin: PathBuf::from("/usr/bin/java"),
+                authlib_injector_jar: None,
+                extra_secrets_to_redact: Vec::new(),
+            };
+
+            let cmd = build_launch_command(&ctx).expect("build command");
+            let cp_idx = cmd.args.iter().position(|a| a == "-cp").expect("-cp");
+            assert!(
+                cmd.args[cp_idx + 1].ends_with("client.jar"),
+                "{name} must keep client.jar on -cp, got: {}",
+                cmd.args[cp_idx + 1]
+            );
+            assert!(
+                !cmd.args
+                    .iter()
+                    .any(|a| a.starts_with("-Dlog4j.configurationFile=")),
+                "{name} must not pass -Dlog4j.configurationFile for a missing file on disk"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitizes_incompatible_gc_presets_across_java_versions() {
+        // Legacy Low-End preset on 6GB Java 17 Forge -> G1GC, no -Xnoclassgc
+        assert_eq!(
+            sanitize_custom_jvm_args(
+                &["-XX:+UseSerialGC".to_owned(), "-Xnoclassgc".to_owned()],
+                6144,
+                17,
+                ModLoaderKind::Forge
+            ),
+            vec!["-XX:+UseG1GC".to_owned()]
+        );
+
+        // Java 21 Generational ZGC preset stays intact on Java 21
+        let zgc_gen = vec!["-XX:+UseZGC".to_owned(), "-XX:+ZGenerational".to_owned()];
+        assert_eq!(
+            sanitize_custom_jvm_args(&zgc_gen, 4096, 21, ModLoaderKind::NeoForge),
+            zgc_gen
+        );
+
+        // Java 21 Generational ZGC preset drops `-XX:+ZGenerational` on Java 17
+        assert_eq!(
+            sanitize_custom_jvm_args(&zgc_gen, 4096, 17, ModLoaderKind::Forge),
+            vec!["-XX:+UseZGC".to_owned()]
+        );
+
+        // Java 21 Generational ZGC preset downgrades safely to G1GC on Java 8
+        assert_eq!(
+            sanitize_custom_jvm_args(&zgc_gen, 2048, 8, ModLoaderKind::Forge),
+            vec!["-XX:+UseG1GC".to_owned()]
+        );
+
+        // Explicit SerialGC alone on small Vanilla Java 8 heap is respected
+        assert_eq!(
+            sanitize_custom_jvm_args(
+                &["-XX:+UseSerialGC".to_owned()],
+                1024,
+                8,
+                ModLoaderKind::Vanilla
+            ),
+            vec!["-XX:+UseSerialGC".to_owned()]
         );
     }
 }

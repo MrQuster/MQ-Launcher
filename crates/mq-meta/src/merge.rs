@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use mq_core::{resolve_safe_path, ModLoaderKind, MqError, MqResult};
 
 use crate::loaders::{maven_coord_to_artifact, LoaderProfile};
-use crate::models::{ResolvedLibrary, ResolvedVersion};
+use crate::models::{
+    ArtifactDownload, LoggingClientConfig, LoggingConfig, ResolvedLibrary, ResolvedVersion,
+};
 
 /// Deterministically merges a child modloader [`LoaderProfile`] onto a parent vanilla
 /// [`ResolvedVersion`].
@@ -71,7 +73,7 @@ pub fn merge_inherits_from(
     let jvm_arguments =
         merge_arguments_deterministically(&parent.jvm_arguments, &child.jvm_arguments);
     let game_arguments =
-        merge_arguments_deterministically(&parent.game_arguments, &child.game_arguments);
+        merge_game_arguments_deterministically(&parent.game_arguments, &child.game_arguments);
 
     let asset_index = child
         .asset_index
@@ -91,7 +93,29 @@ pub fn merge_inherits_from(
         .java_version
         .clone()
         .unwrap_or_else(|| parent.java_version.clone());
-    let logging = parent.logging.clone();
+    let logging = child
+        .logging
+        .as_ref()
+        .map(|c| {
+            let path = if c.file.id.trim().is_empty() {
+                String::new()
+            } else {
+                format!("log_configs/{}", c.file.id.trim())
+            };
+            LoggingConfig {
+                client: Some(LoggingClientConfig {
+                    argument: c.argument.clone(),
+                    file: ArtifactDownload {
+                        path,
+                        url: c.file.url.clone(),
+                        sha1: c.file.sha1,
+                        size: c.file.size,
+                    },
+                    logging_type: c.logging_type.clone(),
+                }),
+            }
+        })
+        .or_else(|| parent.logging.clone());
 
     Ok(ResolvedVersion {
         id,
@@ -194,7 +218,7 @@ pub fn merge_resolved_versions(
     let jvm_arguments =
         merge_arguments_deterministically(&parent.jvm_arguments, &child.jvm_arguments);
     let game_arguments =
-        merge_arguments_deterministically(&parent.game_arguments, &child.game_arguments);
+        merge_game_arguments_deterministically(&parent.game_arguments, &child.game_arguments);
 
     Ok(ResolvedVersion {
         id,
@@ -219,22 +243,39 @@ fn merge_libraries_deterministically(
 ) -> Vec<ResolvedLibrary> {
     let total_cap = parent_libs.len() + child_libs.len();
     let mut merged = Vec::with_capacity(total_cap);
-    let mut seen_modules: HashSet<(String, String, Option<String>)> =
+    let mut seen_artifact_modules: HashSet<(String, String, Option<String>)> =
         HashSet::with_capacity(total_cap);
-    let mut seen_coords: HashSet<String> = HashSet::with_capacity(total_cap);
+    let mut seen_native_modules: HashSet<(String, String, Option<String>)> =
+        HashSet::with_capacity(total_cap);
+    let mut seen_fallback_coords: HashSet<String> = HashSet::new();
 
     for lib in child_libs.iter().chain(parent_libs.iter()) {
-        if !seen_coords.insert(lib.name.clone()) {
-            continue;
-        }
-
         let key = lib.module_key();
         let has_valid_module_key = !key.0.is_empty() && !key.1.is_empty();
-        if has_valid_module_key && !seen_modules.insert(key) {
+
+        if !has_valid_module_key {
+            if seen_fallback_coords.insert(lib.name.clone()) {
+                merged.push(lib.clone());
+            }
             continue;
         }
 
-        merged.push(lib.clone());
+        let keep_artifact = lib.artifact.is_some() && seen_artifact_modules.insert(key.clone());
+        let keep_native = lib.native_linux.is_some() && seen_native_modules.insert(key);
+
+        if !keep_artifact && !keep_native {
+            continue;
+        }
+
+        let mut entry = lib.clone();
+        if !keep_artifact {
+            entry.artifact = None;
+            entry.include_in_classpath = false;
+        }
+        if !keep_native {
+            entry.native_linux = None;
+        }
+        merged.push(entry);
     }
 
     merged
@@ -250,9 +291,52 @@ fn merge_arguments_deterministically(parent_args: &[String], child_args: &[Strin
     merged
 }
 
+fn merge_game_arguments_deterministically(
+    parent_args: &[String],
+    child_args: &[String],
+) -> Vec<String> {
+    // Legacy `minecraftArguments` child profiles (e.g. Forge 1.12.2) provide a complete
+    // replacement argument list containing `--username` rather than incremental `arguments.game`.
+    if child_args.iter().any(|arg| arg == "--username") {
+        return child_args.to_vec();
+    }
+    merge_arguments_deterministically(parent_args, child_args)
+}
+
+/// Returns `true` when `main_class` is a JPMS modular bootstrap entry point used by modern
+/// Forge (1.17–1.21+) or NeoForge (1.20.1–1.21+), such as
+/// `cpw.mods.bootstraplauncher.BootstrapLauncher` or `net.minecraftforge.bootstrap.ForgeBootstrap`.
+pub fn is_modular_bootstrap_main_class(main_class: &str) -> bool {
+    let trimmed = main_class.trim();
+    trimmed.starts_with("cpw.mods.bootstraplauncher.")
+        || trimmed.starts_with("net.minecraftforge.bootstrap.")
+}
+
+/// Returns `true` when `version` launches through a modern Forge/NeoForge modular bootstrap that
+/// resolves its own patched SRG/extra Minecraft client JARs via FML (`-DlibraryDirectory`,
+/// `--launchTarget`, `--fml.*`, or `-DignoreList`).
+///
+/// Including the vanilla obfuscated `client.jar` on `-cp` for these profiles creates a colliding
+/// automatic JPMS module `client` alongside Forge's `minecraft` module.
+pub fn uses_fml_managed_client_jar(version: &ResolvedVersion) -> bool {
+    if !is_modular_bootstrap_main_class(&version.main_class) {
+        return false;
+    }
+    let has_bootstrap_jvm_marker = version
+        .jvm_arguments
+        .iter()
+        .any(|arg| arg.starts_with("-DignoreList=") || arg.starts_with("-DlibraryDirectory="));
+    let has_fml_game_marker = version
+        .game_arguments
+        .iter()
+        .any(|arg| arg == "--launchTarget" || arg.starts_with("--fml."));
+    has_bootstrap_jvm_marker || has_fml_game_marker
+}
+
 /// Builds the ordered, deduplicated list of JAR paths for the JVM `-cp` classpath, placing
 /// `version.libraries` (where `include_in_classpath` is `true`) in exact manifest order
-/// followed by `client_jar_path`.
+/// followed by `client_jar_path` (omitted for modern Forge/NeoForge FML-managed modular
+/// bootstrap profiles where `client-*-srg.jar` / `client-*-extra.jar` are loaded via FML).
 pub fn build_deterministic_classpath(
     version: &ResolvedVersion,
     libraries_dir: &Path,
@@ -287,7 +371,7 @@ pub fn build_deterministic_classpath(
         }
     }
 
-    if !client_jar_path.as_os_str().is_empty() {
+    if !client_jar_path.as_os_str().is_empty() && !uses_fml_managed_client_jar(version) {
         let client_buf = client_jar_path.to_path_buf();
         if seen.insert(client_buf.clone()) {
             classpath.push(client_buf);
@@ -609,6 +693,223 @@ mod tests {
         assert_eq!(
             formatted,
             r"C:\Users\Player\MQ\libraries\a.jar;\\server\share\MQ\libraries\b.jar"
+        );
+    }
+
+    #[test]
+    fn bootstrap_launcher_and_forge_bootstrap_omit_vanilla_client_jar_from_classpath() {
+        let mut parent = sample_vanilla_parent();
+        parent.id = "1.20.1".to_owned();
+        parent.mc_version = "1.20.1".to_owned();
+
+        let forge_1_20_1 = LoaderProfile {
+            id: "1.20.1-forge-47.4.10".to_owned(),
+            loader: ModLoaderKind::Forge,
+            loader_version: Some("47.4.10".to_owned()),
+            inherits_from: Some("1.20.1".to_owned()),
+            main_class: "cpw.mods.bootstraplauncher.BootstrapLauncher".to_owned(),
+            libraries: vec![
+                make_lib("cpw.mods:bootstraplauncher:1.1.2", None, true),
+                make_lib("org.ow2.asm:asm:9.8", None, true),
+            ],
+            jvm_arguments: vec![
+                "-DignoreList=bootstraplauncher,securejarhandler,asm,forge-,${version_name}.jar"
+                    .to_owned(),
+                "-DlibraryDirectory=${library_directory}".to_owned(),
+            ],
+            game_arguments: vec![
+                "--launchTarget".to_owned(),
+                "forgeclient".to_owned(),
+                "--fml.forgeVersion".to_owned(),
+                "47.4.10".to_owned(),
+            ],
+            asset_index: None,
+            client_jar: None,
+            java_version: None,
+            logging: None,
+        };
+
+        let merged_forge = merge_inherits_from(&parent, &forge_1_20_1).expect("merge forge");
+        assert!(uses_fml_managed_client_jar(&merged_forge));
+
+        let libs_dir = Path::new("/opt/mq/libraries");
+        let client_jar = Path::new("/opt/mq/instances/pack/client.jar");
+        let cp = build_deterministic_classpath(&merged_forge, libs_dir, client_jar);
+        assert!(
+            !cp.iter().any(|p| p.as_path() == client_jar),
+            "Forge 1.20.1 BootstrapLauncher must omit vanilla client.jar from -cp: {cp:?}"
+        );
+        assert!(
+            cp.iter().any(|p| p
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with("asm-9.8.jar")),
+            "child ASM 9.8 must override parent ASM 9.3"
+        );
+        assert!(
+            !cp.iter().any(|p| p
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with("asm-9.3.jar")),
+            "parent ASM 9.3 must be deduplicated out"
+        );
+
+        // Forge 1.20.4+ ForgeBootstrap
+        let forge_1_20_4 = LoaderProfile {
+            id: "1.20.4-forge-49.1.0".to_owned(),
+            main_class: "net.minecraftforge.bootstrap.ForgeBootstrap".to_owned(),
+            ..forge_1_20_1.clone()
+        };
+        let merged_forge_204 =
+            merge_inherits_from(&parent, &forge_1_20_4).expect("merge forge 1.20.4");
+        assert!(uses_fml_managed_client_jar(&merged_forge_204));
+        assert!(
+            !build_deterministic_classpath(&merged_forge_204, libs_dir, client_jar)
+                .iter()
+                .any(|p| p.as_path() == client_jar)
+        );
+
+        // NeoForge 1.21.1 BootstrapLauncher
+        let neoforge_1_21 = LoaderProfile {
+            id: "neoforge-21.1.72".to_owned(),
+            loader: ModLoaderKind::NeoForge,
+            loader_version: Some("21.1.72".to_owned()),
+            inherits_from: Some("1.20.1".to_owned()),
+            main_class: "cpw.mods.bootstraplauncher.BootstrapLauncher".to_owned(),
+            libraries: vec![make_lib("cpw.mods:bootstraplauncher:2.0.2", None, true)],
+            jvm_arguments: vec![
+                "-DignoreList=client-extra,${version_name}.jar,neoforge-21.1.72.jar".to_owned(),
+            ],
+            game_arguments: vec![
+                "--launchTarget".to_owned(),
+                "forgeclient".to_owned(),
+                "--fml.neoForgeVersion".to_owned(),
+                "21.1.72".to_owned(),
+            ],
+            asset_index: None,
+            client_jar: None,
+            java_version: None,
+            logging: None,
+        };
+        let merged_neo = merge_inherits_from(&parent, &neoforge_1_21).expect("merge neoforge");
+        assert!(uses_fml_managed_client_jar(&merged_neo));
+        assert!(
+            !build_deterministic_classpath(&merged_neo, libs_dir, client_jar)
+                .iter()
+                .any(|p| p.as_path() == client_jar)
+        );
+
+        // Legacy Forge 1.12.2 & Forge 1.16.5 & Vanilla MUST retain client.jar on -cp
+        assert!(!uses_fml_managed_client_jar(&parent));
+        assert!(build_deterministic_classpath(&parent, libs_dir, client_jar)
+            .iter()
+            .any(|p| p.as_path() == client_jar));
+
+        let forge_1_12 = LoaderProfile {
+            id: "1.12.2-forge-14.23.5.2860".to_owned(),
+            loader: ModLoaderKind::Forge,
+            loader_version: Some("14.23.5.2860".to_owned()),
+            inherits_from: Some("1.20.1".to_owned()),
+            main_class: "net.minecraft.launchwrapper.Launch".to_owned(),
+            libraries: Vec::new(),
+            jvm_arguments: Vec::new(),
+            game_arguments: vec![
+                "--username".to_owned(),
+                "${auth_player_name}".to_owned(),
+                "--tweakClass".to_owned(),
+                "net.minecraftforge.fml.common.launcher.FMLTweaker".to_owned(),
+            ],
+            asset_index: None,
+            client_jar: None,
+            java_version: None,
+            logging: None,
+        };
+        let merged_1_12 = merge_inherits_from(&parent, &forge_1_12).expect("merge forge 1.12.2");
+        assert!(!uses_fml_managed_client_jar(&merged_1_12));
+        assert!(
+            build_deterministic_classpath(&merged_1_12, libs_dir, client_jar)
+                .iter()
+                .any(|p| p.as_path() == client_jar)
+        );
+        // Legacy minecraftArguments replacement must NOT duplicate `--username`
+        assert_eq!(
+            merged_1_12
+                .game_arguments
+                .iter()
+                .filter(|a| a.as_str() == "--username")
+                .count(),
+            1
+        );
+
+        let forge_1_16 = LoaderProfile {
+            id: "1.16.5-forge-36.2.42".to_owned(),
+            main_class: "cpw.mods.modlauncher.Launcher".to_owned(),
+            game_arguments: vec!["--launchTarget".to_owned(), "fmlclient".to_owned()],
+            ..forge_1_12
+        };
+        let merged_1_16 = merge_inherits_from(&parent, &forge_1_16).expect("merge forge 1.16.5");
+        assert!(!uses_fml_managed_client_jar(&merged_1_16));
+        assert!(
+            build_deterministic_classpath(&merged_1_16, libs_dir, client_jar)
+                .iter()
+                .any(|p| p.as_path() == client_jar)
+        );
+    }
+
+    #[test]
+    fn merge_preserves_separate_artifact_and_native_entries_with_identical_maven_name() {
+        let mut parent = sample_vanilla_parent();
+        parent.libraries = vec![
+            ResolvedLibrary {
+                name: "org.lwjgl:lwjgl:3.2.2".to_owned(),
+                artifact: Some(
+                    maven_coord_to_artifact("org.lwjgl:lwjgl:3.2.2", None, None, 100).unwrap(),
+                ),
+                native_linux: None,
+                extract_exclude: Vec::new(),
+                include_in_classpath: true,
+            },
+            ResolvedLibrary {
+                name: "org.lwjgl:lwjgl:3.2.2".to_owned(),
+                artifact: None,
+                native_linux: Some(
+                    maven_coord_to_artifact("org.lwjgl:lwjgl:3.2.2:natives-linux", None, None, 200)
+                        .unwrap(),
+                ),
+                extract_exclude: vec!["META-INF/".to_owned()],
+                include_in_classpath: false,
+            },
+        ];
+
+        let child = LoaderProfile {
+            id: "fabric-loader-0.16.9-1.21.1".to_owned(),
+            loader: ModLoaderKind::Fabric,
+            loader_version: Some("0.16.9".to_owned()),
+            inherits_from: Some("1.21.1".to_owned()),
+            main_class: "net.fabricmc.loader.impl.launch.knot.KnotClient".to_owned(),
+            libraries: vec![make_lib("net.fabricmc:fabric-loader:0.16.9", None, true)],
+            jvm_arguments: Vec::new(),
+            game_arguments: Vec::new(),
+            asset_index: None,
+            client_jar: None,
+            java_version: None,
+            logging: None,
+        };
+
+        let merged = merge_inherits_from(&parent, &child).expect("merge");
+        assert!(
+            merged
+                .libraries
+                .iter()
+                .any(|l| l.name == "org.lwjgl:lwjgl:3.2.2" && l.artifact.is_some()),
+            "artifact entry must be preserved"
+        );
+        assert!(
+            merged
+                .libraries
+                .iter()
+                .any(|l| l.name == "org.lwjgl:lwjgl:3.2.2" && l.native_linux.is_some()),
+            "separate native-only entry with same Maven coordinate must not be dropped"
         );
     }
 }

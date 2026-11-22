@@ -15,9 +15,8 @@ use egui::{
 use mq_core::{BackgroundStyle, ThemeConfig, ThemePreset, UiDensity};
 
 use crate::theme_styles::{
-    paint_liquid_glass_ambient_backdrop, paint_translucent_clean_backdrop,
-    sample_liquid_glass_wallpaper, store_active_backdrop_texture, ActiveBackdropTexture,
-    ThemeStyleParams,
+    paint_translucent_clean_backdrop, store_active_backdrop_texture, with_alpha,
+    ActiveBackdropTexture, ThemeStyleParams,
 };
 
 /// Curated calm accent swatch preset for customization controls.
@@ -734,7 +733,7 @@ struct CachedBackdrop {
     size: [usize; 2],
 }
 
-/// GPU uniform payload for the `liquid_glass.wgsl` fragment shader (112 bytes, 16-byte aligned).
+/// GPU uniform payload for the `liquid_glass.wgsl` fragment shader (128 bytes, 16-byte aligned).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LiquidGlassUniforms {
@@ -754,6 +753,8 @@ pub struct LiquidGlassUniforms {
     pub cursor_pos: [f32; 2],
     pub spec_radius: f32,
     pub hover_t: f32,
+    /// `[has_backdrop, glass_opacity, chroma_strength, 0.0]`.
+    pub mode_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -1465,60 +1466,6 @@ pub(crate) fn mark_wgpu_glass_available_for_test(ctx: &Context) {
     });
 }
 
-fn build_ambient_gpu_backdrop(
-    ctx: &Context,
-    style: &ThemeStyleParams,
-    tokens: &Tokens,
-    solid_only: bool,
-) -> GpuBackdropSource {
-    let key = format!(
-        "ambient:{}:{:02x}{:02x}{:02x}:{:02x}{:02x}{:02x}:{:02x}{:02x}{:02x}",
-        u8::from(solid_only),
-        tokens.bg_app.r(),
-        tokens.bg_app.g(),
-        tokens.bg_app.b(),
-        style.ambient_lobe_a.r(),
-        style.ambient_lobe_a.g(),
-        style.ambient_lobe_a.b(),
-        style.ambient_lobe_b.r(),
-        style.ambient_lobe_b.g(),
-        style.ambient_lobe_b.b(),
-    );
-    let cache_id = Id::new("mq_ambient_gpu_backdrop_cache");
-    if let Some(cached) = ctx.data(|d| d.get_temp::<GpuBackdropSource>(cache_id)) {
-        if cached.key == key {
-            return cached;
-        }
-    }
-
-    let w = 96u32;
-    let h = 64u32;
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        let fy = y as f32 / (h - 1) as f32;
-        for x in 0..w {
-            let fx = x as f32 / (w - 1) as f32;
-            let col = if solid_only {
-                tokens.bg_app
-            } else {
-                sample_liquid_glass_wallpaper(fx, fy, 0.0, style, tokens)
-            };
-            rgba.extend_from_slice(&[col.r(), col.g(), col.b(), 255]);
-        }
-    }
-
-    let source = GpuBackdropSource {
-        key,
-        width: w,
-        height: h,
-        rgba: Arc::new(rgba),
-    };
-    ctx.data_mut(|d| {
-        d.insert_temp(cache_id, source.clone());
-    });
-    source
-}
-
 fn downscale_rgba_if_exceeds(
     src: &[u8],
     width: u32,
@@ -1770,16 +1717,6 @@ fn resolve_backdrop_texture(ctx: &Context, path: &str) -> Option<ResolvedBackdro
     )
 }
 
-fn serpantinum_wallpaper_fallback_path() -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let p = Path::new(&home)
-        .join(".cache")
-        .join("serpantinum")
-        .join("wallpaper")
-        .join("current_wallpaper.png");
-    p.is_file().then(|| p.to_string_lossy().into_owned())
-}
-
 fn paint_procedural_backdrop(painter: &Painter, rect: Rect, tokens: &Tokens) {
     let is_light = tokens.is_light();
     let cool_secondary = if is_light {
@@ -1889,21 +1826,6 @@ fn paint_procedural_backdrop(painter: &Painter, rect: Rect, tokens: &Tokens) {
     }
 }
 
-fn is_deterministic_backdrop(ctx: &Context) -> bool {
-    let env_det = std::env::var("MQ_TEST_DETERMINISTIC")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-    #[cfg(feature = "test-hooks")]
-    {
-        let _ = ctx;
-        env_det || crate::test_hooks::is_solid_background(ctx)
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    {
-        let _ = ctx;
-        env_det
-    }
-}
-
 fn draw_aspect_fill_wallpaper(
     painter: &Painter,
     rect: Rect,
@@ -1936,6 +1858,13 @@ fn draw_aspect_fill_wallpaper(
 }
 
 /// Paints the configured launcher backdrop (`Procedural`, `Solid`, or `CustomImage`) inside `rect`.
+///
+/// Under [`ThemePreset::LiquidGlass`]:
+/// - `Procedural`: leaves the window framebuffer genuinely transparent (`clear_color = [0, 0, 0, 0]`)
+///   so the OS compositor blur & real desktop wallpaper shine directly through with zero fake wallpaper.
+/// - `Solid`: paints only a subtle translucent atmospheric glass tint (never an opaque wallpaper).
+/// - `CustomImage`: loads and refracts ONLY an explicitly configured `cfg.backdrop_path`; if unset or
+///   unreadable, stays cleanly transparent.
 pub fn paint_launcher_background(
     ctx: &Context,
     painter: &Painter,
@@ -1947,84 +1876,36 @@ pub fn paint_launcher_background(
         return;
     }
     let style = ThemeStyleParams::from_config(cfg);
-    let deterministic = is_deterministic_backdrop(ctx);
     let generation = ctx.cumulative_pass_nr();
     let mut active_glass_tex: Option<ActiveBackdropTexture> = None;
     let mut active_gpu: Option<ActiveGpuBackdrop> = None;
 
     match cfg.background_style {
         BackgroundStyle::Solid => {
-            painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
             if cfg.preset == ThemePreset::LiquidGlass {
-                active_gpu = Some(ActiveGpuBackdrop {
-                    source: build_ambient_gpu_backdrop(ctx, &style, tokens, true),
-                    screen_rect: rect,
-                    uv_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    backdrop_dim: 0.0,
-                    generation,
-                });
+                // Keep window genuinely translucent over the compositor desktop; never paint an opaque wall.
+                let win_norm = crate::state::safe_clamp_f32(cfg.window_opacity, 0.0, 1.0);
+                let tint_alpha = if win_norm <= 0.02 {
+                    0.0
+                } else {
+                    (win_norm * 0.42).clamp(0.05, 0.44)
+                };
+                if tint_alpha > 0.005 {
+                    painter.rect_filled(
+                        rect,
+                        CornerRadius::ZERO,
+                        with_alpha(tokens.bg_app, tint_alpha),
+                    );
+                }
+            } else {
+                painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
             }
         }
         BackgroundStyle::Procedural => match cfg.preset {
             ThemePreset::LiquidGlass => {
-                if let Some(resolved) = serpantinum_wallpaper_fallback_path()
-                    .as_deref()
-                    .and_then(|p| resolve_backdrop_texture(ctx, p))
-                {
-                    painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
-                    let uv = draw_aspect_fill_wallpaper(
-                        painter,
-                        rect,
-                        &resolved.sharp_tex,
-                        resolved.size,
-                        style.window_alpha,
-                    );
-                    let dim = crate::state::safe_clamp_f32(cfg.backdrop_dim, 0.0, 0.92);
-                    if dim > 0.01 {
-                        painter.rect_filled(
-                            rect,
-                            CornerRadius::ZERO,
-                            Color32::from_rgba_unmultiplied(
-                                tokens.bg_app.r(),
-                                tokens.bg_app.g(),
-                                tokens.bg_app.b(),
-                                (dim * 255.0).round() as u8,
-                            ),
-                        );
-                    }
-                    if let Some(blur_tex) = resolved.blurred_tex {
-                        active_glass_tex = Some(ActiveBackdropTexture {
-                            tex_id: blur_tex.id(),
-                            screen_rect: rect,
-                            uv_rect: uv,
-                        });
-                    }
-                    if let Some(gpu_source) = resolved.gpu_source {
-                        active_gpu = Some(ActiveGpuBackdrop {
-                            source: gpu_source,
-                            screen_rect: rect,
-                            uv_rect: uv,
-                            backdrop_dim: dim,
-                            generation,
-                        });
-                    }
-                } else {
-                    paint_liquid_glass_ambient_backdrop(
-                        ctx,
-                        painter,
-                        rect,
-                        &style,
-                        tokens,
-                        deterministic,
-                    );
-                    active_gpu = Some(ActiveGpuBackdrop {
-                        source: build_ambient_gpu_backdrop(ctx, &style, tokens, false),
-                        screen_rect: rect,
-                        uv_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        backdrop_dim: 0.0,
-                        generation,
-                    });
-                }
+                // True transparent compositor Liquid Glass: no wallpaper photo, no opaque fill,
+                // no fake ambient mesh. Cards, sidebar, HUD, and controls float as frosted glass
+                // directly over the transparent window framebuffer.
             }
             ThemePreset::Translucent => {
                 paint_translucent_clean_backdrop(painter, rect, &style, tokens);
@@ -2035,21 +1916,12 @@ pub fn paint_launcher_background(
             }
         },
         BackgroundStyle::CustomImage => {
-            painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
             let resolved = cfg
                 .backdrop_path
                 .as_deref()
-                .and_then(|p| resolve_backdrop_texture(ctx, p))
-                .or_else(|| {
-                    if cfg.preset == ThemePreset::LiquidGlass {
-                        serpantinum_wallpaper_fallback_path()
-                            .as_deref()
-                            .and_then(|p| resolve_backdrop_texture(ctx, p))
-                    } else {
-                        None
-                    }
-                });
+                .and_then(|p| resolve_backdrop_texture(ctx, p));
             if let Some(resolved) = resolved {
+                painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
                 let uv = draw_aspect_fill_wallpaper(
                     painter,
                     rect,
@@ -2089,26 +1961,15 @@ pub fn paint_launcher_background(
             } else {
                 match cfg.preset {
                     ThemePreset::LiquidGlass => {
-                        paint_liquid_glass_ambient_backdrop(
-                            ctx,
-                            painter,
-                            rect,
-                            &style,
-                            tokens,
-                            deterministic,
-                        );
-                        active_gpu = Some(ActiveGpuBackdrop {
-                            source: build_ambient_gpu_backdrop(ctx, &style, tokens, false),
-                            screen_rect: rect,
-                            uv_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            backdrop_dim: 0.0,
-                            generation,
-                        });
+                        // Without an explicit readable custom image, keep the window genuinely transparent.
                     }
                     ThemePreset::Translucent => {
-                        paint_translucent_clean_backdrop(painter, rect, &style, tokens)
+                        paint_translucent_clean_backdrop(painter, rect, &style, tokens);
                     }
-                    _ => paint_procedural_backdrop(painter, rect, tokens),
+                    _ => {
+                        painter.rect_filled(rect, CornerRadius::ZERO, style.window_fill(tokens));
+                        paint_procedural_backdrop(painter, rect, tokens);
+                    }
                 }
             }
         }
@@ -2217,5 +2078,80 @@ mod tests {
         let (dw, dh, resized) = downscale_rgba_if_exceeds(&big, 32, 16, 8);
         assert_eq!((dw, dh), (8, 4));
         assert_eq!(resized.expect("should downscale").len(), (8 * 4 * 4));
+    }
+
+    #[test]
+    fn liquid_glass_procedural_and_solid_never_load_wallpaper_fallback() {
+        assert_eq!(std::mem::size_of::<LiquidGlassUniforms>(), 128);
+        assert_eq!(std::mem::size_of::<LiquidGlassUniforms>() % 16, 0);
+
+        let ctx = Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+
+        // Procedural Liquid Glass must emit ZERO backdrop shapes and ZERO wallpaper textures.
+        let mut cfg_proc = ThemeConfig::preset_liquid_glass();
+        cfg_proc.background_style = BackgroundStyle::Procedural;
+        cfg_proc.backdrop_path = None;
+        let tokens = Tokens::from_config(&cfg_proc);
+        let out_proc = ctx.run(input.clone(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            paint_launcher_background(ctx, &painter, rect, &cfg_proc, &tokens);
+        });
+        assert!(
+            active_gpu_backdrop(&ctx).is_none(),
+            "LiquidGlass Procedural must not populate GPU wallpaper backdrop"
+        );
+        assert!(
+            crate::theme_styles::active_backdrop_texture(&ctx).is_none(),
+            "LiquidGlass Procedural must not populate CPU wallpaper texture"
+        );
+        assert!(
+            out_proc.shapes.is_empty(),
+            "LiquidGlass Procedural must leave window canvas genuinely transparent"
+        );
+
+        // Solid Liquid Glass also never loads wallpaper or paints opaque fill.
+        let mut cfg_solid = ThemeConfig::preset_liquid_glass();
+        cfg_solid.background_style = BackgroundStyle::Solid;
+        let _ = ctx.run(input.clone(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            paint_launcher_background(ctx, &painter, rect, &cfg_solid, &tokens);
+        });
+        assert!(active_gpu_backdrop(&ctx).is_none());
+        assert!(crate::theme_styles::active_backdrop_texture(&ctx).is_none());
+
+        // CustomImage without backdrop_path stays transparent (no serpantinum fallback).
+        let mut cfg_custom_empty = ThemeConfig::preset_liquid_glass();
+        cfg_custom_empty.background_style = BackgroundStyle::CustomImage;
+        cfg_custom_empty.backdrop_path = None;
+        let out_empty = ctx.run(input.clone(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            paint_launcher_background(ctx, &painter, rect, &cfg_custom_empty, &tokens);
+        });
+        assert!(active_gpu_backdrop(&ctx).is_none());
+        assert!(out_empty.shapes.is_empty());
+
+        // CustomImage WITH an explicit valid image DOES load backdrop for refraction.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let img_path = tmp.path().join("custom_bg.png");
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([40, 80, 120, 255]));
+        image::DynamicImage::ImageRgba8(img)
+            .save(&img_path)
+            .expect("save temp png");
+        let mut cfg_custom = ThemeConfig::preset_liquid_glass();
+        cfg_custom.background_style = BackgroundStyle::CustomImage;
+        cfg_custom.backdrop_path = Some(img_path.to_string_lossy().into_owned());
+        let _ = ctx.run(input, |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            paint_launcher_background(ctx, &painter, rect, &cfg_custom, &tokens);
+        });
+        assert!(
+            active_gpu_backdrop(&ctx).is_some(),
+            "explicit CustomImage must populate GPU backdrop for refraction"
+        );
     }
 }

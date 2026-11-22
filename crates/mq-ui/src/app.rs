@@ -748,14 +748,6 @@ impl MqApp {
                     {
                         self.state.installing_operation =
                             Some("Переустановка инстанса".to_string());
-                        // Safely remove game binaries and temporary directories while preserving
-                        // user saves/, options.txt, resourcepacks/, shaderpacks/, and servers.dat!
-                        let _ = std::fs::remove_file(inst_dir.join("client.jar"));
-                        let _ = std::fs::remove_file(inst_dir.join("resolved_version.json"));
-                        let _ = std::fs::remove_file(inst_dir.join("install_state.json"));
-                        let _ = std::fs::remove_dir_all(inst_dir.join("natives"));
-                        let _ = std::fs::remove_dir_all(inst_dir.join(".installing"));
-
                         let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
                             instance_id.clone(),
                         ));
@@ -766,6 +758,21 @@ impl MqApp {
                             instance_id.clone(),
                             resp_tx.clone(),
                             async move {
+                                // Safely remove game binaries and temporary directories off the UI thread
+                                // while preserving saves/, options.txt, resourcepacks/, shaderpacks/, servers.dat.
+                                let clean_dir = inst_dir.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    let _ = std::fs::remove_file(clean_dir.join("client.jar"));
+                                    let _ = std::fs::remove_file(
+                                        clean_dir.join("resolved_version.json"),
+                                    );
+                                    let _ =
+                                        std::fs::remove_file(clean_dir.join("install_state.json"));
+                                    let _ = std::fs::remove_dir_all(clean_dir.join("natives"));
+                                    let _ = std::fs::remove_dir_all(clean_dir.join(".installing"));
+                                })
+                                .await;
+
                                 let req = mq_install::InstallRequest {
                                     mc_version: inst.mc_version.clone(),
                                     loader: inst.loader,
@@ -1460,6 +1467,134 @@ impl MqApp {
                         });
                     });
                 }
+                UiWorkerCommand::UploadMclogs { log_text } => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(15))
+                            .build()
+                            .unwrap_or_default();
+                        let res = mq_launch::upload_to_mclogs(&client, &log_text)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = resp_tx.send(UiWorkerResponse::MclogsUploaded(res));
+                    });
+                }
+                UiWorkerCommand::PingServer { ip } => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let ip_clone = ip.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            mq_instances::ping_server(&ip_clone, 3000).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("Внутренняя ошибка пинга: {e}")));
+                        let _ = resp_tx.send(UiWorkerResponse::ServerPingReady { ip, result });
+                    });
+                }
+                UiWorkerCommand::DiscoverJavaRuntimes => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let runtimes =
+                            tokio::task::spawn_blocking(mq_launch::discover_java_runtimes)
+                                .await
+                                .unwrap_or_default();
+                        let _ = resp_tx.send(UiWorkerResponse::JavaRuntimesDiscovered(runtimes));
+                    });
+                }
+                UiWorkerCommand::CheckLauncherUpdate { current_version } => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let mgr = mq_update::UpdateManager::new("MrQuster", "mq");
+                        let res = mgr
+                            .check_latest(&current_version, false)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = resp_tx.send(UiWorkerResponse::UpdateCheckFinished(res));
+                    });
+                }
+                UiWorkerCommand::DownloadLauncherUpdate { asset } => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let mgr = mq_update::UpdateManager::new("MrQuster", "mq");
+                        match mgr.download_and_install(&asset, |_d, _t| {}).await {
+                            Ok(_path) => {
+                                if let Err(e) = mq_update::UpdateManager::restart_process(&[]) {
+                                    let _ = resp_tx.send(UiWorkerResponse::UpdateDownloadFailed(
+                                        format!(
+                                            "Обновление установлено, но перезапуск не удался: {e}"
+                                        ),
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Update failed: {e}");
+                                let _ = resp_tx
+                                    .send(UiWorkerResponse::UpdateDownloadFailed(e.to_string()));
+                            }
+                        }
+                    });
+                }
+                UiWorkerCommand::ExportInstance { instance_id } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let out_path = self
+                        .state
+                        .paths
+                        .backups_dir()
+                        .join(format!("{}.zip", instance_id.as_str()));
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let res = tokio::task::spawn_blocking(move || {
+                            mq_instances::export_instance_to_zip(&inst_dir, &out_path)
+                                .map(|()| out_path)
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("Внутренняя ошибка экспорта: {e}")));
+                        let _ = resp_tx.send(UiWorkerResponse::InstanceExported(res));
+                    });
+                }
+                UiWorkerCommand::DeleteInstance { instance_id, name } => {
+                    let paths = self.state.paths.clone();
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let id_clone = instance_id.clone();
+                        let error = tokio::task::spawn_blocking(move || {
+                            let mgr = mq_instances::InstanceManager::new(paths);
+                            match mgr.delete_instance(id_clone.as_str()) {
+                                Ok(()) | Err(mq_core::MqError::InstanceNotFound(_)) => None,
+                                Err(e) => Some(e.to_string()),
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|e| Some(format!("Внутренняя ошибка удаления: {e}")));
+                        let _ = resp_tx.send(UiWorkerResponse::InstanceDeleted {
+                            instance_id,
+                            name,
+                            error,
+                        });
+                    });
+                }
+                UiWorkerCommand::AnalyzeCrash {
+                    instance_id,
+                    exit_code,
+                    lines,
+                } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        if let Ok(analysis) = tokio::task::spawn_blocking(move || {
+                            mq_launch::analyze_crash(&inst_dir, Some(exit_code), &lines)
+                        })
+                        .await
+                        {
+                            let _ = resp_tx.send(UiWorkerResponse::CrashAnalysisReady {
+                                instance_id,
+                                analysis,
+                            });
+                        }
+                    });
+                }
                 _ => {}
             }
         }
@@ -1505,9 +1640,12 @@ impl MqApp {
                             .join("indexes")
                             .join(format!("{}.json", ver.asset_index.id));
                         if let Ok(idx_bytes) = std::fs::read(&asset_index_path) {
-                            if let Ok(idx) =
+                            if let Ok(mut idx) =
                                 serde_json::from_slice::<mq_meta::AssetIndex>(&idx_bytes)
                             {
+                                if idx.id.is_empty() {
+                                    idx.id = ver.asset_index.id.clone();
+                                }
                                 let targets = mq_install::collect_instance_verify_targets(
                                     &paths, &inst_dir, &ver, &idx,
                                 );

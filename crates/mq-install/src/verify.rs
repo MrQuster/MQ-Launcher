@@ -110,10 +110,17 @@ pub fn collect_instance_verify_targets(
     });
 
     // 2. Asset Index JSON (indexes/<id>.json)
+    // Raw Mojang `assets/indexes/<id>.json` documents omit an `"id"` field, so deserializing
+    // directly into `AssetIndex` leaves `asset_index.id` empty; fall back to `version.asset_index.id`.
+    let effective_asset_index_id = if asset_index.id.trim().is_empty() {
+        version.asset_index.id.trim()
+    } else {
+        asset_index.id.trim()
+    };
     let asset_index_path = paths
         .assets_dir()
         .join("indexes")
-        .join(format!("{}.json", asset_index.id));
+        .join(format!("{effective_asset_index_id}.json"));
     targets.push(VerifyFileTarget {
         path: asset_index_path,
         expected_sha1: version.asset_index.sha1,
@@ -170,7 +177,10 @@ pub fn collect_instance_verify_targets(
 
     // 5. Legacy virtual assets (1.7.10 - 1.12.2)
     if asset_index.is_virtual {
-        let virtual_base = paths.assets_dir().join("virtual").join(&asset_index.id);
+        let virtual_base = paths
+            .assets_dir()
+            .join("virtual")
+            .join(effective_asset_index_id);
         for obj in &asset_index.objects {
             let p = virtual_base.join(&obj.name);
             targets.push(VerifyFileTarget {
@@ -505,5 +515,87 @@ mod tests {
         assert!(targets
             .iter()
             .any(|t| t.path.ends_with("log_configs/client-1.12.xml")));
+    }
+
+    #[test]
+    fn falls_back_to_version_asset_index_id_when_deserialized_index_id_is_empty() {
+        let dir = tempdir().unwrap();
+        let paths = MqPaths::with_root(dir.path().to_path_buf());
+        let instance_dir = dir.path().join("instances/fabric-1201");
+
+        let sha1_dummy = Sha1Digest::from_hex("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3").unwrap();
+        let version = ResolvedVersion {
+            id: "fabric-loader-0.16.9-1.20.1".to_string(),
+            mc_version: "1.20.1".to_string(),
+            loader: mq_core::ModLoaderKind::Fabric,
+            loader_version: Some("0.16.9".to_string()),
+            inherits_from: Some("1.20.1".to_string()),
+            main_class: "net.fabricmc.loader.impl.launch.knot.KnotClient".to_string(),
+            java_version: mq_meta::JavaVersionSpec {
+                component: "java-runtime-gamma".to_string(),
+                major_version: 17,
+            },
+            asset_index: mq_meta::AssetIndexPointer {
+                id: "5".to_string(),
+                sha1: Some(sha1_dummy),
+                size: 1234,
+                total_size: 1234,
+                url: "http://example.com/5.json".to_string(),
+            },
+            client_jar: mq_meta::ArtifactDownload {
+                path: "client.jar".to_string(),
+                url: "http://example.com/client.jar".to_string(),
+                sha1: Some(sha1_dummy),
+                size: 1000,
+            },
+            libraries: Vec::new(),
+            jvm_arguments: Vec::new(),
+            game_arguments: Vec::new(),
+            logging: None,
+        };
+
+        // Raw Mojang index JSON has no `"id"` field, leaving `asset_index.id == ""`.
+        let raw_mojang_index = r#"{
+            "objects": {
+                "minecraft/lang/ru_ru.json": {
+                    "hash": "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
+                    "size": 200
+                }
+            },
+            "virtual": true
+        }"#;
+        let asset_index: AssetIndex =
+            serde_json::from_str(raw_mojang_index).expect("deserialize raw Mojang asset index");
+        assert!(asset_index.id.is_empty());
+
+        let targets =
+            collect_instance_verify_targets(&paths, &instance_dir, &version, &asset_index);
+        assert!(
+            targets.iter().any(|t| {
+                t.path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .ends_with("indexes/5.json")
+            }),
+            "must resolve assets/indexes/5.json via version.asset_index.id fallback, got: {targets:?}"
+        );
+        assert!(
+            !targets.iter().any(|t| {
+                t.path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .ends_with("indexes/.json")
+            }),
+            "must never generate broken assets/indexes/.json target"
+        );
+        assert!(
+            targets.iter().any(|t| {
+                t.path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .ends_with("virtual/5/minecraft/lang/ru_ru.json")
+            }),
+            "must resolve virtual/5/... via version.asset_index.id fallback, got: {targets:?}"
+        );
     }
 }

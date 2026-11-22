@@ -5,6 +5,24 @@
 
 ---
 
+## [v2.7.6] — 2026-11-22 ("Forge 1.17–1.21+ Modpack Launch, Transparent Liquid Glass & UI Performance")
+
+### Исправлено и улучшено / Fixed and improved
+- **Запуск модпаков Forge 1.17–1.21+ / NeoForge 1.20.1–1.21+ (`mq-meta`, `mq-launch`, `mq-install`):**
+  - Исправлен краш `java.lang.module.ResolutionException` (конфликт пакетов `net.minecraft.*` между модулем `minecraft` и vanilla `client.jar`) для `BootstrapLauncher` и `ForgeBootstrap`: `build_deterministic_classpath` больше не дублирует vanilla `client.jar` в `-cp` при FML-управляемом клиенте, а `ensure_ignore_list_covers_client_jar` гарантирует безопасное исключение `client.jar`/`<mc_version>.jar` в `-DignoreList`. / Fixed `ResolutionException` split-module crash on modular Forge/NeoForge launches by omitting vanilla `client.jar` from `-cp` for `BootstrapLauncher`/`ForgeBootstrap` and ensuring `-DignoreList` safely excludes it.
+  - Исправлена ошибка `ERROR StatusLogger Reconfiguration failed: No configuration found for 'MCL'`: отключена инъекция устаревшего Mojang `logging.client` (`LegacyXMLLayout`) для модульного Forge/NeoForge и пропущенных XML-файлов; сохранён `id` в `FlexibleArtifact`. / Fixed Log4j2 `StatusLogger` error by skipping inherited Mojang `logging.client` on modular Forge/NeoForge and missing XML files, and preserving `id` in `FlexibleArtifact`.
+  - Добавлена санитизация устаревших флагов GC (`sanitize_custom_jvm_args`): удаляется `-Xnoclassgc`, небезопасный `-XX:+UseSerialGC` автоматически повышается до `-XX:+UseG1GC` на больших/модпаковых кучах (`>= 3072 MB` или Java 17+), а ZGC-флаги защищены от несовместимых версий Java; пресет «Low-End PC (Low Memory)» переведён на безопасный G1GC. / Sanitized legacy JVM GC flags (stripping `-Xnoclassgc`, upgrading `-XX:+UseSerialGC` to G1GC on large/modded heaps, guarding ZGC flags by Java version) and updated the Low-End PC preset to safe G1GC.
+  - Исправлены слияние нативных библиотек (`merge_libraries_deterministically`), замена legacy-аргументов Forge 1.12.2 (`merge_game_arguments_deterministically`), атомарное извлечение bundled `maven/` в `forge.rs` и проверка целостности `mq verify` / «Проверить» при пустом `AssetIndex.id` в сырых JSON-индексах Mojang. / Fixed native+artifact library merge deduplication, Forge 1.12.2 legacy argument replacement, atomic bundled Maven extraction, and `mq verify` false-missing asset index check when raw Mojang index JSON omits `"id"`.
+- **Настоящее прозрачное стекло Liquid Glass (`mq-ui`):**
+  - Полностью удалены встроенный фото-фон и автоподстановка обоев в теме `Liquid Glass`: режим `Procedural` оставляет окно по-настоящему прозрачным (`clear_color = [0, 0, 0, 0]`) для композитора Wayland/Hyprland/Windows, `Solid` рисует полупрозрачную стеклянную вуаль, а `CustomImage` загружает только явно выбранное пользователем изображение. / Removed baked wallpaper fallback from Liquid Glass: `Procedural` renders a truly transparent compositor window, `Solid` uses a subtle translucent glass veil, and `CustomImage` loads only an explicitly selected image.
+  - Обновлён WGSL-шейдер `liquid_glass.wgsl` (`mode_params`, 128-байтное выравнивание uniform-буфера) и OpenGL/`glow`-fallback для полупрозрачного матового стекла с фаской, хроматической аберрацией и каустиками без непрозрачной подложки. / Updated `liquid_glass.wgsl` and OpenGL/`glow` fallback for translucent frosted glass cards over transparent windows.
+- **Компоновка, отзывчивость UI и каталог (`mq-ui`):**
+  - Кнопка «Играть» / «Скачать и играть» перенесена в панель действий слева от «Папка игры» в одну строку с выровненной высотой `32px`, а дублирующая «Установить» вынесена в меню `•••`. / Moved the Play button to the action toolbar strictly left of «Папка игры» at uniform 32px height, moving redundant Install into the `•••` menu.
+  - Убрано техническое уведомление `Фаза 'catalog_search'`, локализованы пользовательские фазы, ускорен поиск каталога (пул `reqwest::Client` + таймаут 6 с на провайдера без 10-секундных зависаний) и исправлены хит-таргеты фильтров источника (`>= 24px`). / Suppressed raw `catalog_search` toast, accelerated catalog search with pooled HTTP clients and 6s per-provider timeout, and ensured `>= 24px` source filter hit targets.
+  - Устранены фризы UI-потока (`WD`): виртуализация логов консоли (`show_rows`), кэширование проверок директорий/установки с TTL 2 с, перенос поиска Java, анализа крашей, пинга серверов, экспорта ZIP, удаления/переустановки и проверки обновлений в фоновый воркер, а также исправлены `mclogs`, OAuth Ely.by и изоляция консоли по инстансу. / Eliminated UI-thread stalls via virtualized console logs, 2s TTL directory caches, background worker offloading for Java discovery/crash analysis/pings/exports/updates, and fixed mclogs/Ely.by OAuth/per-instance console scoping.
+
+---
+
 ## [v2.7.5] — 2026-11-22 ("Windows CI Test Parity & Uninstall Guard")
 
 ### Исправлено и улучшено / Fixed and improved

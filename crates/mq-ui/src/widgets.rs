@@ -970,6 +970,7 @@ pub fn loader_badge(ui: &mut Ui, loader: mq_core::ModLoaderKind) {
 }
 
 /// Prominent hero action button with dynamic icon, color, and animated pulsing glow.
+/// Matches the 32px action toolbar height so Play sits cleanly inline beside secondary buttons.
 pub fn hero_action_button(
     ui: &mut Ui,
     icon: VectorIcon,
@@ -977,18 +978,18 @@ pub fn hero_action_button(
     accent_color: Color32,
 ) -> Response {
     let tokens = Tokens::active(ui.ctx());
-    let bg = blend_color(tokens.bg_surface, accent_color, 0.22);
-    let bg_hover = blend_color(tokens.bg_surface, accent_color, 0.34);
+    let bg = blend_color(tokens.bg_surface, accent_color, 0.24);
+    let bg_hover = blend_color(tokens.bg_surface, accent_color, 0.36);
     let fg_color = crate::components::button::contrast_fg_for_bg(tokens.text, bg);
-    let font_id = FontId::proportional(15.0);
+    let font_id = FontId::proportional(14.0);
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font_id, fg_color);
-    let icon_side = 18.0;
-    let icon_gap = 10.0;
+    let icon_side = 15.0;
+    let icon_gap = 8.0;
     let desired_width =
-        (BUTTON_PADDING.x * 2.2 + icon_side + icon_gap + galley.size().x).max(140.0);
-    let desired_height = 38.0;
+        (BUTTON_PADDING.x * 2.2 + icon_side + icon_gap + galley.size().x).max(116.0);
+    let desired_height = (BUTTON_PADDING.y * 2.0 + galley.size().y).max(32.0);
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(desired_width, desired_height), Sense::click());
 
@@ -1060,6 +1061,15 @@ pub fn hero_action_button(
         let text_pos = Pos2::new(cursor_x, visual_rect.center().y - galley.size().y * 0.5);
         painter.galley(text_pos, galley, fg_color);
     }
+
+    let meta = ElementMeta::new(ElementKind::Button)
+        .label(label)
+        .text(label)
+        .tech_name(icon_tech_name(icon))
+        .fg(fg_color)
+        .bg(bg);
+    register_widget(ui, &response, meta);
+
     response
 }
 

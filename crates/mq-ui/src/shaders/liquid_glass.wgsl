@@ -71,6 +71,11 @@ struct GlassUniforms {
     cursor_pos: vec2<f32>,
     spec_radius: f32,
     hover_t: f32,
+    // x: 1.0 = explicit CustomImage wallpaper refraction, 0.0 = transparent compositor glass
+    // y: translucent glass body opacity (0.10..0.88) in transparent mode
+    // z: prismatic bevel chromatic dispersion strength in transparent mode
+    // w: reserved (0.0)
+    mode_params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: GlassUniforms;
@@ -154,9 +159,75 @@ fn evaluate_liquid_glass(frag_xy: vec2<f32>) -> vec4<f32> {
 
     // Smooth bezel depth falloff inward from border
     let bevel_w = max(u.bevel_width, 1.0);
+    let has_bevel = select(0.0, 1.0, u.bevel_width > 0.5);
     let rim = select(0.0, safe_pow(clamp(1.0 + dist / bevel_w, 0.0, 1.0), 2.2), u.bevel_width > 0.5);
 
-    // Exact screen -> backdrop aspect-fill UV mapping + gentle center lens magnification
+    // Cursor-reactive light vector + rim caustics (shared across transparent & wallpaper modes)
+    let light_len = length(u.light_dir);
+    var eff_light = select(vec2<f32>(0.0, -1.0), u.light_dir / max(light_len, 1e-5), light_len > 1e-4);
+    var cursor_caustic = 0.0;
+    if u.spec_radius > 1.0 && u.cursor_pos.x > -5000.0 {
+        let to_cur = u.cursor_pos - frag_xy;
+        let cd = length(to_cur);
+        if cd > 1.0 && cd < u.spec_radius {
+            let falloff = 1.0 - cd / u.spec_radius;
+            let c_dir = to_cur / cd;
+            let blended_light = mix(eff_light, c_dir, 0.42 * falloff * (0.35 + 0.65 * u.hover_t));
+            let blended_len = length(blended_light);
+            if blended_len > 1e-4 {
+                eff_light = blended_light / blended_len;
+            }
+            cursor_caustic = safe_pow(falloff, 2.2) * (0.14 + 0.12 * u.hover_t);
+        }
+    }
+
+    // Crisp 1.2px directional silver-white bezel rim + subtle inner caustic band
+    let light_align = max(dot(grad, eff_light), 0.0);
+    let opp_align = max(dot(grad, -eff_light), 0.0);
+    let crisp_edge = smoothstep(-1.35, 0.0, dist);
+    let rim_spec = crisp_edge * (0.09 + 0.48 * safe_pow(light_align, 1.8) + 0.16 * safe_pow(opp_align, 2.2));
+    let caustic = rim * (safe_pow(light_align, 2.2) * 0.10 + cursor_caustic * 0.45) + crisp_edge * cursor_caustic * 0.35;
+    let spec_color = vec3<f32>(0.93, 0.96, 1.0);
+
+    // Mode 0: True transparent compositor Liquid Glass (NO wallpaper photo texture sampling).
+    // Renders frosted translucent glass directly over the transparent window framebuffer so
+    // the desktop wallpaper & compositor blur shine cleanly through.
+    if u.mode_params.x < 0.5 {
+        let ny = clamp((frag_xy.y - u.rect_min.y) / max(u.rect_size.y, 1.0), 0.0, 1.0);
+        let top_sheen = safe_pow(1.0 - ny, 1.8) * (0.065 + 0.03 * u.hover_t);
+
+        // Optical bevel thickening + subtle RGB prismatic dispersion along curved bevel normal
+        let disp_axis = clamp(dot(grad, vec2<f32>(0.7071, -0.7071)), -1.0, 1.0);
+        let chroma_strength = u.mode_params.z * rim * (0.55 + 0.45 * light_align);
+        let chroma_rgb = vec3<f32>(
+            max(disp_axis, 0.0) * 0.52 + max(-disp_axis, 0.0) * 0.10,
+            0.22 * abs(disp_axis),
+            max(-disp_axis, 0.0) * 0.62 + max(disp_axis, 0.0) * 0.16,
+        ) * chroma_strength;
+
+        let bevel_lift = vec3<f32>(0.20, 0.23, 0.29) * rim * (0.45 + 0.55 * light_align);
+        let glass_base = clamp(
+            u.tint_color.rgb + vec3<f32>(0.85, 0.91, 1.0) * top_sheen + bevel_lift + chroma_rgb,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+
+        let bevel_rim_spec = rim_spec * has_bevel;
+        let bevel_caustic = caustic * has_bevel;
+        let spec_energy = clamp(bevel_rim_spec * 1.15 + bevel_caustic * 1.25, 0.0, 1.0);
+
+        let body_a = clamp(u.mode_params.y + 0.05 * u.hover_t, 0.10, 0.86);
+        let out_a = clamp(body_a + rim * 0.12 + spec_energy * 0.52, 0.0, 0.94) * alpha_mask;
+        let final_rgb = clamp(
+            mix(glass_base, spec_color, clamp(spec_energy * 0.84, 0.0, 0.92))
+                + spec_color * (crisp_edge * has_bevel * 0.14 + cursor_caustic * has_bevel * 0.28),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+        return vec4<f32>(final_rgb, out_a);
+    }
+
+    // Mode 1: Explicit CustomImage backdrop refraction (Snell's law bevel + dual-pass Gaussian blur)
     let bsize = max(u.backdrop_size, vec2<f32>(1.0));
     let local_uv = clamp((frag_xy - u.backdrop_min) / bsize, vec2<f32>(0.0), vec2<f32>(1.0));
     let base_uv = u.uv_min + local_uv * u.uv_size;
@@ -191,34 +262,6 @@ fn evaluate_liquid_glass(frag_xy: vec2<f32>) -> vec4<f32> {
     let bg_luma = dot(glass_rgb, vec3<f32>(0.299, 0.587, 0.114));
     let hover_tint_a = clamp(u.tint_color.a + 0.04 * u.hover_t + max(bg_luma - 0.42, 0.0) * 0.40, 0.0, 0.92);
     glass_rgb = mix(glass_rgb, u.tint_color.rgb, hover_tint_a);
-
-    // Cursor-reactive light vector + rim caustics
-    let light_len = length(u.light_dir);
-    var eff_light = select(vec2<f32>(0.0, -1.0), u.light_dir / max(light_len, 1e-5), light_len > 1e-4);
-    var cursor_caustic = 0.0;
-    if u.spec_radius > 1.0 && u.cursor_pos.x > -5000.0 {
-        let to_cur = u.cursor_pos - frag_xy;
-        let cd = length(to_cur);
-        if cd > 1.0 && cd < u.spec_radius {
-            let falloff = 1.0 - cd / u.spec_radius;
-            let c_dir = to_cur / cd;
-            let blended_light = mix(eff_light, c_dir, 0.42 * falloff * (0.35 + 0.65 * u.hover_t));
-            let blended_len = length(blended_light);
-            if blended_len > 1e-4 {
-                eff_light = blended_light / blended_len;
-            }
-            cursor_caustic = safe_pow(falloff, 2.2) * (0.14 + 0.12 * u.hover_t);
-        }
-    }
-
-    // Crisp 1.1px directional silver-white bezel rim + subtle inner caustic band
-    let light_align = max(dot(grad, eff_light), 0.0);
-    let opp_align = max(dot(grad, -eff_light), 0.0);
-    let crisp_edge = smoothstep(-1.35, 0.0, dist);
-    let rim_spec = crisp_edge * (0.09 + 0.48 * safe_pow(light_align, 1.8) + 0.16 * safe_pow(opp_align, 2.2));
-    let caustic = rim * (safe_pow(light_align, 2.2) * 0.10 + cursor_caustic * 0.45) + crisp_edge * cursor_caustic * 0.35;
-
-    let spec_color = vec3<f32>(0.93, 0.96, 1.0);
     glass_rgb = clamp(glass_rgb + spec_color * (rim_spec + caustic), vec3<f32>(0.0), vec3<f32>(1.0));
 
     return vec4<f32>(glass_rgb, alpha_mask);

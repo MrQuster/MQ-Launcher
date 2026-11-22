@@ -185,7 +185,7 @@ impl CatalogView {
         }
 
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
             if let Some((inst_name, inst_mc, inst_loader)) = inst_info {
                 ui.label(
                     RichText::new(format!(
@@ -221,7 +221,7 @@ impl CatalogView {
         mut changed: bool,
         compact: bool,
     ) {
-        let gap = if compact { 4.0 } else { 8.0 };
+        let gap = if compact { 3.0 } else { 8.0 };
         let has_key = state.config.effective_cf_api_key().is_some();
         let cf_selected = state.catalog.source == CatalogSourceFilter::CurseForge;
         if !has_key && cf_selected {
@@ -586,6 +586,7 @@ impl CatalogView {
         ui.label(RichText::new("Источник").color(tokens.text_muted));
         let indicator_slot = ui.painter().add(egui::Shape::Noop);
         let mut active_src_rect: Option<egui::Rect> = None;
+        let pill_fill = blend_color(tokens.bg_surface, tokens.accent, 0.16);
         for (filter, label) in [
             (CatalogSourceFilter::All, "Все"),
             (CatalogSourceFilter::Modrinth, "Modrinth"),
@@ -599,7 +600,7 @@ impl CatalogView {
                 .size()
                 .x;
             let (rect, resp) =
-                ui.allocate_exact_size(Vec2::new(text_w + 8.0, 20.0), Sense::click());
+                ui.allocate_exact_size(Vec2::new((text_w + 10.0).max(24.0), 24.0), Sense::click());
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
@@ -647,6 +648,9 @@ impl CatalogView {
                 &resp,
                 ElementMeta::new(ElementKind::Button)
                     .label(label)
+                    .text(label)
+                    .fg(fg)
+                    .bg(if is_sel { pill_fill } else { tokens.bg_app })
                     .active(is_sel)
                     .interactive(true),
             );
@@ -664,7 +668,6 @@ impl CatalogView {
                 target_rect,
                 crate::animation::SpringConfig::rect(),
             );
-            let pill_fill = blend_color(tokens.bg_surface, tokens.accent, 0.16);
             ui.painter().set(
                 indicator_slot,
                 egui::Shape::Rect(egui::epaint::RectShape::new(
@@ -827,7 +830,7 @@ impl CatalogView {
         let cr = style.card_corner_radius(state.config.theme.corner_radius);
         let frame = solid_card_frame_with_config(tokens, &state.config.theme)
             .stroke(Stroke::new(1.0_f32, tokens.warning))
-            .inner_margin(egui::Margin::same(8));
+            .inner_margin(egui::Margin::symmetric(8, 5));
         show_themed_card(
             ui,
             frame,
@@ -1018,7 +1021,7 @@ impl CatalogView {
     }
 
     fn hit_card(&mut self, ui: &mut Ui, state: &mut UiState, hit: &CatalogHit, tokens: &Tokens) {
-        let installed = is_hit_installed_in_instance(state, hit);
+        let installed = is_hit_installed_in_instance_cached(ui.ctx(), state, hit);
         let queued = state.catalog.is_queued(hit.source, &hit.project_id);
         let texture = hit
             .icon_url
@@ -1408,6 +1411,79 @@ fn mod_entry_matches_project(m: &mq_mods::InstalledModEntry, slug: &str, title: 
     filename_matches_project(&m.file_name, slug, title)
 }
 
+#[derive(Clone)]
+struct CachedPackDirNames {
+    names: Vec<String>,
+    refreshed_at: std::time::Instant,
+}
+
+fn dir_has_matching_pack_cached(
+    ctx: &egui::Context,
+    dir: &std::path::Path,
+    slug: &str,
+    title: &str,
+) -> bool {
+    const DIR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    let cache_id = egui::Id::new(("mq_catalog_pack_dir_cache", dir.to_path_buf()));
+    let cached = ctx.data(|d| d.get_temp::<CachedPackDirNames>(cache_id));
+    let names = match cached {
+        Some(entry) if entry.refreshed_at.elapsed() < DIR_CACHE_TTL => entry.names,
+        _ => {
+            let fresh: Vec<String> = std::fs::read_dir(dir)
+                .ok()
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            ctx.data_mut(|d| {
+                d.insert_temp(
+                    cache_id,
+                    CachedPackDirNames {
+                        names: fresh.clone(),
+                        refreshed_at: std::time::Instant::now(),
+                    },
+                );
+            });
+            fresh
+        }
+    };
+    names
+        .iter()
+        .any(|name| filename_matches_project(name, slug, title))
+}
+
+fn is_hit_installed_in_instance_cached(
+    ctx: &egui::Context,
+    state: &UiState,
+    hit: &CatalogHit,
+) -> bool {
+    let slug = hit.slug.trim().to_lowercase();
+    let title = hit.title.trim().to_lowercase();
+    if slug.is_empty() && title.is_empty() {
+        return false;
+    }
+
+    match hit.project_kind {
+        ProjectKind::Mod => state
+            .installed_mods
+            .iter()
+            .any(|m| mod_entry_matches_project(m, &slug, &title)),
+        ProjectKind::ResourcePack => state.selected_instance_id.as_ref().is_some_and(|id| {
+            let dir = state.paths.instance_dir(id.as_str()).join("resourcepacks");
+            dir_has_matching_pack_cached(ctx, &dir, &slug, &title)
+        }),
+        ProjectKind::Shader => state.selected_instance_id.as_ref().is_some_and(|id| {
+            let dir = state.paths.instance_dir(id.as_str()).join("shaderpacks");
+            dir_has_matching_pack_cached(ctx, &dir, &slug, &title)
+        }),
+        ProjectKind::Modpack => false,
+    }
+}
+
+#[cfg(test)]
 fn dir_has_matching_pack(dir: &std::path::Path, slug: &str, title: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
@@ -1419,6 +1495,7 @@ fn dir_has_matching_pack(dir: &std::path::Path, slug: &str, title: &str) -> bool
     })
 }
 
+#[cfg(test)]
 fn is_hit_installed_in_instance(state: &UiState, hit: &CatalogHit) -> bool {
     let slug = hit.slug.trim().to_lowercase();
     let title = hit.title.trim().to_lowercase();

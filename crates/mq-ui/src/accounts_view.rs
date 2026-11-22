@@ -518,6 +518,10 @@ impl AccountsView {
     }
 
     fn render_elyby_tab(&mut self, ui: &mut Ui, state: &mut UiState) {
+        if state.ely_login_done.take().is_some() {
+            self.ely_waiting_browser = false;
+            self.ely_auth_url = None;
+        }
         let is_en = state.config.launcher_locale == "en";
         ui.label(
             RichText::new(tr_acc(
@@ -629,6 +633,7 @@ impl AccountsView {
                 let client_id_owned = client_id.to_string();
                 let client_secret_owned = oauth_cfg.client_secret.clone();
                 let paths_clone = state.paths.clone();
+                let resp_tx = state.resp_sender.clone();
 
                 // Spawn background task to receive loopback callback and exchange token
                 let handle = tokio::runtime::Handle::current();
@@ -638,9 +643,12 @@ impl AccountsView {
                         if cancel_flag.load(Ordering::SeqCst) {
                             return;
                         }
-                        match res {
+                        let outcome: Result<String, String> = match res {
                             Ok(code) => {
-                                let http = reqwest::Client::new();
+                                let http = reqwest::Client::builder()
+                                    .timeout(std::time::Duration::from_secs(20))
+                                    .build()
+                                    .unwrap_or_default();
                                 let redirect_uri = format!("http://127.0.0.1:{port}/callback");
                                 match ElyByOAuthFlow::exchange_code_for_token(
                                     &http,
@@ -659,6 +667,7 @@ impl AccountsView {
                                         .await
                                         {
                                             Ok(info) => {
+                                                let username = info.username.clone();
                                                 let profile = AccountProfile {
                                                     id: AccountId::new_v4(),
                                                     username: info.username,
@@ -679,20 +688,30 @@ impl AccountsView {
                                                     skin_url: None,
                                                     avatar_head: None,
                                                 };
-                                                // Stored accounts are updated on next save or check
-                                                if let Ok(mut store) =
-                                                    mq_auth::AccountStore::load_or_default(
-                                                        &paths_clone,
-                                                    )
-                                                {
-                                                    store.upsert_account(profile, true);
-                                                    let _ = store.save(&paths_clone);
+                                                match mq_auth::AccountStore::load_or_default(
+                                                    &paths_clone,
+                                                ) {
+                                                    Ok(mut store) => {
+                                                        store.upsert_account(profile, true);
+                                                        match store.save(&paths_clone) {
+                                                            Ok(()) => Ok(username),
+                                                            Err(e) => Err(format!(
+                                                                "Не удалось сохранить аккаунт: {e}"
+                                                            )),
+                                                        }
+                                                    }
+                                                    Err(e) => Err(format!(
+                                                        "Не удалось загрузить хранилище аккаунтов: {e}"
+                                                    )),
                                                 }
                                             }
                                             Err(e) => {
                                                 tracing::error!(
                                                     "Failed to fetch Ely.by account info: {e}"
                                                 );
+                                                Err(format!(
+                                                    "Не удалось получить профиль Ely.by: {e}"
+                                                ))
                                             }
                                         }
                                     }
@@ -700,12 +719,19 @@ impl AccountsView {
                                         tracing::error!(
                                             "Failed to exchange Ely.by code for token: {e}"
                                         );
+                                        Err(format!("Не удалось обменять код на токен: {e}"))
                                     }
                                 }
                             }
                             Err(e) => {
                                 tracing::error!("Ely.by loopback callback failed: {e}");
+                                Err(format!("Ошибка ожидания ответа браузера: {e}"))
                             }
+                        };
+                        if !cancel_flag.load(Ordering::SeqCst) {
+                            let _ = resp_tx.send(
+                                crate::state::UiWorkerResponse::ElyByLoginFinished(outcome),
+                            );
                         }
                     });
                 });

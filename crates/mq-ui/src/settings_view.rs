@@ -548,7 +548,7 @@ impl SettingsView {
 
                 let preset_hint = match state.config.theme.preset {
                     ThemePreset::LiquidGlass => Some(
-                        "Режим Liquid Glass: прозрачное матовое стекло с преломлением размытых обоев на фасках и 1px серебристым кантом.",
+                        "Режим Liquid Glass: настоящее прозрачное стекло композитора без подложки обоев — рабочий стол и системное размытие видны сквозь матовые стеклянные карточки с оптической фаской и бликами. Своё фото-фон можно включить по желанию в разделе 2.",
                     ),
                     ThemePreset::Translucent => Some(
                         "Режим Полупрозрачная: чистая тонировка и прозрачность окна на уровне композитора без лишних эффектов.",
@@ -634,6 +634,22 @@ impl SettingsView {
                         }
                     }
                 });
+
+                if state.config.theme.preset == ThemePreset::LiquidGlass {
+                    let bg_hint = match state.config.theme.background_style {
+                        BackgroundStyle::Procedural => {
+                            "Прозрачное окно композитора без фонового изображения — сквозь карточки Liquid Glass виден реальный рабочий стол."
+                        }
+                        BackgroundStyle::Solid => {
+                            "Лёгкая полупрозрачная стеклянная вуаль поверх окна композитора без фото-обоев."
+                        }
+                        BackgroundStyle::CustomImage => {
+                            "Необязательный пользовательский фон с оптическим преломлением и размытием на фасках карточек."
+                        }
+                    };
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(bg_hint).color(tokens.text_muted).small());
+                }
 
                 if state.config.theme.background_style == BackgroundStyle::CustomImage {
                     ui.add_space(6.0);
@@ -1027,8 +1043,13 @@ impl SettingsView {
                     if secondary_glass_button(ui, Some(VectorIcon::Cpu), "Low-End PC (Low Memory)")
                         .clicked()
                     {
-                        state.config.default_jvm_args =
-                            vec!["-XX:+UseSerialGC".to_string(), "-Xnoclassgc".to_string()];
+                        state.config.default_jvm_args = vec![
+                            "-XX:+UseG1GC".to_string(),
+                            "-XX:+ParallelRefProcEnabled".to_string(),
+                            "-XX:MaxGCPauseMillis=100".to_string(),
+                            "-XX:+UnlockExperimentalVMOptions".to_string(),
+                            "-XX:G1NewSizePercent=20".to_string(),
+                        ];
                     }
                 });
 
@@ -1155,18 +1176,47 @@ impl SettingsView {
                 ui.add_space(4.0);
 
                 let tokens = Tokens::from_config(&state.config.theme);
-                let runtimes = mq_launch::discover_java_runtimes();
-                if runtimes.is_empty() {
-                    ui.label(
-                        RichText::new("Установленные версии Java не найдены в системе")
-                            .color(tokens.text_muted),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new(format!("Найдено JVM в системе: {}", runtimes.len()))
-                            .color(tokens.text_muted)
-                            .small(),
-                    );
+                if state.discovered_java_runtimes.is_none() && !state.is_discovering_java {
+                    state.is_discovering_java = true;
+                    let _ = state
+                        .cmd_sender
+                        .send(crate::state::UiWorkerCommand::DiscoverJavaRuntimes);
+                }
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+                    if state.is_discovering_java && state.discovered_java_runtimes.is_none() {
+                        ui.label(
+                            RichText::new("Поиск установленных версий Java...")
+                                .color(tokens.text_muted)
+                                .small(),
+                        );
+                    } else if let Some(ref runtimes) = state.discovered_java_runtimes {
+                        if runtimes.is_empty() {
+                            ui.label(
+                                RichText::new("Установленные версии Java не найдены в системе")
+                                    .color(tokens.text_muted),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(format!("Найдено JVM в системе: {}", runtimes.len()))
+                                    .color(tokens.text_muted)
+                                    .small(),
+                            );
+                        }
+                    }
+                    if !state.is_discovering_java
+                        && secondary_glass_button(ui, Some(VectorIcon::Refresh), "Обновить")
+                            .clicked()
+                    {
+                        state.is_discovering_java = true;
+                        let _ = state
+                            .cmd_sender
+                            .send(crate::state::UiWorkerCommand::DiscoverJavaRuntimes);
+                    }
+                });
+
+                if let Some(ref runtimes) = state.discovered_java_runtimes {
                     for rt in runtimes.iter().take(5) {
                         ui.horizontal(|ui| {
                             version_badge(
@@ -1200,6 +1250,7 @@ impl SettingsView {
                         {
                             let java_dir = state.paths.java_dir();
                             let bus = state.event_bus.clone();
+                            let cmd_tx = state.cmd_sender.clone();
                             tokio::spawn(async move {
                                 bus.publish(mq_core::Event::PhaseStarted {
                                     phase: format!("Скачивание Eclipse Temurin Java {ver}"),
@@ -1213,6 +1264,9 @@ impl SettingsView {
                                     .await
                                 {
                                     Ok(rt) => {
+                                        let _ = cmd_tx.send(
+                                            crate::state::UiWorkerCommand::DiscoverJavaRuntimes,
+                                        );
                                         bus.publish(mq_core::Event::PhaseCompleted {
                                             phase: format!(
                                                 "Java {ver} успешно установлена: {}",
@@ -1499,6 +1553,29 @@ impl SettingsView {
     }
 
     fn render_updates_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
+        if let Some(res) = state.pending_update_check.take() {
+            self.is_checking_update = false;
+            match res {
+                Ok(Some(info)) => {
+                    self.update_check_result =
+                        Some(format!("Найдена новая версия: v{}", info.version));
+                    self.available_update = Some(info);
+                }
+                Ok(None) => {
+                    self.available_update = None;
+                    self.update_check_result =
+                        Some("У вас установлена самая актуальная версия лаунчера.".to_string());
+                }
+                Err(e) => {
+                    self.update_check_result = Some(format!("Ошибка проверки обновлений: {e}"));
+                }
+            }
+        }
+        if let Some(err) = state.pending_update_error.take() {
+            self.is_downloading_update = false;
+            self.update_check_result = Some(format!("Ошибка установки обновления: {err}"));
+        }
+
         let tokens = Tokens::from_config(&state.config.theme);
         let style = ThemeStyleParams::from_config(&state.config.theme);
         let card_r = style.card_corner_radius(state.config.theme.corner_radius);
@@ -1566,48 +1643,20 @@ impl SettingsView {
                                 crate::components::render_progress_bar(ui, &tokens, self.update_progress, 6.0_f32);
                             } else if primary_emerald_button(ui, Some(VectorIcon::Download), "Обновить лаунчер сейчас").clicked() {
                                 self.is_downloading_update = true;
-                                let mgr = mq_update::UpdateManager::new("MrQuster", "mq");
-                                let asset_to_download = asset.clone();
-                                let handle = tokio::runtime::Handle::current();
-                                std::thread::spawn(move || {
-                                    handle.block_on(async move {
-                                        let res = mgr.download_and_install(&asset_to_download, |_d, _t| {}).await;
-                                        match res {
-                                            Ok(_path) => {
-                                                let _ = mq_update::UpdateManager::restart_process(&[]);
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("Update failed: {e}");
-                                            }
-                                        }
-                                    });
-                                });
+                                let _ = state.cmd_sender.send(
+                                    crate::state::UiWorkerCommand::DownloadLauncherUpdate {
+                                        asset: Box::new(asset.clone()),
+                                    },
+                                );
                             }
                         } else if secondary_glass_button(ui, Some(VectorIcon::Refresh), "Проверить сейчас").clicked() {
-                            let mgr = mq_update::UpdateManager::new("MrQuster", "mq");
-                            let handle = tokio::runtime::Handle::current();
-                            let cur_ver = env!("CARGO_PKG_VERSION");
-                            let res = std::thread::spawn(move || {
-                                handle.block_on(async move {
-                                    mgr.check_latest(cur_ver, false).await
-                                })
-                            }).join();
-
-                            match res {
-                                Ok(Ok(Some(info))) => {
-                                    self.update_check_result = Some(format!("Найдена новая версия: v{}", info.version));
-                                    self.available_update = Some(info);
-                                }
-                                Ok(Ok(None)) => {
-                                    self.update_check_result = Some("У вас установлена самая актуальная версия лаунчера.".to_string());
-                                }
-                                Ok(Err(e)) => {
-                                    self.update_check_result = Some(format!("Ошибка проверки обновлений: {e}"));
-                                }
-                                Err(_) => {
-                                    self.update_check_result = Some("Ошибка потока проверки обновлений".to_string());
-                                }
-                            }
+                            self.is_checking_update = true;
+                            self.update_check_result = None;
+                            let _ = state.cmd_sender.send(
+                                crate::state::UiWorkerCommand::CheckLauncherUpdate {
+                                    current_version: env!("CARGO_PKG_VERSION").to_string(),
+                                },
+                            );
                         }
 
                         // Check if rollback is available (`<exe>.old` on Windows/Linux or `<stem>.old`)
