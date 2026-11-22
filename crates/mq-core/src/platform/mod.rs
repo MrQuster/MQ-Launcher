@@ -531,6 +531,74 @@ pub fn open_url(url: &str) -> io::Result<()> {
     }
 }
 
+/// Returns total system physical memory in MiB.
+pub fn total_memory_mb() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
+            for line in meminfo.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if let Some(kb_str) = parts.first() {
+                        if let Ok(kb) = kb_str.parse::<u64>() {
+                            return kb / 1024;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page_file: u64,
+            avail_page_file: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended_virtual: u64,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalMemoryStatusEx(stat: *mut MemoryStatusEx) -> i32;
+        }
+        let mut stat = MemoryStatusEx {
+            length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        // SAFETY: `stat` is allocated on the stack and initialized with its size.
+        let ok = unsafe { GlobalMemoryStatusEx(&mut stat) };
+        if ok != 0 && stat.total_phys > 0 {
+            return stat.total_phys / (1024 * 1024);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.memsize").output() {
+            if let Ok(s) = std::str::from_utf8(&output.stdout) {
+                if let Ok(bytes) = s.trim().parse::<u64>() {
+                    return bytes / (1024 * 1024);
+                }
+            }
+        }
+    }
+
+    8192
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

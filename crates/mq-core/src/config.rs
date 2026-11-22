@@ -532,6 +532,14 @@ fn default_mc_locale() -> String {
     "ru_ru".to_string()
 }
 
+pub const fn default_true() -> bool {
+    true
+}
+
+pub const fn default_max_world_backups() -> usize {
+    3
+}
+
 /// Global application configuration persisted in `~/.config/mq/config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -579,6 +587,26 @@ pub struct AppConfig {
 
     /// Active theme and visual customization settings.
     pub theme: ThemeConfig,
+
+    /// Whether Discord Rich Presence IPC is enabled (default: `true`).
+    #[serde(default = "default_true")]
+    pub discord_rpc_enabled: bool,
+
+    /// Whether to automatically backup worlds before launching an instance (default: `false`).
+    #[serde(default)]
+    pub auto_backup_worlds: bool,
+
+    /// Maximum number of automatic world backups to retain per world (default: `3`).
+    #[serde(default = "default_max_world_backups")]
+    pub max_world_backups: usize,
+
+    /// Whether to hide the launcher window while Minecraft is running (default: `false`).
+    #[serde(default)]
+    pub hide_on_launch: bool,
+
+    /// Whether to show the compact mini overlay window on game launch (default: `false`).
+    #[serde(default)]
+    pub mini_overlay_on_launch: bool,
 }
 
 impl Default for AppConfig {
@@ -597,6 +625,11 @@ impl Default for AppConfig {
             launcher_locale: default_launcher_locale(),
             default_mc_locale: default_mc_locale(),
             theme: ThemeConfig::default(),
+            discord_rpc_enabled: true,
+            auto_backup_worlds: false,
+            max_world_backups: 3,
+            hide_on_launch: false,
+            mini_overlay_on_launch: false,
         }
     }
 }
@@ -910,6 +943,11 @@ mod tests {
             launcher_locale: "ru_RU".into(),
             default_mc_locale: "ru_ru".into(),
             theme: ThemeConfig::preset_prism_classic_dark(),
+            discord_rpc_enabled: true,
+            auto_backup_worlds: false,
+            max_world_backups: 3,
+            hide_on_launch: false,
+            mini_overlay_on_launch: false,
         };
 
         // Ensure Debug never leaks the CurseForge API key.
@@ -1141,5 +1179,26 @@ mod tests {
                 .map(SecretString::expose_secret),
             Some("cf_updated_key_999")
         );
+    }
+
+    #[test]
+    fn v280_config_defaults_and_roundtrip() {
+        let default_cfg = AppConfig::default();
+        assert!(default_cfg.discord_rpc_enabled);
+        assert!(!default_cfg.auto_backup_worlds);
+        assert_eq!(default_cfg.max_world_backups, 3);
+        assert!(!default_cfg.hide_on_launch);
+        assert!(!default_cfg.mini_overlay_on_launch);
+
+        let toml_str = r#"
+            launcher_locale = "en_US"
+            default_mc_locale = "en_us"
+        "#;
+        let parsed: AppConfig = toml::from_str(toml_str).expect("deserialize partial config");
+        assert!(parsed.discord_rpc_enabled);
+        assert!(!parsed.auto_backup_worlds);
+        assert_eq!(parsed.max_world_backups, 3);
+        assert!(!parsed.hide_on_launch);
+        assert!(!parsed.mini_overlay_on_launch);
     }
 }

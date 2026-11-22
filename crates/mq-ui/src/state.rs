@@ -170,6 +170,25 @@ pub enum UiWorkerResponse {
         analysis: mq_launch::CrashAnalysis,
     },
     ElyByLoginFinished(Result<String, String>),
+    GameRssSamples(Vec<(InstanceId, f32)>),
+    AutoFixDepsDone {
+        instance_id: InstanceId,
+        report: Result<mq_mods::AutoFixDepsReport, String>,
+    },
+    ModpackUpdateChecked {
+        instance_id: InstanceId,
+        result: Result<Option<mq_mods::ModpackUpdateInfo>, String>,
+    },
+    ModpackUpdateApplied {
+        instance_id: InstanceId,
+        result: Result<usize, String>,
+    },
+    ExternalInstancesDiscovered(Vec<mq_instances::DiscoveredExternalInstance>),
+    ExternalInstanceImported(Box<Result<InstanceManifest, String>>),
+    WorldsBackedUp {
+        instance_id: InstanceId,
+        result: Result<Vec<std::path::PathBuf>, String>,
+    },
 }
 
 /// Successful result of an install job.
@@ -325,6 +344,28 @@ pub enum UiWorkerCommand {
         exit_code: i32,
         lines: Vec<String>,
     },
+    LaunchInstanceQuickPlay {
+        instance_id: InstanceId,
+        quick_play: mq_launch::QuickPlayTarget,
+    },
+    AutoInstallMissingDeps {
+        instance_id: InstanceId,
+        missing_ids: Vec<String>,
+    },
+    CheckModpackUpdate {
+        instance_id: InstanceId,
+    },
+    ApplyModpackUpdate {
+        instance_id: InstanceId,
+        info: mq_mods::ModpackUpdateInfo,
+    },
+    DiscoverExternalInstances,
+    ImportExternalInstance {
+        item: mq_instances::DiscoveredExternalInstance,
+    },
+    AutoBackupWorlds {
+        instance_id: InstanceId,
+    },
 }
 
 /// Central state model consumed by `eframe::App` in `mq-ui`.
@@ -458,6 +499,21 @@ pub struct UiState {
     pub orphaned_deps_prompt: Option<(InstanceId, String, Vec<String>)>,
     pub preflight_report: Option<(InstanceId, mq_mods::PreflightReport)>,
     pub gpu_diagnostics: Option<mq_mods::shaders::GpuDiagnostics>,
+
+    // v2.8.0 state additions
+    pub game_rss_history:
+        std::collections::HashMap<mq_core::InstanceId, std::collections::VecDeque<f32>>,
+    pub mini_overlay_active: bool,
+    pub active_bisect: Option<(mq_core::InstanceId, mq_mods::BisectSession)>,
+    pub modpack_update_available:
+        std::collections::HashMap<mq_core::InstanceId, mq_mods::ModpackUpdateInfo>,
+    pub external_instances: Vec<mq_instances::DiscoveredExternalInstance>,
+    pub show_external_import_modal: bool,
+    pub is_auto_fixing_deps: bool,
+    pub is_checking_modpack_update: bool,
+    pub game_session_starts: std::collections::HashMap<mq_core::InstanceId, std::time::Instant>,
+    pub running_pids:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<mq_core::InstanceId, u32>>>,
 }
 
 impl UiState {
@@ -588,6 +644,16 @@ impl UiState {
             orphaned_deps_prompt: None,
             preflight_report: None,
             gpu_diagnostics: None,
+            game_rss_history: HashMap::new(),
+            mini_overlay_active: false,
+            active_bisect: None,
+            modpack_update_available: HashMap::new(),
+            external_instances: Vec::new(),
+            show_external_import_modal: false,
+            is_auto_fixing_deps: false,
+            is_checking_modpack_update: false,
+            game_session_starts: HashMap::new(),
+            running_pids: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         })
     }
 
@@ -1017,13 +1083,26 @@ impl UiState {
                     }
                 }
                 UiWorkerResponse::GamePid { instance_id, pid } => {
-                    self.running_instances.insert(instance_id, Some(pid));
+                    self.running_instances
+                        .insert(instance_id.clone(), Some(pid));
+                    self.running_pids.lock().insert(instance_id, pid);
                 }
                 UiWorkerResponse::GameExited {
                     instance_id,
                     exit_code,
                 } => {
                     self.running_instances.remove(&instance_id);
+                    self.running_pids.lock().remove(&instance_id);
+                    if let Some(start_time) = self.game_session_starts.remove(&instance_id) {
+                        let dur_secs = start_time.elapsed().as_secs();
+                        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == instance_id)
+                        {
+                            inst.total_playtime_secs =
+                                inst.total_playtime_secs.saturating_add(dur_secs);
+                            inst.last_played = Some(chrono::Utc::now());
+                            let _ = self.instance_mgr.save_instance(inst);
+                        }
+                    }
                     self.game_running = !self.running_instances.is_empty();
                     self.running_instance = self.running_instances.keys().next().cloned();
                     self.last_game_exit_code = Some(exit_code);
@@ -1140,6 +1219,114 @@ impl UiState {
                     }
                     self.ely_login_done = Some(result);
                 }
+                UiWorkerResponse::GameRssSamples(samples) => {
+                    for (id, val) in samples {
+                        let hist = self
+                            .game_rss_history
+                            .entry(id)
+                            .or_insert_with(|| std::collections::VecDeque::with_capacity(60));
+                        if hist.len() >= 60 {
+                            hist.pop_front();
+                        }
+                        hist.push_back(val);
+                    }
+                }
+                UiWorkerResponse::AutoFixDepsDone {
+                    instance_id,
+                    report,
+                } => {
+                    self.is_auto_fixing_deps = false;
+                    match report {
+                        Ok(rep) => {
+                            self.status_message = Some((
+                                format!(
+                                    "Установлено зависимостей: {} (не найдено: {})",
+                                    rep.installed.len(),
+                                    rep.not_found.len()
+                                ),
+                                false,
+                            ));
+                            let _ = self
+                                .cmd_sender
+                                .send(UiWorkerCommand::ScanInstanceMods { instance_id });
+                        }
+                        Err(e) => {
+                            self.status_message =
+                                Some((format!("Ошибка установки зависимостей: {e}"), true));
+                        }
+                    }
+                }
+                UiWorkerResponse::ModpackUpdateChecked {
+                    instance_id,
+                    result,
+                } => {
+                    self.is_checking_modpack_update = false;
+                    match result {
+                        Ok(Some(info)) => {
+                            self.modpack_update_available.insert(instance_id, info);
+                            self.status_message =
+                                Some(("Доступно обновление сборки".to_string(), false));
+                        }
+                        Ok(None) => {
+                            self.modpack_update_available.remove(&instance_id);
+                            self.status_message =
+                                Some(("Установлена актуальная версия сборки".to_string(), false));
+                        }
+                        Err(e) => {
+                            self.status_message =
+                                Some((format!("Ошибка проверки обновления: {e}"), true));
+                        }
+                    }
+                }
+                UiWorkerResponse::ModpackUpdateApplied {
+                    instance_id,
+                    result,
+                } => match result {
+                    Ok(count) => {
+                        self.modpack_update_available.remove(&instance_id);
+                        self.status_message = Some((
+                            format!("Сборка обновлена (обработано файлов: {count})"),
+                            false,
+                        ));
+                        let _ = self
+                            .cmd_sender
+                            .send(UiWorkerCommand::ScanInstanceMods { instance_id });
+                    }
+                    Err(e) => {
+                        self.status_message =
+                            Some((format!("Ошибка применения обновления: {e}"), true));
+                    }
+                },
+                UiWorkerResponse::ExternalInstancesDiscovered(instances) => {
+                    self.external_instances = instances;
+                }
+                UiWorkerResponse::ExternalInstanceImported(result) => match *result {
+                    Ok(manifest) => {
+                        self.instances.push(manifest.clone());
+                        self.selected_instance_id = Some(manifest.id);
+                        self.status_message =
+                            Some(("Инстанс успешно импортирован".to_string(), false));
+                        let _ = self.cmd_sender.send(UiWorkerCommand::RefreshInstances);
+                    }
+                    Err(e) => {
+                        self.status_message =
+                            Some((format!("Ошибка импорта стороннего инстанса: {e}"), true));
+                    }
+                },
+                UiWorkerResponse::WorldsBackedUp {
+                    instance_id: _,
+                    result,
+                } => match result {
+                    Ok(files) => {
+                        self.status_message = Some((
+                            format!("Резервных копий миров создано: {}", files.len()),
+                            false,
+                        ));
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Ошибка автобэкапа миров: {e}"), true));
+                    }
+                },
             }
         }
 

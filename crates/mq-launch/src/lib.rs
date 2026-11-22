@@ -6,16 +6,20 @@
 
 pub mod command;
 pub mod crash_analyzer;
+pub mod discord_rpc;
 pub mod java;
 pub mod mojang_java;
+pub mod optimizer;
 pub mod options;
 pub mod prelaunch;
 pub mod runner;
 
 pub use command::{
-    build_launch_command, BuiltLaunchCommand, LaunchContext, LAUNCHER_NAME, LAUNCHER_VERSION,
+    build_launch_command, build_launch_command_with_quick_play, BuiltLaunchCommand, LaunchCommand,
+    LaunchContext, QuickPlayTarget, LAUNCHER_NAME, LAUNCHER_VERSION,
 };
 pub use crash_analyzer::{analyze_crash, upload_to_mclogs, CrashAnalysis};
+pub use discord_rpc::DiscordRpcClient;
 pub use java::{
     discover_java_runtimes, discover_java_runtimes_from_sources, download_adoptium_java,
     download_zulu_java, ensure_java_runtime, parse_java_release_file, parse_java_version_output,
@@ -28,6 +32,7 @@ pub use mojang_java::{
     parse_mojang_package_manifest, MojangCatalogEntry, MojangDownloadFile, MojangDownloadVariants,
     MojangFileNode, MojangPackageManifest, MojangProductCatalog, MOJANG_JAVA_RUNTIME_ALL_URL,
 };
+pub use optimizer::{recommend_jvm_tuning, HardwareRecommendation};
 pub use options::{
     default_mc_locale_for_version, is_legacy_mc_version, patch_minecraft_options_lang,
     read_minecraft_options_lang, sync_minecraft_options_lang,

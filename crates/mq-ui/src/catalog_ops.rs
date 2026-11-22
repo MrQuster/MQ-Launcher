@@ -704,7 +704,35 @@ pub async fn run_modpack_job(
     .await;
 
     match result {
-        Ok(blocked) if !cancel.load(Ordering::SeqCst) => Ok((id, blocked)),
+        Ok(blocked) if !cancel.load(Ordering::SeqCst) => {
+            if let Ok(mut inst) = mgr.load_instance(id.as_str()) {
+                if is_mrpack(&name) {
+                    if let Ok(idx) = mq_mods::parse_mrpack_index_from_archive(&archive) {
+                        let project_id = if !idx.name.is_empty() {
+                            idx.name.clone()
+                        } else {
+                            idx.version_id.clone()
+                        };
+                        inst.modpack_source = Some(mq_instances::ModpackSourceMeta {
+                            source: "modrinth".to_string(),
+                            project_id,
+                            version_id: idx.version_id,
+                            version_name: idx.name,
+                        });
+                        let _ = mgr.save_instance(&inst);
+                    }
+                } else if let Ok(m) = mq_mods::parse_curseforge_manifest_from_zip(&archive) {
+                    inst.modpack_source = Some(mq_instances::ModpackSourceMeta {
+                        source: "curseforge".to_string(),
+                        project_id: m.name.clone(),
+                        version_id: m.version.clone(),
+                        version_name: m.name,
+                    });
+                    let _ = mgr.save_instance(&inst);
+                }
+            }
+            Ok((id, blocked))
+        }
         Ok(_) => {
             let _ = mgr.delete_instance(id.as_str());
             Err("Отменено".to_string())

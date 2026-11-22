@@ -399,6 +399,8 @@ mod tests {
             settings_view,
             frame_crash_message: None,
             recovery_journal: None,
+            discord_rpc: None,
+            window_hidden_for_game: false,
         })
     }
 

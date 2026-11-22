@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
 use flate2::read::GzDecoder;
-use mq_core::fs_util::{remove_dir_all_with_retry, validate_windows_safe_filename};
+use mq_core::fs_util::{
+    remove_dir_all_with_retry, remove_file_with_retry, rename_with_retry,
+    validate_windows_safe_filename,
+};
 use mq_core::platform::sanitize_filename;
 use mq_core::{resolve_safe_path, MqError, MqResult};
 use serde::{Deserialize, Serialize};
@@ -439,4 +442,371 @@ pub fn delete_world(instance_dir: &Path, world_folder: &str) -> MqResult<()> {
         remove_dir_all_with_retry(&world_dir)?;
     }
     Ok(())
+}
+
+/// Metadata parsed from Minecraft `level.dat`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldNbtMeta {
+    pub level_name: String,
+    pub seed: Option<i64>,
+    pub game_type: Option<i32>,
+    pub hardcore: bool,
+    pub spawn_xyz: Option<(i32, i32, i32)>,
+    pub version_name: Option<String>,
+}
+
+/// Reads level.dat metadata from `world_dir/level.dat` using Gzip decompression and NBT tag scanning.
+pub fn read_world_level_dat(world_dir: &Path) -> Option<WorldNbtMeta> {
+    let level_dat = world_dir.join("level.dat");
+    if !level_dat.is_file() {
+        return None;
+    }
+    let file = File::open(&level_dat).ok()?;
+    let mut decoder = GzDecoder::new(file);
+    let mut bytes = Vec::new();
+    if decoder.read_to_end(&mut bytes).is_err() {
+        if let Ok(raw) = fs::read(&level_dat) {
+            bytes = raw;
+        } else {
+            return None;
+        }
+    }
+
+    let mut meta = WorldNbtMeta::default();
+
+    if let Some(pos) = find_subsequence(&bytes, b"LevelName") {
+        let after = pos + 9;
+        if after + 2 <= bytes.len() {
+            let len = u16::from_be_bytes([bytes[after], bytes[after + 1]]) as usize;
+            if after + 2 + len <= bytes.len() {
+                if let Ok(s) = std::str::from_utf8(&bytes[after + 2..after + 2 + len]) {
+                    meta.level_name = s.to_string();
+                }
+            }
+        }
+    }
+    if meta.level_name.is_empty() {
+        meta.level_name = world_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("World")
+            .to_string();
+    }
+
+    if let Some(pos) = find_subsequence(&bytes, b"GameType") {
+        let after = pos + 8;
+        if after + 4 <= bytes.len() {
+            let mode = i32::from_be_bytes([
+                bytes[after],
+                bytes[after + 1],
+                bytes[after + 2],
+                bytes[after + 3],
+            ]);
+            meta.game_type = Some(mode);
+        }
+    }
+
+    if let Some(pos) = find_subsequence(&bytes, b"hardcore") {
+        let after = pos + 8;
+        if after < bytes.len() {
+            meta.hardcore = bytes[after] == 1;
+        }
+    }
+
+    if let Some(pos) = find_subsequence(&bytes, b"RandomSeed") {
+        let after = pos + 10;
+        if after + 8 <= bytes.len() {
+            meta.seed = Some(i64::from_be_bytes([
+                bytes[after],
+                bytes[after + 1],
+                bytes[after + 2],
+                bytes[after + 3],
+                bytes[after + 4],
+                bytes[after + 5],
+                bytes[after + 6],
+                bytes[after + 7],
+            ]));
+        }
+    } else if let Some(pos) = find_subsequence(&bytes, b"seed") {
+        let after = pos + 4;
+        if after + 8 <= bytes.len() {
+            meta.seed = Some(i64::from_be_bytes([
+                bytes[after],
+                bytes[after + 1],
+                bytes[after + 2],
+                bytes[after + 3],
+                bytes[after + 4],
+                bytes[after + 5],
+                bytes[after + 6],
+                bytes[after + 7],
+            ]));
+        }
+    }
+
+    let sx = find_subsequence(&bytes, b"SpawnX").and_then(|pos| {
+        let after = pos + 6;
+        (after + 4 <= bytes.len()).then(|| {
+            i32::from_be_bytes([
+                bytes[after],
+                bytes[after + 1],
+                bytes[after + 2],
+                bytes[after + 3],
+            ])
+        })
+    });
+    let sy = find_subsequence(&bytes, b"SpawnY").and_then(|pos| {
+        let after = pos + 6;
+        (after + 4 <= bytes.len()).then(|| {
+            i32::from_be_bytes([
+                bytes[after],
+                bytes[after + 1],
+                bytes[after + 2],
+                bytes[after + 3],
+            ])
+        })
+    });
+    let sz = find_subsequence(&bytes, b"SpawnZ").and_then(|pos| {
+        let after = pos + 6;
+        (after + 4 <= bytes.len()).then(|| {
+            i32::from_be_bytes([
+                bytes[after],
+                bytes[after + 1],
+                bytes[after + 2],
+                bytes[after + 3],
+            ])
+        })
+    });
+    if let (Some(x), Some(y), Some(z)) = (sx, sy, sz) {
+        meta.spawn_xyz = Some((x, y, z));
+    }
+
+    if let Some(pos) = find_subsequence(&bytes, b"Version") {
+        if let Some(name_pos) = find_subsequence(&bytes[pos..], b"Name") {
+            let abs_name_pos = pos + name_pos;
+            let after = abs_name_pos + 4;
+            if after + 2 <= bytes.len() {
+                let len = u16::from_be_bytes([bytes[after], bytes[after + 1]]) as usize;
+                if after + 2 + len <= bytes.len() {
+                    if let Ok(s) = std::str::from_utf8(&bytes[after + 2..after + 2 + len]) {
+                        if !s.is_empty() {
+                            meta.version_name = Some(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(meta)
+}
+
+/// Entry representing a world datapack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatapackEntry {
+    pub name: String,
+    pub file_name: String,
+    pub enabled: bool,
+    pub is_dir: bool,
+}
+
+/// Lists all datapacks in `world_dir/datapacks`.
+pub fn list_world_datapacks(world_dir: &Path) -> Vec<DatapackEntry> {
+    let dp_dir = world_dir.join("datapacks");
+    if !dp_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut list = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dp_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let lower = file_name.to_ascii_lowercase();
+
+            if is_dir || lower.ends_with(".zip") || lower.ends_with(".disabled") {
+                let enabled = !lower.ends_with(".disabled");
+                let base = if let Some(stripped) = file_name.strip_suffix(".disabled") {
+                    stripped
+                } else {
+                    &file_name
+                };
+                let name = base.strip_suffix(".zip").unwrap_or(base).to_string();
+                list.push(DatapackEntry {
+                    name,
+                    file_name,
+                    enabled,
+                    is_dir,
+                });
+            }
+        }
+    }
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list
+}
+
+/// Toggles a world datapack between enabled and disabled (`.disabled` suffix).
+pub fn toggle_world_datapack(world_dir: &Path, file_name: &str) -> MqResult<bool> {
+    let dp_dir = world_dir.join("datapacks");
+    let src = dp_dir.join(file_name);
+    if !src.exists() {
+        return Err(MqError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("datapack not found: {file_name}"),
+        )));
+    }
+
+    if let Some(stripped) = file_name.strip_suffix(".disabled") {
+        let dest = dp_dir.join(stripped);
+        rename_with_retry(&src, &dest)?;
+        Ok(true)
+    } else {
+        let dest = dp_dir.join(format!("{file_name}.disabled"));
+        rename_with_retry(&src, &dest)?;
+        Ok(false)
+    }
+}
+
+/// Adds a datapack (directory or `.zip` file) to `world_dir/datapacks`.
+pub fn add_world_datapack(world_dir: &Path, src: &Path) -> MqResult<PathBuf> {
+    if !src.exists() {
+        return Err(MqError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("source datapack not found: {}", src.display()),
+        )));
+    }
+
+    let dp_dir = world_dir.join("datapacks");
+    fs::create_dir_all(&dp_dir)?;
+
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| MqError::Internal("invalid source filename".into()))?;
+    let dest = dp_dir.join(file_name);
+
+    if src.is_dir() {
+        copy_dir_recursive(src, &dest)?;
+    } else {
+        fs::copy(src, &dest)?;
+    }
+
+    Ok(dest)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let entry_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Deletes a world datapack by filename or directory name.
+pub fn delete_world_datapack(world_dir: &Path, file_name: &str) -> MqResult<()> {
+    let dp_dir = world_dir.join("datapacks");
+    let target = dp_dir.join(file_name);
+    if target.is_dir() {
+        remove_dir_all_with_retry(&target)?;
+    } else if target.is_file() {
+        remove_file_with_retry(&target)?;
+    }
+    Ok(())
+}
+
+/// Automatically backs up all worlds inside `<instance_dir>/saves` to `<instance_dir>/backups/auto/<world>-<ts>.zip`.
+/// Prunes older automatic backups exceeding `max_keep`.
+pub fn auto_backup_instance_worlds(instance_dir: &Path, max_keep: usize) -> MqResult<Vec<PathBuf>> {
+    let saves_dir = instance_dir.join("saves");
+    if !saves_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let auto_dir = instance_dir.join("backups").join("auto");
+    fs::create_dir_all(&auto_dir)?;
+
+    let mut created = Vec::new();
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+
+    for entry in fs::read_dir(&saves_dir)?.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let world_name = entry.file_name().to_string_lossy().into_owned();
+        let zip_name = format!("{world_name}-{timestamp}.zip");
+        let zip_path = auto_dir.join(&zip_name);
+
+        if export_world_to_zip(instance_dir, &world_name, &zip_path).is_ok() {
+            created.push(zip_path);
+        }
+
+        let mut world_backups = Vec::new();
+        if let Ok(entries) = fs::read_dir(&auto_dir) {
+            let prefix = format!("{world_name}-");
+            for b_entry in entries.flatten() {
+                let p = b_entry.path();
+                if p.is_file() {
+                    let fname = b_entry.file_name().to_string_lossy().into_owned();
+                    if fname.starts_with(&prefix) && fname.ends_with(".zip") {
+                        if let Ok(meta) = b_entry.metadata() {
+                            let mtime =
+                                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                            world_backups.push((p, mtime));
+                        }
+                    }
+                }
+            }
+        }
+
+        world_backups.sort_by_key(|a| std::cmp::Reverse(a.1));
+        if world_backups.len() > max_keep {
+            for (stale_path, _) in world_backups.iter().skip(max_keep) {
+                let _ = remove_file_with_retry(stale_path);
+            }
+        }
+    }
+
+    Ok(created)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_datapacks_and_level_dat() {
+        let temp = tempdir().expect("tempdir");
+        let world_dir = temp.path().join("saves").join("NewWorld");
+        fs::create_dir_all(&world_dir).expect("create world dir");
+
+        let dp_file = temp.path().join("extra_pack.zip");
+        fs::write(&dp_file, b"PK extra datapack zip").unwrap();
+
+        let added = add_world_datapack(&world_dir, &dp_file).expect("add datapack");
+        assert!(added.is_file());
+
+        let list = list_world_datapacks(&world_dir);
+        assert_eq!(list.len(), 1);
+        assert!(list[0].enabled);
+        assert_eq!(list[0].name, "extra_pack");
+
+        let toggled = toggle_world_datapack(&world_dir, "extra_pack.zip").expect("toggle");
+        assert!(!toggled); // now disabled
+
+        let list_disabled = list_world_datapacks(&world_dir);
+        assert_eq!(list_disabled.len(), 1);
+        assert!(!list_disabled[0].enabled);
+
+        delete_world_datapack(&world_dir, "extra_pack.zip.disabled").expect("delete dp");
+        assert!(list_world_datapacks(&world_dir).is_empty());
+    }
 }

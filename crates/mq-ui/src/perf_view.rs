@@ -1380,6 +1380,22 @@ fn render_running_instances_section(
                                 {
                                     version_badge(ui, wrapper, tokens.text_muted);
                                 }
+
+                                let secs = inst.total_playtime_secs;
+                                let playtime_str = if secs == 0 {
+                                    "—".to_string()
+                                } else if secs < 60 {
+                                    format!("{secs} сек")
+                                } else if secs < 3600 {
+                                    format!("{} мин", secs / 60)
+                                } else {
+                                    format!("{} ч {} мин", secs / 3600, (secs % 3600) / 60)
+                                };
+                                version_badge(
+                                    ui,
+                                    &format!("В игре: {playtime_str}"),
+                                    tokens.text_muted,
+                                );
                             }
 
                             let pid_label = match pid_opt {
@@ -1387,6 +1403,54 @@ fn render_running_instances_section(
                                 None => "Запуск процесса".to_string(),
                             };
                             version_badge(ui, &pid_label, tokens.text_muted);
+
+                            // Live JVM RAM telemetry & sparkline
+                            if let Some(samples) = state.game_rss_history.get(id) {
+                                if !samples.is_empty() {
+                                    let cur_mib = *samples.back().unwrap_or(&0.0);
+                                    let peak_mib = samples.iter().copied().fold(0.0_f32, f32::max);
+                                    version_badge(
+                                        ui,
+                                        &format!(
+                                            "JVM RSS: {:.0} МБ (пик: {:.0} МБ)",
+                                            cur_mib, peak_mib
+                                        ),
+                                        tokens.accent,
+                                    );
+
+                                    let (spark_rect, _) = ui
+                                        .allocate_exact_size(Vec2::new(64.0, 16.0), Sense::hover());
+                                    if ui.is_rect_visible(spark_rect) && spark_rect.is_positive() {
+                                        let p = ui.painter();
+                                        p.rect_filled(
+                                            spark_rect,
+                                            2.0,
+                                            tokens.bg_input.gamma_multiply(0.6),
+                                        );
+                                        let max_v = peak_mib.max(1.0);
+                                        let pts: Vec<Pos2> = samples
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, &v)| {
+                                                let x = spark_rect.left()
+                                                    + (i as f32
+                                                        / (samples.len().max(2) - 1) as f32)
+                                                        * spark_rect.width();
+                                                let y = spark_rect.bottom()
+                                                    - (v / max_v).clamp(0.05, 0.95)
+                                                        * spark_rect.height();
+                                                egui::pos2(x, y)
+                                            })
+                                            .collect();
+                                        if pts.len() >= 2 {
+                                            p.add(egui::Shape::line(
+                                                pts,
+                                                Stroke::new(1.2_f32, tokens.accent),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                         });
                     });
             }
@@ -1551,9 +1615,26 @@ fn render_tuning_section(
                         .size(14.0),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     if primary_emerald_button(ui, Some(VectorIcon::Check), "Сохранить").clicked()
                     {
                         manual_save = true;
+                    }
+                    if secondary_glass_button(
+                        ui,
+                        Some(VectorIcon::Cpu),
+                        "Оптимизировать под мой ПК",
+                    )
+                    .clicked()
+                    {
+                        let total_ram = mq_core::total_memory_mb();
+                        let rec = mq_launch::recommend_jvm_tuning(total_ram, 21, 0);
+                        state.config.default_memory_min_mb = rec.memory_min_mb;
+                        state.config.default_memory_max_mb = rec.memory_max_mb;
+                        state.config.default_jvm_args = rec.jvm_args;
+                        state.status_message = Some((rec.summary_ru.clone(), false));
+                        let _ = state.config.save(&state.paths);
+                        auto_save = true;
                     }
                 });
             });

@@ -9,6 +9,7 @@ pub mod models;
 pub mod msa;
 pub mod offline;
 pub mod skin;
+pub mod skins;
 pub mod store;
 
 #[allow(unused_imports)]
@@ -20,5 +21,6 @@ pub use msa::*;
 pub use offline::*;
 #[allow(unused_imports)]
 pub use skin::*;
+pub use skins::*;
 #[allow(unused_imports)]
 pub use store::*;

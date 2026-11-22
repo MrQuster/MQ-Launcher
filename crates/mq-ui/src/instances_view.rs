@@ -280,6 +280,10 @@ pub struct InstancesView {
     pub mod_update_check_done: bool,
     pub show_delete_dialog: bool,
     pub instance_to_delete: Option<(mq_core::InstanceId, String)>,
+    pub mod_profile_input: String,
+    pub selected_mod_profile: Option<String>,
+    pub datapack_input_path: String,
+    pub expanded_datapack_world: Option<String>,
 }
 
 impl Default for InstancesView {
@@ -319,6 +323,10 @@ impl Default for InstancesView {
             mod_update_check_done: false,
             show_delete_dialog: false,
             instance_to_delete: None,
+            mod_profile_input: String::new(),
+            selected_mod_profile: None,
+            datapack_input_path: String::new(),
+            expanded_datapack_world: None,
         }
     }
 }
@@ -378,16 +386,32 @@ impl InstancesView {
                                 .with_tooltip("Отображение списком"),
                         ];
                         segmented_switch(ui, &tokens, &mut self.view_mode, &view_opts);
-                    } else if button_secondary(
-                        ui,
-                        &tokens,
-                        Some(VectorIcon::Download),
-                        "Импорт сборки",
-                    )
-                    .clicked()
-                    {
-                        self.import_error = None;
-                        self.show_import_dialog = true;
+                    } else {
+                        if button_secondary(
+                            ui,
+                            &tokens,
+                            Some(VectorIcon::Download),
+                            "Импорт сборки",
+                        )
+                        .clicked()
+                        {
+                            self.import_error = None;
+                            self.show_import_dialog = true;
+                        }
+                        ui.add_space(6.0);
+                        if button_secondary(
+                            ui,
+                            &tokens,
+                            Some(VectorIcon::Download),
+                            "Импорт из лаунчеров",
+                        )
+                        .clicked()
+                        {
+                            state.show_external_import_modal = true;
+                            let _ = state
+                                .cmd_sender
+                                .send(UiWorkerCommand::DiscoverExternalInstances);
+                        }
                     }
                 });
             });
@@ -736,6 +760,134 @@ impl InstancesView {
                             self.import_error = None;
                         }
                     });
+                },
+            );
+        }
+
+        // External launcher instances import modal (Prism, ElyPrism, MultiMC, Modrinth App)
+        if state.show_external_import_modal
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            state.show_external_import_modal = false;
+        }
+        let ext_anim = crate::animation::animate_modal_presence(
+            ui.ctx(),
+            egui::Id::new("mq_ext_import_modal"),
+            state.show_external_import_modal,
+        );
+        if ext_anim.should_render {
+            let ext_win = egui::Window::new("Импорт из сторонних лаунчеров")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .frame(
+                    egui::Frame::window(&egui::Style::default())
+                        .fill(tokens.bg_surface)
+                        .stroke(Stroke::new(1.2_f32, tokens.border_strong))
+                        .corner_radius(RADIUS_CARD)
+                        .inner_margin(egui::Margin::same(16)),
+                );
+
+            crate::animation::show_animated_modal_window(
+                ui.ctx(),
+                egui::Id::new("mq_ext_import_modal_win"),
+                &ext_anim,
+                ext_win,
+                |ui| {
+                    let modal_w = 520.0_f32.min(ui.ctx().screen_rect().width() - 32.0);
+                    ui.set_width(modal_w);
+
+                    ui.label(
+                        RichText::new(
+                            "Обнаруженные инстансы (Prism / ElyPrism / MultiMC / Modrinth App):",
+                        )
+                        .color(tokens.text)
+                        .strong(),
+                    );
+                    ui.add_space(8.0);
+
+                    if state.external_instances.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "Сторонние инстансы не обнаружены в стандартных директориях.",
+                            )
+                            .color(tokens.text_muted),
+                        );
+                        ui.add_space(8.0);
+                        if secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Refresh),
+                            "Сканировать снова",
+                        )
+                        .clicked()
+                        {
+                            let _ = state
+                                .cmd_sender
+                                .send(UiWorkerCommand::DiscoverExternalInstances);
+                        }
+                    } else {
+                        ScrollArea::vertical()
+                            .max_height(260.0)
+                            .id_salt("ext_inst_scroll")
+                            .show(ui, |ui| {
+                                for item in &state.external_instances {
+                                    let l_kind = match item.launcher {
+                                        mq_instances::ExternalLauncherKind::Prism => "Prism",
+                                        mq_instances::ExternalLauncherKind::ElyPrism => "ElyPrism",
+                                        mq_instances::ExternalLauncherKind::MultiMc => "MultiMC",
+                                        mq_instances::ExternalLauncherKind::ModrinthApp => {
+                                            "Modrinth"
+                                        }
+                                    };
+                                    let l_name = format!(
+                                        "{l_kind} · {} ({}, {})",
+                                        item.name,
+                                        item.mc_version,
+                                        item.loader.as_str()
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&l_name).color(tokens.text).strong(),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if primary_emerald_button(
+                                                    ui,
+                                                    Some(VectorIcon::Download),
+                                                    "Импортировать",
+                                                )
+                                                .clicked()
+                                                {
+                                                    let _ = state.cmd_sender.send(
+                                                        UiWorkerCommand::ImportExternalInstance {
+                                                            item: item.clone(),
+                                                        },
+                                                    );
+                                                    state.show_external_import_modal = false;
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Модов: {}, миров: {}",
+                                            item.mod_count, item.world_count
+                                        ))
+                                        .color(tokens.text_muted)
+                                        .small(),
+                                    );
+                                    ui.separator();
+                                }
+                            });
+                    }
+
+                    ui.add_space(8.0);
+                    if secondary_glass_button(ui, None, "Закрыть").clicked() {
+                        state.show_external_import_modal = false;
+                    }
                 },
             );
         }
@@ -1515,6 +1667,27 @@ impl InstancesView {
                                 };
                                 render_badge(ui, &tokens, &ram_str, BadgeKind::Neutral);
 
+                                let playtime_secs = state
+                                    .instances
+                                    .iter()
+                                    .find(|i| i.id == inst_id)
+                                    .map(|i| i.total_playtime_secs)
+                                    .unwrap_or(0);
+                                let playtime_str = if playtime_secs >= 3600 {
+                                    format!(
+                                        "Время в игре: {} ч {} мин",
+                                        playtime_secs / 3600,
+                                        (playtime_secs % 3600) / 60
+                                    )
+                                } else if playtime_secs >= 60 {
+                                    format!("Время в игре: {} мин", playtime_secs / 60)
+                                } else if playtime_secs > 0 {
+                                    format!("Время в игре: {playtime_secs} сек")
+                                } else {
+                                    "Время в игре: 0 мин".to_string()
+                                };
+                                render_badge(ui, &tokens, &playtime_str, BadgeKind::Neutral);
+
                                 if is_running {
                                     status_pill(ui, "Игра запущена", ACCENT_EMERALD);
                                 } else if is_downloading {
@@ -1533,6 +1706,21 @@ impl InstancesView {
                                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
 
                                 render_hero_button(ui, state);
+
+                                if secondary_glass_button(
+                                    ui,
+                                    None,
+                                    if state.mini_overlay_active {
+                                        "Полный режим"
+                                    } else {
+                                        "Мини-оверлей"
+                                    },
+                                )
+                                .on_hover_text("Переключить компактный плавающий мини-оверлей поверх окон")
+                                .clicked()
+                                {
+                                    state.mini_overlay_active = !state.mini_overlay_active;
+                                }
 
                                 if secondary_glass_button(
                                     ui,
@@ -3233,6 +3421,260 @@ impl InstancesView {
                     }
                 });
 
+                // Mod Profiles strip
+                ui.add_space(4.0);
+                let inst_opt = state.instances.iter().find(|i| i.id == *inst_id).cloned();
+                if let Some(inst) = inst_opt {
+                    let inst_dir = state.paths.instance_dir(inst_id.as_str());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                        ui.label(
+                            RichText::new("Профиль модов:")
+                                .color(tokens.text)
+                                .strong()
+                                .small(),
+                        );
+
+                        let profile_names: Vec<String> =
+                            inst.mod_profiles.iter().map(|p| p.name.clone()).collect();
+                        if !profile_names.is_empty() {
+                            let mut selected =
+                                self.selected_mod_profile.clone().unwrap_or_else(|| {
+                                    inst.active_mod_profile
+                                        .clone()
+                                        .unwrap_or_else(|| profile_names[0].clone())
+                                });
+                            egui::ComboBox::from_id_salt(("mod_profile_combo", inst_id.as_str()))
+                                .selected_text(&selected)
+                                .show_ui(ui, |ui| {
+                                    for pname in &profile_names {
+                                        ui.selectable_value(&mut selected, pname.clone(), pname);
+                                    }
+                                });
+                            self.selected_mod_profile = Some(selected.clone());
+
+                            if secondary_glass_button(ui, Some(VectorIcon::Check), "Применить")
+                                .clicked()
+                            {
+                                if let Some(prof) =
+                                    inst.mod_profiles.iter().find(|p| p.name == selected)
+                                {
+                                    if mq_instances::apply_mod_profile(&inst_dir, prof).is_ok() {
+                                        if let Some(inst_mut) =
+                                            state.instances.iter_mut().find(|i| i.id == *inst_id)
+                                        {
+                                            inst_mut.active_mod_profile = Some(selected.clone());
+                                            let _ = state.instance_mgr.save_instance(inst_mut);
+                                        }
+                                        state.status_message =
+                                            Some((format!("Профиль «{selected}» применен"), false));
+                                        let _ = state.cmd_sender.send(
+                                            UiWorkerCommand::ScanInstanceMods {
+                                                instance_id: inst_id.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+
+                            if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить")
+                                .clicked()
+                            {
+                                if let Some(inst_mut) =
+                                    state.instances.iter_mut().find(|i| i.id == *inst_id)
+                                {
+                                    inst_mut.mod_profiles.retain(|p| p.name != selected);
+                                    if inst_mut.active_mod_profile.as_deref() == Some(&selected) {
+                                        inst_mut.active_mod_profile = None;
+                                    }
+                                    let _ = state.instance_mgr.save_instance(inst_mut);
+                                    state.status_message =
+                                        Some((format!("Профиль «{selected}» удален"), false));
+                                }
+                                self.selected_mod_profile = None;
+                            }
+                        }
+
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.mod_profile_input)
+                                .hint_text("Имя профиля")
+                                .desired_width(120.0),
+                        );
+                        if secondary_glass_button(ui, Some(VectorIcon::Plus), "Сохранить профиль")
+                            .clicked()
+                            && !self.mod_profile_input.trim().is_empty()
+                        {
+                            let name = self.mod_profile_input.trim().to_string();
+                            let profile = mq_instances::capture_mod_profile(&name, &inst_dir);
+                            if let Some(inst_mut) =
+                                state.instances.iter_mut().find(|i| i.id == *inst_id)
+                            {
+                                inst_mut.mod_profiles.retain(|p| p.name != name);
+                                inst_mut.mod_profiles.push(profile);
+                                inst_mut.active_mod_profile = Some(name.clone());
+                                let _ = state.instance_mgr.save_instance(inst_mut);
+                            }
+                            state.status_message =
+                                Some((format!("Профиль «{name}» сохранен"), false));
+                            self.mod_profile_input.clear();
+                            self.selected_mod_profile = Some(name);
+                        }
+                    });
+                }
+
+                // Modpack update button and banner
+                let inst_opt2 = state.instances.iter().find(|i| i.id == *inst_id);
+                if let Some(inst) = inst_opt2 {
+                    if inst.modpack_source.is_some() {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                            let chk_label = if state.is_checking_modpack_update {
+                                "Проверка обновления..."
+                            } else {
+                                "Проверить обновление сборки"
+                            };
+                            if secondary_glass_button(ui, Some(VectorIcon::Refresh), chk_label)
+                                .clicked()
+                                && !state.is_checking_modpack_update
+                            {
+                                let _ =
+                                    state.cmd_sender.send(UiWorkerCommand::CheckModpackUpdate {
+                                        instance_id: inst_id.clone(),
+                                    });
+                            }
+                        });
+
+                        if let Some(info) = state.modpack_update_available.get(inst_id).cloned() {
+                            ui.add_space(4.0);
+                            egui::Frame::new()
+                                .fill(tokens.bg_surface)
+                                .stroke(Stroke::new(1.0_f32, tokens.accent))
+                                .corner_radius(RADIUS_CARD)
+                                .inner_margin(egui::Margin::same(10))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Доступно обновление сборки: {}",
+                                            info.latest_version_name
+                                        ))
+                                        .color(tokens.text)
+                                        .strong(),
+                                    );
+                                    if !info.changelog.is_empty() {
+                                        ui.label(
+                                            RichText::new(&info.changelog)
+                                                .color(tokens.text_muted)
+                                                .small(),
+                                        );
+                                    }
+                                    ui.add_space(4.0);
+                                    if primary_emerald_button(
+                                        ui,
+                                        Some(VectorIcon::Download),
+                                        "Обновить (сохранив миры и конфиги)",
+                                    )
+                                    .clicked()
+                                    {
+                                        let _ = state.cmd_sender.send(
+                                            UiWorkerCommand::ApplyModpackUpdate {
+                                                instance_id: inst_id.clone(),
+                                                info,
+                                            },
+                                        );
+                                    }
+                                });
+                        }
+                    }
+                }
+
+                // Binary Crash Bisect panel
+                ui.add_space(4.0);
+                let is_bisect_active = state
+                    .active_bisect
+                    .as_ref()
+                    .map(|(id, _)| id == inst_id)
+                    .unwrap_or(false);
+                let header_title = if is_bisect_active {
+                    "Бинарный поиск краша (Активен)"
+                } else {
+                    "Бинарный поиск краша"
+                };
+                ui.collapsing(header_title, |ui| {
+                    ui.label(RichText::new("Пошаговое деление модов пополам для поиска мода, вызывающего падение игры:").color(tokens.text_muted).small());
+                    ui.add_space(4.0);
+
+                    if is_bisect_active {
+                        let mut should_clear = false;
+                        let mut status_msg = None;
+                        if let Some((_, ref mut session)) = state.active_bisect {
+                            ui.label(RichText::new(format!(
+                                "Шаг {} · Активно {} из {}",
+                                session.round(),
+                                session.active_half_len(),
+                                session.suspects_len()
+                            )).color(tokens.text).strong());
+
+                            if let Some(culprit) = session.culprit() {
+                                let culprit_str = culprit.to_string();
+                                ui.add_space(4.0);
+                                egui::Frame::new()
+                                    .fill(tokens.bg_surface)
+                                    .stroke(Stroke::new(1.0_f32, tokens.danger))
+                                    .corner_radius(RADIUS_CARD)
+                                    .inner_margin(egui::Margin::same(8))
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new(format!("Виновник падения: «{culprit_str}»")).color(tokens.danger).strong());
+                                        ui.add_space(4.0);
+                                        if danger_button(ui, Some(VectorIcon::Cross), "Отключить виновника и завершить").clicked() {
+                                            let jar_path = mods_dir.join(&culprit_str);
+                                            let disabled_path = mods_dir.join(format!("{culprit_str}.disabled"));
+                                            let _ = std::fs::rename(jar_path, disabled_path);
+                                            let _ = session.restore_all(&mods_dir);
+                                            should_clear = true;
+                                            status_msg = Some((format!("Мод «{culprit_str}» отключен"), false));
+                                        }
+                                    });
+                            } else {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+                                    if danger_button(ui, Some(VectorIcon::Cross), "Крашнулось").clicked() {
+                                        let _ = session.step_crashed(&mods_dir);
+                                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods { instance_id: inst_id.clone() });
+                                    }
+                                    if primary_emerald_button(ui, Some(VectorIcon::Check), "Запустилось ОК").clicked() {
+                                        let _ = session.step_ok(&mods_dir);
+                                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods { instance_id: inst_id.clone() });
+                                    }
+                                    if secondary_glass_button(ui, None, "Вернуть все моды").clicked() {
+                                        let _ = session.restore_all(&mods_dir);
+                                        should_clear = true;
+                                        status_msg = Some(("Все моды восстановлены".to_string(), false));
+                                        let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods { instance_id: inst_id.clone() });
+                                    }
+                                });
+                            }
+                        }
+                        if should_clear {
+                            state.active_bisect = None;
+                        }
+                        if let Some(msg) = status_msg {
+                            state.status_message = Some(msg);
+                        }
+                    } else if secondary_glass_button(ui, Some(VectorIcon::Search), "Начать поиск").clicked() {
+                        match mq_mods::BisectSession::start(&mods_dir) {
+                            Ok(session) => {
+                                state.active_bisect = Some((inst_id.clone(), session));
+                                state.status_message = Some(("Поиск краша запущен".to_string(), false));
+                                let _ = state.cmd_sender.send(UiWorkerCommand::ScanInstanceMods { instance_id: inst_id.clone() });
+                            }
+                            Err(e) => {
+                                state.status_message = Some((format!("Не удалось начать поиск: {e}"), true));
+                            }
+                        }
+                    }
+                });
+
                 if let Some((ref prompt_inst, ref deleted_file, ref orphans)) =
                     state.orphaned_deps_prompt
                 {
@@ -3391,6 +3833,43 @@ impl InstancesView {
                         }
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
+                            let missing_ids: Vec<String> = report_clone
+                                .issues
+                                .iter()
+                                .filter_map(|issue| {
+                                    if let mq_mods::PreflightIssue::MissingDependency {
+                                        required_dep,
+                                        ..
+                                    } = issue
+                                    {
+                                        Some(required_dep.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if !missing_ids.is_empty() {
+                                let fix_lbl = if state.is_auto_fixing_deps {
+                                    "Установка зависимостей..."
+                                } else {
+                                    "Установить все зависимости"
+                                };
+                                if primary_emerald_button(
+                                    ui,
+                                    Some(VectorIcon::Download),
+                                    fix_lbl,
+                                )
+                                .clicked()
+                                    && !state.is_auto_fixing_deps
+                                {
+                                    let _ = state.cmd_sender.send(
+                                        UiWorkerCommand::AutoInstallMissingDeps {
+                                            instance_id: inst_id.clone(),
+                                            missing_ids,
+                                        },
+                                    );
+                                }
+                            }
                             if primary_emerald_button(
                                 ui,
                                 Some(VectorIcon::Check),
@@ -4396,6 +4875,7 @@ impl InstancesView {
         state: &mut UiState,
         inst_id: &mq_core::InstanceId,
     ) {
+        let tokens = Tokens::from_config(&state.config.theme);
         let inst_dir = state.paths.instance_dir(inst_id.as_str());
         let backups_root = state.paths.backups_dir();
 
@@ -4411,6 +4891,12 @@ impl InstancesView {
                 let saves_dir = inst_dir.join("saves");
                 let _ = std::fs::create_dir_all(&saves_dir);
                 let _ = crate::opener::open_that(saves_dir);
+            }
+            if secondary_glass_button(ui, Some(VectorIcon::Refresh), "Автобэкап сейчас").clicked()
+            {
+                let _ = state.cmd_sender.send(UiWorkerCommand::AutoBackupWorlds {
+                    instance_id: inst_id.clone(),
+                });
             }
         });
 
@@ -4460,10 +4946,141 @@ impl InstancesView {
                             .small(),
                     );
 
+                    let world_dir = inst_dir.join("saves").join(&w.folder_name);
+                    let nbt_meta =
+                        cached_fs_value(ui.ctx(), ("mq_world_nbt", world_dir.clone()), || {
+                            mq_instances::read_world_level_dat(&world_dir)
+                        });
+                    if let Some(ref meta) = nbt_meta {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
+                            if let Some(seed) = meta.seed {
+                                ui.label(
+                                    RichText::new(format!("Сид: {seed}"))
+                                        .color(TEXT_MUTED)
+                                        .small(),
+                                );
+                                if secondary_glass_button(ui, None, "Копировать").clicked()
+                                {
+                                    ui.ctx().copy_text(seed.to_string());
+                                    state.status_message =
+                                        Some(("Сид скопирован в буфер обмена".to_string(), false));
+                                }
+                            }
+                            if let Some(ref ver) = meta.version_name {
+                                ui.label(
+                                    RichText::new(format!("Версия: {ver}"))
+                                        .color(TEXT_MUTED)
+                                        .small(),
+                                );
+                            }
+                            if let Some((x, y, z)) = meta.spawn_xyz {
+                                ui.label(
+                                    RichText::new(format!("Спавн: {x}, {y}, {z}"))
+                                        .color(TEXT_MUTED)
+                                        .small(),
+                                );
+                            }
+                            if meta.hardcore {
+                                render_badge(ui, &tokens, "Хардкор", BadgeKind::Danger);
+                            }
+                        });
+                    }
+
+                    // Datapacks manager
+                    let datapacks = cached_fs_value(
+                        ui.ctx(),
+                        ("mq_world_datapacks", world_dir.clone()),
+                        || mq_instances::list_world_datapacks(&world_dir),
+                    );
+                    let dp_count = datapacks.len();
+                    let is_expanded =
+                        self.expanded_datapack_world.as_deref() == Some(&w.folder_name);
+                    let toggle_text = if is_expanded {
+                        format!("Датапаки ({dp_count}) [-]")
+                    } else {
+                        format!("Датапаки ({dp_count}) [+]")
+                    };
+                    if secondary_glass_button(ui, None, &toggle_text).clicked() {
+                        if is_expanded {
+                            self.expanded_datapack_world = None;
+                        } else {
+                            self.expanded_datapack_world = Some(w.folder_name.clone());
+                        }
+                    }
+                    if is_expanded {
+                        ui.indent(("datapacks_indent", &w.folder_name), |ui| {
+                            for dp in &datapacks {
+                                ui.horizontal(|ui| {
+                                    let mut enabled = dp.enabled;
+                                    if ui.checkbox(&mut enabled, &dp.name).changed() {
+                                        let _ = mq_instances::toggle_world_datapack(
+                                            &world_dir,
+                                            &dp.file_name,
+                                        );
+                                        invalidate_fs_cache::<Vec<mq_instances::DatapackEntry>>(
+                                            ui.ctx(),
+                                            ("mq_world_datapacks", world_dir.clone()),
+                                        );
+                                    }
+                                    if secondary_glass_button(
+                                        ui,
+                                        Some(VectorIcon::Trash),
+                                        "Удалить",
+                                    )
+                                    .clicked()
+                                    {
+                                        let _ = mq_instances::delete_world_datapack(
+                                            &world_dir,
+                                            &dp.file_name,
+                                        );
+                                        invalidate_fs_cache::<Vec<mq_instances::DatapackEntry>>(
+                                            ui.ctx(),
+                                            ("mq_world_datapacks", world_dir.clone()),
+                                        );
+                                    }
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.datapack_input_path)
+                                        .hint_text("Путь к .zip датапака")
+                                        .desired_width(180.0),
+                                );
+                                if primary_emerald_button(ui, Some(VectorIcon::Plus), "Добавить")
+                                    .clicked()
+                                    && !self.datapack_input_path.trim().is_empty()
+                                {
+                                    let src =
+                                        std::path::PathBuf::from(self.datapack_input_path.trim());
+                                    if mq_instances::add_world_datapack(&world_dir, &src).is_ok() {
+                                        invalidate_fs_cache::<Vec<mq_instances::DatapackEntry>>(
+                                            ui.ctx(),
+                                            ("mq_world_datapacks", world_dir.clone()),
+                                        );
+                                        self.datapack_input_path.clear();
+                                    }
+                                }
+                            });
+                        });
+                    }
+
                     ui.add_space(4.0);
 
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                        if primary_emerald_button(ui, Some(VectorIcon::Play), "Войти").clicked()
+                        {
+                            let _ =
+                                state
+                                    .cmd_sender
+                                    .send(UiWorkerCommand::LaunchInstanceQuickPlay {
+                                        instance_id: inst_id.clone(),
+                                        quick_play: mq_launch::QuickPlayTarget::Singleplayer(
+                                            w.folder_name.clone(),
+                                        ),
+                                    });
+                        }
                         if secondary_glass_button(ui, Some(VectorIcon::Download), "Бэкап").clicked()
                         {
                             match backup_world(
@@ -4634,22 +5251,102 @@ impl InstancesView {
                     });
 
                     if let Some(res) = state.server_pings.get(&s.ip) {
+                        let tex_handle = if let Some(ref png_bytes) = res.favicon_png {
+                            let tex_id = format!("srv_fav_{}", s.ip);
+                            ui.ctx()
+                                .data_mut(|d| {
+                                    d.get_temp::<egui::TextureHandle>(egui::Id::new(&tex_id))
+                                })
+                                .or_else(|| {
+                                    image::load_from_memory(png_bytes).ok().map(|dyn_img| {
+                                        let rgba = dyn_img.to_rgba8();
+                                        let (w, h) = rgba.dimensions();
+                                        let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                                            [w as usize, h as usize],
+                                            &rgba,
+                                        );
+                                        let h = ui.ctx().load_texture(
+                                            &tex_id,
+                                            color_img,
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        ui.ctx().data_mut(|d| {
+                                            d.insert_temp(egui::Id::new(&tex_id), h.clone())
+                                        });
+                                        h
+                                    })
+                                })
+                        } else {
+                            None
+                        };
+
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                            if let Some(ref handle) = tex_handle {
+                                ui.image((handle.id(), Vec2::splat(24.0)));
+                            }
                             version_badge(ui, &format!("{} ms", res.latency_ms), ACCENT_EMERALD);
                             version_badge(
                                 ui,
                                 &format!("{}/{}", res.players_online, res.players_max),
                                 ACCENT_COBALT,
                             );
-                            ui.label(RichText::new(&res.motd).color(TEXT_PRIMARY).small());
+                            if !res.motd_segments.is_empty() {
+                                for (code, segment) in &res.motd_segments {
+                                    let seg_color = match code {
+                                        Some('0') => Color32::from_rgb(0, 0, 0),
+                                        Some('1') => Color32::from_rgb(0, 0, 170),
+                                        Some('2') => Color32::from_rgb(0, 170, 0),
+                                        Some('3') => Color32::from_rgb(0, 170, 170),
+                                        Some('4') => Color32::from_rgb(170, 0, 0),
+                                        Some('5') => Color32::from_rgb(170, 0, 170),
+                                        Some('6') => Color32::from_rgb(255, 170, 0),
+                                        Some('7') => Color32::from_rgb(170, 170, 170),
+                                        Some('8') => Color32::from_rgb(85, 85, 85),
+                                        Some('9') => Color32::from_rgb(85, 85, 255),
+                                        Some('a') => Color32::from_rgb(85, 255, 85),
+                                        Some('b') => Color32::from_rgb(85, 255, 255),
+                                        Some('c') => Color32::from_rgb(255, 85, 85),
+                                        Some('d') => Color32::from_rgb(255, 85, 255),
+                                        Some('e') => Color32::from_rgb(255, 255, 85),
+                                        Some('f') => Color32::from_rgb(255, 255, 255),
+                                        _ => TEXT_PRIMARY,
+                                    };
+                                    ui.colored_label(seg_color, segment);
+                                }
+                            } else {
+                                ui.label(RichText::new(&res.motd).color(TEXT_PRIMARY).small());
+                            }
                         });
+
+                        if !res.players_sample.is_empty() {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Игроки в сети: {}",
+                                    res.players_sample.join(", ")
+                                ))
+                                .color(TEXT_MUTED)
+                                .small(),
+                            );
+                        }
                     }
 
                     ui.add_space(4.0);
 
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                        if primary_emerald_button(ui, Some(VectorIcon::Play), "Войти").clicked()
+                        {
+                            let _ =
+                                state
+                                    .cmd_sender
+                                    .send(UiWorkerCommand::LaunchInstanceQuickPlay {
+                                        instance_id: inst_id.clone(),
+                                        quick_play: mq_launch::QuickPlayTarget::Multiplayer(
+                                            s.ip.clone(),
+                                        ),
+                                    });
+                        }
                         let is_pinging = state.pinging_servers.contains(&s.ip);
                         let ping_label = if is_pinging {
                             "Пинг..."
@@ -4873,6 +5570,21 @@ impl InstancesView {
                 inst.memory_max_mb
             ));
             ui.add(egui::Slider::new(&mut inst.memory_max_mb, 1024..=16384).step_by(512.0));
+
+            ui.add_space(6.0);
+            if primary_emerald_button(ui, Some(VectorIcon::Cpu), "Оптимизировать под мой ПК")
+                .on_hover_text("Автоматически подобрать объем RAM и флаги JVM (Generational ZGC / G1GC) под конфигурацию ПК")
+                .clicked()
+            {
+                let total_ram = mq_core::platform::total_memory_mb();
+                let mod_count = state.installed_mods.len();
+                let rec = mq_launch::recommend_jvm_tuning(total_ram, 21, mod_count);
+                inst.memory_min_mb = rec.memory_min_mb;
+                inst.memory_max_mb = rec.memory_max_mb;
+                inst.jvm_args = rec.jvm_args;
+                let _ = state.instance_mgr.save_instance(inst);
+                state.status_message = Some((rec.summary_ru, false));
+            }
 
             ui.add_space(8.0);
             let wrapper_label = if cfg!(target_os = "windows") {

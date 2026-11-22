@@ -67,6 +67,63 @@ impl LaunchContext {
     }
 }
 
+/// Type alias matching external interface contract.
+pub type LaunchCommand = BuiltLaunchCommand;
+
+/// Quick Play target for instantly joining singleplayer world or multiplayer server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickPlayTarget {
+    Singleplayer(String),
+    Multiplayer(String),
+}
+
+fn parse_mc_version_ge_1_20(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let major = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1);
+    let minor = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    major > 1 || (major == 1 && minor >= 20)
+}
+
+/// Builds launch command with optional Quick Play parameters.
+pub fn build_launch_command_with_quick_play(
+    ctx: &LaunchContext,
+    quick_play: Option<&QuickPlayTarget>,
+) -> MqResult<LaunchCommand> {
+    let mut cmd = build_launch_command(ctx)?;
+    if let Some(target) = quick_play {
+        let is_modern = parse_mc_version_ge_1_20(&ctx.version.id);
+        match target {
+            QuickPlayTarget::Singleplayer(world) => {
+                cmd.args.push("--quickPlaySingleplayer".to_string());
+                cmd.args.push(world.clone());
+            }
+            QuickPlayTarget::Multiplayer(addr) => {
+                if is_modern {
+                    cmd.args.push("--quickPlayMultiplayer".to_string());
+                    cmd.args.push(addr.clone());
+                } else {
+                    let (host, port) = if let Some((h, p)) = addr.split_once(':') {
+                        (h, p.parse::<u16>().unwrap_or(25565))
+                    } else {
+                        (addr.as_str(), 25565)
+                    };
+                    cmd.args.push("--server".to_string());
+                    cmd.args.push(host.to_string());
+                    cmd.args.push("--port".to_string());
+                    cmd.args.push(port.to_string());
+                }
+            }
+        }
+    }
+    Ok(cmd)
+}
+
 /// Deterministically constructed child process command ready for `--dry-run` output or execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuiltLaunchCommand {

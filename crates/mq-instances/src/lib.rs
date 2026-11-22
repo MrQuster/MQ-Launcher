@@ -4,25 +4,36 @@
 
 #![deny(clippy::await_holding_lock)]
 
+pub mod importers;
 pub mod manager;
 pub mod manifest;
 pub mod package;
 pub mod servers;
 pub mod worlds;
 
+pub use importers::{
+    discover_external_instances, import_external_instance, DiscoveredExternalInstance,
+    ExternalLauncherKind,
+};
 pub use manager::InstanceManager;
 pub use manifest::{
-    windows_safe_instance_id, InstanceManifest, DEFAULT_MEMORY_MAX_MB, DEFAULT_MEMORY_MIN_MB,
-    INSTANCE_MANIFEST_FILE, INSTANCE_SUBDIRS, RESOLVED_VERSION_FILE,
+    apply_mod_profile, capture_mod_profile, windows_safe_instance_id, InstanceManifest, ModProfile,
+    ModpackSourceMeta, DEFAULT_MEMORY_MAX_MB, DEFAULT_MEMORY_MIN_MB, INSTANCE_MANIFEST_FILE,
+    INSTANCE_SUBDIRS, RESOLVED_VERSION_FILE,
 };
 pub use package::{
     export_instance_to_zip, import_instance_archive_detailed, import_instance_from_zip,
     list_screenshots, ImportedArchiveFormat, ImportedInstanceOutcome, ScreenshotInfo,
 };
-pub use servers::{load_servers_dat, ping_server, save_servers_dat, ServerEntry, ServerPingResult};
+pub use servers::{
+    load_servers_dat, parse_motd_segments, ping_server, save_servers_dat, ServerEntry,
+    ServerPingResult,
+};
 pub use worlds::{
-    backup_world, compute_dir_size, delete_world, export_world_to_zip, list_backups, list_worlds,
-    restore_world, WorldBackupInfo, WorldInfo,
+    add_world_datapack, auto_backup_instance_worlds, backup_world, compute_dir_size, delete_world,
+    delete_world_datapack, export_world_to_zip, list_backups, list_world_datapacks, list_worlds,
+    read_world_level_dat, restore_world, toggle_world_datapack, DatapackEntry, WorldBackupInfo,
+    WorldInfo, WorldNbtMeta,
 };
 
 #[cfg(test)]
@@ -110,7 +121,12 @@ mod tests {
         updated.java_path = Some(PathBuf::from("/usr/lib/jvm/java-21-openjdk/bin/java"));
         updated.jvm_args = vec!["-XX:+UseZGC".to_owned()];
         updated.wrapper_cmd = Some("gamemoderun".to_owned());
-        updated.modpack_source = Some("modrinth:fabulously-optimized".to_owned());
+        updated.modpack_source = Some(ModpackSourceMeta {
+            source: "modrinth".to_owned(),
+            project_id: "fabulously-optimized".to_owned(),
+            version_id: "v1".to_owned(),
+            version_name: "1.0".to_owned(),
+        });
         mgr.save_instance(&updated).expect("save updated manifest");
 
         let reloaded = mgr
@@ -127,8 +143,11 @@ mod tests {
         assert_eq!(reloaded.jvm_args, vec!["-XX:+UseZGC".to_owned()]);
         assert_eq!(reloaded.wrapper_cmd.as_deref(), Some("gamemoderun"));
         assert_eq!(
-            reloaded.modpack_source.as_deref(),
-            Some("modrinth:fabulously-optimized")
+            reloaded
+                .modpack_source
+                .as_ref()
+                .map(|s| s.project_id.as_str()),
+            Some("fabulously-optimized")
         );
 
         // Touch playtime and last_played.

@@ -4,6 +4,7 @@
 
 #![deny(clippy::await_holding_lock)]
 
+pub mod bisect;
 pub mod cfpack;
 pub mod curseforge;
 pub mod lockfile;
@@ -16,6 +17,8 @@ pub mod scanner;
 pub mod shaders;
 pub mod zip_safe;
 
+#[allow(unused_imports)]
+pub use bisect::*;
 #[allow(unused_imports)]
 pub use cfpack::*;
 #[allow(unused_imports)]

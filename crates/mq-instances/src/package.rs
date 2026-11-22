@@ -749,7 +749,12 @@ pub fn import_instance_archive_detailed(
                             loader = ModLoaderKind::Forge;
                             loader_version = Some(v.clone());
                         }
-                        modpack_source = Some(format!("mrpack:{}", idx.name));
+                        modpack_source = Some(crate::manifest::ModpackSourceMeta {
+                            source: "modrinth".to_string(),
+                            project_id: idx.name.clone(),
+                            version_id: String::new(),
+                            version_name: idx.name.clone(),
+                        });
                     }
                 }
             }
@@ -782,7 +787,12 @@ pub fn import_instance_archive_detailed(
                                 break;
                             }
                         }
-                        modpack_source = Some(format!("curseforge:{}", cf.name));
+                        modpack_source = Some(crate::manifest::ModpackSourceMeta {
+                            source: "curseforge".to_string(),
+                            project_id: cf.name.clone(),
+                            version_id: String::new(),
+                            version_name: cf.name.clone(),
+                        });
                     }
                 }
             }
@@ -802,7 +812,12 @@ pub fn import_instance_archive_detailed(
                     loader = mmc_loader;
                     loader_version = mmc_lver;
                 }
-                modpack_source = Some(format!("multimc:{display_name}"));
+                modpack_source = Some(crate::manifest::ModpackSourceMeta {
+                    source: "multimc".to_string(),
+                    project_id: display_name.clone(),
+                    version_id: String::new(),
+                    version_name: display_name.clone(),
+                });
             }
             ImportedArchiveFormat::MqNative => {}
         }

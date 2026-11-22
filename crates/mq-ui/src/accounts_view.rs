@@ -2,12 +2,14 @@
 //! Accounts manager screen: Offline (UUID v3), Ely.by (Browser-only OAuth2 + authlib-injector),
 //! and Microsoft Device Code Flow with 1-click switching. Zero emojis!
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use egui::{Color32, RichText, ScrollArea, Stroke, Ui, Vec2};
 use mq_auth::{
-    create_offline_account, AccountKind, AccountProfile, ElyByOAuthConfig, ElyByOAuthFlow,
+    create_offline_account, delete_local_skin, import_local_skin, list_local_skins, AccountKind,
+    AccountProfile, ElyByOAuthConfig, ElyByOAuthFlow, SkinLibraryEntry,
 };
 use mq_core::{AccountId, SecretString};
 use uuid::Uuid;
@@ -49,6 +51,16 @@ pub struct AccountsView {
     pub ely_cancel_flag: Arc<AtomicBool>,
     // MSA form
     pub msa_device_code_prompt: Option<String>,
+    // 3D Skin preview & Library state
+    pub skin_3d_state: crate::skin_3d::Skin3DState,
+    pub cached_skins: Option<Vec<SkinLibraryEntry>>,
+    pub selected_skin_id: Option<String>,
+    pub loaded_skin_image: Option<image::RgbaImage>,
+    pub loaded_skin_id: Option<String>,
+    pub import_skin_path: String,
+    pub import_skin_name: String,
+    pub import_skin_slim: bool,
+    pub skin_library_error: Option<String>,
 }
 
 impl Default for AccountsView {
@@ -60,6 +72,15 @@ impl Default for AccountsView {
             ely_waiting_browser: false,
             ely_cancel_flag: Arc::new(AtomicBool::new(false)),
             msa_device_code_prompt: None,
+            skin_3d_state: crate::skin_3d::Skin3DState::default(),
+            cached_skins: None,
+            selected_skin_id: None,
+            loaded_skin_image: None,
+            loaded_skin_id: None,
+            import_skin_path: String::new(),
+            import_skin_name: String::new(),
+            import_skin_slim: false,
+            skin_library_error: None,
         }
     }
 }
@@ -250,6 +271,9 @@ impl AccountsView {
         );
 
         ui.add_space(12.0);
+        self.render_skin_library_section(ui, state);
+
+        ui.add_space(12.0);
         ui.heading(
             RichText::new(tr_acc(is_en, "Сохранённые профили", "Saved Profiles"))
                 .color(TEXT_PRIMARY)
@@ -416,6 +440,290 @@ impl AccountsView {
                     }
                 }
             });
+    }
+
+    fn render_skin_library_section(&mut self, ui: &mut Ui, state: &mut UiState) {
+        let is_en = state.config.launcher_locale == "en";
+        let tokens = crate::theme::Tokens::from_config(&state.config.theme);
+        let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
+        let card_r = style.card_corner_radius(state.config.theme.corner_radius);
+        let skins_dir = state.paths.data_dir.join("skins");
+
+        // Cache local skins list in view (avoid reading disk every frame)
+        if self.cached_skins.is_none() {
+            let _ = std::fs::create_dir_all(&skins_dir);
+            self.cached_skins = Some(list_local_skins(&skins_dir));
+        }
+
+        // React to selected skin changes and load image
+        if self.selected_skin_id != self.loaded_skin_id {
+            if let Some(ref sel_id) = self.selected_skin_id {
+                if let Some(ref list) = self.cached_skins {
+                    if let Some(entry) = list.iter().find(|s| &s.id == sel_id) {
+                        self.skin_3d_state.slim = entry.slim;
+                        self.loaded_skin_image =
+                            image::open(&entry.file_path).map(|img| img.to_rgba8()).ok();
+                    }
+                }
+            } else {
+                self.loaded_skin_image = None;
+            }
+            self.loaded_skin_id = self.selected_skin_id.clone();
+        }
+
+        let form_card = crate::theme::solid_card_frame_with_config(&tokens, &state.config.theme)
+            .inner_margin(egui::Margin::same(12));
+
+        crate::theme_styles::show_themed_card(
+            ui,
+            form_card,
+            card_r,
+            ui.make_persistent_id("skin_library_card_glass"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(tr_acc(
+                        is_en,
+                        "Библиотека скинов и 3D-превью",
+                        "Skin Library & 3D Preview",
+                    ))
+                    .color(TEXT_PRIMARY)
+                    .strong()
+                    .size(15.0),
+                );
+                ui.add_space(8.0);
+
+                let is_wide = ui.available_width() >= 540.0;
+                if is_wide {
+                    ui.horizontal_top(|ui| {
+                        // 3D Canvas
+                        ui.vertical(|ui| {
+                            ui.set_width(260.0);
+                            crate::skin_3d::render_skin_3d_preview(
+                                ui,
+                                &mut self.skin_3d_state,
+                                self.loaded_skin_image.as_ref(),
+                                Vec2::new(260.0, 260.0),
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.checkbox(
+                                    &mut self.skin_3d_state.animate,
+                                    tr_acc(is_en, "Анимация", "Animate"),
+                                );
+                                ui.checkbox(
+                                    &mut self.skin_3d_state.show_cape,
+                                    tr_acc(is_en, "Плащ", "Cape"),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                let model_label = if self.skin_3d_state.slim {
+                                    tr_acc(is_en, "Модель: Alex (3px)", "Model: Alex (3px)")
+                                } else {
+                                    tr_acc(is_en, "Модель: Steve (4px)", "Model: Steve (4px)")
+                                };
+                                if secondary_glass_button(ui, None, model_label).clicked() {
+                                    self.skin_3d_state.slim = !self.skin_3d_state.slim;
+                                }
+                                if secondary_glass_button(
+                                    ui,
+                                    None,
+                                    tr_acc(is_en, "Сброс ракурса", "Reset View"),
+                                )
+                                .clicked()
+                                {
+                                    self.skin_3d_state.yaw = -0.42;
+                                    self.skin_3d_state.pitch = 0.12;
+                                }
+                            });
+                        });
+
+                        ui.add_space(14.0);
+
+                        // Skins list and import form
+                        ui.vertical(|ui| {
+                            self.render_skin_list_and_import(ui, state, &skins_dir, &tokens, is_en);
+                        });
+                    });
+                } else {
+                    ui.vertical(|ui| {
+                        let w = ui.available_width().min(280.0);
+                        crate::skin_3d::render_skin_3d_preview(
+                            ui,
+                            &mut self.skin_3d_state,
+                            self.loaded_skin_image.as_ref(),
+                            Vec2::new(w, 240.0),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.checkbox(
+                                &mut self.skin_3d_state.animate,
+                                tr_acc(is_en, "Анимация", "Animate"),
+                            );
+                            ui.checkbox(
+                                &mut self.skin_3d_state.show_cape,
+                                tr_acc(is_en, "Плащ", "Cape"),
+                            );
+                            if ui
+                                .button(if self.skin_3d_state.slim {
+                                    "Alex 3px"
+                                } else {
+                                    "Steve 4px"
+                                })
+                                .clicked()
+                            {
+                                self.skin_3d_state.slim = !self.skin_3d_state.slim;
+                            }
+                            if ui.button(tr_acc(is_en, "Сброс", "Reset")).clicked() {
+                                self.skin_3d_state.yaw = -0.42;
+                                self.skin_3d_state.pitch = 0.12;
+                            }
+                        });
+                        ui.add_space(10.0);
+                        self.render_skin_list_and_import(ui, state, &skins_dir, &tokens, is_en);
+                    });
+                }
+            },
+        );
+    }
+
+    fn render_skin_list_and_import(
+        &mut self,
+        ui: &mut Ui,
+        _state: &mut UiState,
+        skins_dir: &Path,
+        _tokens: &crate::theme::Tokens,
+        is_en: bool,
+    ) {
+        ui.label(
+            RichText::new(tr_acc(is_en, "Локальные скины:", "Local Skins:"))
+                .color(TEXT_PRIMARY)
+                .strong(),
+        );
+        ui.add_space(4.0);
+
+        let skins = self.cached_skins.clone().unwrap_or_default();
+        ScrollArea::vertical()
+            .id_salt("skins_library_scroll")
+            .max_height(130.0)
+            .show(ui, |ui| {
+                if skins.is_empty() {
+                    ui.label(
+                        RichText::new(tr_acc(
+                            is_en,
+                            "Нет сохранённых скинов. Импортируйте PNG файл ниже.",
+                            "No saved skins. Import a PNG file below.",
+                        ))
+                        .color(TEXT_MUTED)
+                        .small(),
+                    );
+                } else {
+                    let mut delete_id: Option<String> = None;
+                    for skin in &skins {
+                        let is_sel = self.selected_skin_id.as_deref() == Some(&skin.id);
+                        ui.horizontal(|ui| {
+                            let label_text = format!(
+                                "{} ({})",
+                                skin.name,
+                                if skin.slim { "Slim 3px" } else { "Classic 4px" }
+                            );
+                            if ui.selectable_label(is_sel, label_text).clicked() {
+                                self.selected_skin_id = Some(skin.id.clone());
+                            }
+                            if secondary_glass_button(ui, Some(VectorIcon::Trash), "").clicked() {
+                                delete_id = Some(skin.id.clone());
+                            }
+                        });
+                    }
+                    if let Some(del_id) = delete_id {
+                        let _ = delete_local_skin(skins_dir, &del_id);
+                        if self.selected_skin_id.as_deref() == Some(&del_id) {
+                            self.selected_skin_id = None;
+                            self.loaded_skin_image = None;
+                        }
+                        self.cached_skins = None;
+                    }
+                }
+            });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        ui.label(
+            RichText::new(tr_acc(is_en, "Импорт скина (.png):", "Import Skin (.png):"))
+                .color(TEXT_PRIMARY)
+                .strong(),
+        );
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.label(tr_acc(is_en, "Файл:", "File:"));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.import_skin_path)
+                    .hint_text("/path/to/skin.png")
+                    .desired_width(180.0),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(tr_acc(is_en, "Имя:", "Name:"));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.import_skin_name)
+                    .hint_text(tr_acc(is_en, "Название", "Name"))
+                    .desired_width(120.0),
+            );
+            ui.checkbox(&mut self.import_skin_slim, "Slim (3px)");
+        });
+
+        if let Some(ref err) = self.skin_library_error {
+            ui.label(RichText::new(err).color(STATUS_WARN).small());
+        }
+
+        ui.add_space(4.0);
+        if primary_emerald_button(
+            ui,
+            Some(VectorIcon::Download),
+            tr_acc(is_en, "Добавить в библиотеку", "Add to Library"),
+        )
+        .clicked()
+        {
+            let trimmed_path = self.import_skin_path.trim();
+            let p = Path::new(trimmed_path);
+            if trimmed_path.is_empty() || !p.exists() || !p.is_file() {
+                self.skin_library_error = Some(
+                    tr_acc(
+                        is_en,
+                        "Указанный файл .png не найден",
+                        "Specified .png file not found",
+                    )
+                    .to_string(),
+                );
+            } else {
+                let name = if self.import_skin_name.trim().is_empty() {
+                    p.file_stem().and_then(|s| s.to_str()).unwrap_or("skin")
+                } else {
+                    self.import_skin_name.trim()
+                };
+                match import_local_skin(skins_dir, name, p, self.import_skin_slim) {
+                    Ok(entry) => {
+                        self.selected_skin_id = Some(entry.id);
+                        self.cached_skins = None;
+                        self.import_skin_path.clear();
+                        self.import_skin_name.clear();
+                        self.skin_library_error = None;
+                    }
+                    Err(e) => {
+                        self.skin_library_error = Some(format!(
+                            "{}: {e}",
+                            tr_acc(is_en, "Ошибка импорта", "Import error")
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     fn render_offline_tab(&mut self, ui: &mut Ui, state: &mut UiState) {

@@ -65,6 +65,24 @@ const fn default_memory_max_mb() -> u32 {
     DEFAULT_MEMORY_MAX_MB
 }
 
+/// Saved mod profile representing an active set of mods and shaders.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModProfile {
+    pub name: String,
+    pub enabled_mods: Vec<String>,
+    pub enabled_shaders: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Metadata identifying the modpack origin of an instance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModpackSourceMeta {
+    pub source: String,
+    pub project_id: String,
+    pub version_id: String,
+    pub version_name: String,
+}
+
 /// Persistent metadata describing an isolated Minecraft game instance, serialized
 /// at `<data_dir>/instances/<id>/instance.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,9 +135,21 @@ pub struct InstanceManifest {
     #[serde(default)]
     pub playtime_secs: u64,
 
+    /// Total recorded playtime in seconds.
+    #[serde(default)]
+    pub total_playtime_secs: u64,
+
+    /// Saved mod & shader profiles for rapid switching.
+    #[serde(default)]
+    pub mod_profiles: Vec<ModProfile>,
+
+    /// Currently active mod profile name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_mod_profile: Option<String>,
+
     /// Optional origin identifier if imported from a `.mrpack` or CurseForge `.zip` modpack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modpack_source: Option<String>,
+    pub modpack_source: Option<ModpackSourceMeta>,
 
     /// Optional Minecraft game locale override (e.g. `Some("uk_ua")` or `Some("ru_ru")`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,6 +194,9 @@ impl InstanceManifest {
             created_at: Utc::now(),
             last_played: None,
             playtime_secs: 0,
+            total_playtime_secs: 0,
+            mod_profiles: Vec::new(),
+            active_mod_profile: None,
             modpack_source: None,
             mc_locale: None,
             lang_initialized: false,
@@ -285,5 +318,142 @@ impl InstanceManifest {
         })?;
         atomic_write(&manifest_path, toml_str.as_bytes())?;
         Ok(())
+    }
+}
+
+/// Captures active mods and shaders from an instance directory into a [`ModProfile`].
+pub fn capture_mod_profile(name: impl Into<String>, instance_dir: &std::path::Path) -> ModProfile {
+    let mods_dir = instance_dir.join("mods");
+    let mut enabled_mods = Vec::new();
+    if mods_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&mods_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let file_name = entry.file_name().to_string_lossy().into_owned();
+                    let lower = file_name.to_ascii_lowercase();
+                    if lower.ends_with(".jar") {
+                        enabled_mods.push(file_name);
+                    }
+                }
+            }
+        }
+    }
+    enabled_mods.sort();
+
+    let shaderpacks_dir = instance_dir.join("shaderpacks");
+    let mut enabled_shaders = Vec::new();
+    if shaderpacks_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&shaderpacks_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_name = entry.file_name().to_string_lossy().into_owned();
+                let lower = file_name.to_ascii_lowercase();
+                if !lower.ends_with(".disabled") && (path.is_dir() || lower.ends_with(".zip")) {
+                    enabled_shaders.push(file_name);
+                }
+            }
+        }
+    }
+    enabled_shaders.sort();
+
+    ModProfile {
+        name: name.into(),
+        enabled_mods,
+        enabled_shaders,
+        updated_at: Utc::now(),
+    }
+}
+
+/// Applies a [`ModProfile`] to an instance directory, toggling mods and shaders to match the profile.
+/// Returns the number of files renamed/toggled.
+pub fn apply_mod_profile(instance_dir: &std::path::Path, profile: &ModProfile) -> MqResult<usize> {
+    let mut toggled = 0;
+    let mods_dir = instance_dir.join("mods");
+    let enabled_mods_set: std::collections::HashSet<&str> =
+        profile.enabled_mods.iter().map(String::as_str).collect();
+
+    if mods_dir.is_dir() {
+        for entry in fs::read_dir(&mods_dir)?.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let lower = file_name.to_ascii_lowercase();
+
+            if lower.ends_with(".jar.disabled") {
+                let base = &file_name[..file_name.len() - ".disabled".len()];
+                if enabled_mods_set.contains(base) {
+                    let target = mods_dir.join(base);
+                    rename_with_retry(&path, &target)?;
+                    toggled += 1;
+                }
+            } else if lower.ends_with(".jar") && !enabled_mods_set.contains(file_name.as_str()) {
+                let target = mods_dir.join(format!("{file_name}.disabled"));
+                rename_with_retry(&path, &target)?;
+                toggled += 1;
+            }
+        }
+    }
+
+    let shaderpacks_dir = instance_dir.join("shaderpacks");
+    let enabled_shaders_set: std::collections::HashSet<&str> =
+        profile.enabled_shaders.iter().map(String::as_str).collect();
+
+    if shaderpacks_dir.is_dir() {
+        for entry in fs::read_dir(&shaderpacks_dir)?.flatten() {
+            let path = entry.path();
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let lower = file_name.to_ascii_lowercase();
+
+            if lower.ends_with(".disabled") {
+                let base = &file_name[..file_name.len() - ".disabled".len()];
+                if enabled_shaders_set.contains(base) {
+                    let target = shaderpacks_dir.join(base);
+                    rename_with_retry(&path, &target)?;
+                    toggled += 1;
+                }
+            } else if (path.is_dir() || lower.ends_with(".zip"))
+                && !enabled_shaders_set.contains(file_name.as_str())
+            {
+                let target = shaderpacks_dir.join(format!("{file_name}.disabled"));
+                rename_with_retry(&path, &target)?;
+                toggled += 1;
+            }
+        }
+    }
+
+    Ok(toggled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_capture_and_apply_mod_profile() {
+        let temp = tempdir().expect("tempdir");
+        let inst_dir = temp.path();
+        let mods_dir = inst_dir.join("mods");
+        fs::create_dir_all(&mods_dir).expect("create mods dir");
+
+        fs::write(mods_dir.join("mod_a.jar"), b"a").unwrap();
+        fs::write(mods_dir.join("mod_b.jar"), b"b").unwrap();
+        fs::write(mods_dir.join("mod_c.jar.disabled"), b"c").unwrap();
+
+        let profile = capture_mod_profile("Profile 1", inst_dir);
+        assert_eq!(profile.name, "Profile 1");
+        assert_eq!(profile.enabled_mods, vec!["mod_a.jar", "mod_b.jar"]);
+
+        let mut switched_profile = profile.clone();
+        switched_profile.enabled_mods = vec!["mod_c.jar".into()];
+
+        let toggled = apply_mod_profile(inst_dir, &switched_profile).expect("apply profile");
+        assert_eq!(toggled, 3); // mod_a disabled, mod_b disabled, mod_c enabled
+        assert!(mods_dir.join("mod_a.jar.disabled").is_file());
+        assert!(mods_dir.join("mod_b.jar.disabled").is_file());
+        assert!(mods_dir.join("mod_c.jar").is_file());
     }
 }

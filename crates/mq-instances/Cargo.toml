@@ -19,6 +19,7 @@ tokio.workspace = true
 tracing.workspace = true
 zip.workspace = true
 flate2.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

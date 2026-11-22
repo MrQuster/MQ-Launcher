@@ -464,6 +464,231 @@ pub async fn update_installed_content(
     }
 }
 
+/// Report summarizing installed and missing mod dependencies.
+#[derive(Debug, Clone, Default)]
+pub struct AutoFixDepsReport {
+    pub installed: Vec<String>,
+    pub not_found: Vec<String>,
+}
+
+/// Automatically resolves and installs missing mod dependencies for a given Minecraft version and loader.
+pub async fn auto_install_missing_dependencies(
+    mods_dir: &Path,
+    missing_ids: &[String],
+    mc_version: &str,
+    loader: mq_core::ModLoaderKind,
+    _cf_api_key: Option<&str>,
+) -> MqResult<AutoFixDepsReport> {
+    fs::create_dir_all(mods_dir)?;
+    let client = reqwest::Client::builder()
+        .user_agent("MrQuster/MQ")
+        .build()
+        .map_err(|e| MqError::Network(e.to_string()))?;
+
+    let mut report = AutoFixDepsReport::default();
+    let loader_str = loader.as_str();
+
+    for id in missing_ids {
+        let trimmed_id = id.trim();
+        if trimmed_id.is_empty() {
+            continue;
+        }
+
+        let url = format!(
+            "https://api.modrinth.com/v2/project/{trimmed_id}/version?game_versions=[\"{mc_version}\"]&loaders=[\"{loader_str}\"]"
+        );
+        let mut installed_ok = false;
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(versions) = resp.json::<Vec<serde_json::Value>>().await {
+                    if let Some(v) = versions.first() {
+                        if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
+                            let file_entry = files
+                                .iter()
+                                .find(|f| {
+                                    f.get("primary").and_then(|p| p.as_bool()).unwrap_or(false)
+                                })
+                                .or_else(|| files.first());
+                            if let Some(file_obj) = file_entry {
+                                if let (Some(dl_url), Some(filename)) = (
+                                    file_obj.get("url").and_then(|u| u.as_str()),
+                                    file_obj.get("filename").and_then(|f| f.as_str()),
+                                ) {
+                                    if let Ok(dl_resp) = client.get(dl_url).send().await {
+                                        if dl_resp.status().is_success() {
+                                            if let Ok(bytes) = dl_resp.bytes().await {
+                                                let target = mods_dir.join(filename);
+                                                if fs::write(&target, &bytes).is_ok() {
+                                                    report.installed.push(filename.to_string());
+                                                    installed_ok = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !installed_ok {
+            report.not_found.push(trimmed_id.to_string());
+        }
+    }
+
+    Ok(report)
+}
+
+/// Metadata describing an available modpack update.
+#[derive(Debug, Clone)]
+pub struct ModpackUpdateInfo {
+    pub latest_version_id: String,
+    pub latest_version_name: String,
+    pub changelog: String,
+    pub download_url: String,
+    pub source: String,
+}
+
+/// Checks whether an update is available for an installed modpack.
+pub async fn check_modpack_update(
+    source: &str,
+    project_id: &str,
+    current_version_id: &str,
+    _cf_api_key: Option<&str>,
+) -> MqResult<Option<ModpackUpdateInfo>> {
+    let client = reqwest::Client::builder()
+        .user_agent("MrQuster/MQ")
+        .build()
+        .map_err(|e| MqError::Network(e.to_string()))?;
+
+    if source.eq_ignore_ascii_case("modrinth") {
+        let url = format!("https://api.modrinth.com/v2/project/{project_id}/version");
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(versions) = resp.json::<Vec<serde_json::Value>>().await {
+                    if let Some(first) = versions.first() {
+                        let vid = first.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                        if !vid.is_empty() && vid != current_version_id {
+                            let name = first.get("name").and_then(|v| v.as_str()).unwrap_or(vid);
+                            let changelog = first
+                                .get("changelog")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let dl_url = first
+                                .get("files")
+                                .and_then(|f| f.as_array())
+                                .and_then(|arr| {
+                                    arr.iter()
+                                        .find(|f| {
+                                            f.get("primary")
+                                                .and_then(|p| p.as_bool())
+                                                .unwrap_or(false)
+                                        })
+                                        .or_else(|| arr.first())
+                                })
+                                .and_then(|f| f.get("url").and_then(|u| u.as_str()))
+                                .unwrap_or_default();
+
+                            if !dl_url.is_empty() {
+                                return Ok(Some(ModpackUpdateInfo {
+                                    latest_version_id: vid.to_string(),
+                                    latest_version_name: name.to_string(),
+                                    changelog: changelog.to_string(),
+                                    download_url: dl_url.to_string(),
+                                    source: "modrinth".to_string(),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Applies a modpack update archive, preserving saves, options, servers, screenshots, and xaero data.
+pub async fn apply_modpack_update(
+    instance_dir: &Path,
+    info: &ModpackUpdateInfo,
+    _cf_api_key: Option<&str>,
+) -> MqResult<usize> {
+    let client = reqwest::Client::builder()
+        .user_agent("MrQuster/MQ")
+        .build()
+        .map_err(|e| MqError::Network(format!("client build error: {e}")))?;
+
+    let resp = client
+        .get(&info.download_url)
+        .send()
+        .await
+        .map_err(|e| MqError::Network(format!("download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(MqError::Network(format!(
+            "modpack update HTTP error: {}",
+            resp.status()
+        )));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| MqError::Network(format!("read bytes failed: {e}")))?;
+
+    let cursor = std::io::Cursor::new(bytes);
+    let mut zip = zip::ZipArchive::new(cursor)
+        .map_err(|e| MqError::Internal(format!("corrupt zip archive: {e}")))?;
+
+    let mut updated_count = 0;
+    let preserve_prefixes = ["saves/", "screenshots/", "xaero/"];
+    let preserve_exact = ["options.txt", "servers.dat"];
+
+    for i in 0..zip.len() {
+        let mut file = zip
+            .by_index(i)
+            .map_err(|e| MqError::Internal(format!("zip entry error: {e}")))?;
+        let raw_name = file.name().to_string();
+        let normalized = raw_name.replace('\\', "/");
+
+        let rel_path = if let Some(stripped) = normalized.strip_prefix("overrides/") {
+            stripped
+        } else if let Some(stripped) = normalized.strip_prefix("client-overrides/") {
+            stripped
+        } else {
+            &normalized
+        };
+
+        if rel_path.is_empty() {
+            continue;
+        }
+
+        let is_preserved = preserve_prefixes
+            .iter()
+            .any(|prefix| rel_path.starts_with(prefix))
+            || preserve_exact.contains(&rel_path);
+
+        if is_preserved {
+            continue;
+        }
+
+        let out_path = mq_core::resolve_safe_path(instance_dir, rel_path)?;
+        if file.is_dir() || rel_path.ends_with('/') {
+            fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(p) = out_path.parent() {
+                fs::create_dir_all(p)?;
+            }
+            let mut out = fs::File::create(&out_path)?;
+            std::io::copy(&mut file, &mut out)?;
+            updated_count += 1;
+        }
+    }
+
+    Ok(updated_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,5 +1064,14 @@ mod tests {
         fs::set_permissions(&enabled, ro_src).unwrap();
         delete_mod(dir.path(), "OptiMod.JAR").expect("delete read-only mod");
         assert!(!enabled.exists());
+    }
+
+    #[test]
+    fn auto_fix_deps_report_default_and_roundtrip() {
+        let mut report = AutoFixDepsReport::default();
+        report.installed.push("fabric-api.jar".into());
+        report.not_found.push("unknown-dep".into());
+        assert_eq!(report.installed.len(), 1);
+        assert_eq!(report.not_found.len(), 1);
     }
 }

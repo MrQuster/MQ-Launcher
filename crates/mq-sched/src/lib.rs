@@ -34,6 +34,7 @@ pub use state_machine::{
 };
 pub use telemetry::{
     count_open_fds, parse_proc_stat, read_current_rss_mib, read_peak_rss_mib, read_proc_stat,
-    CoreSample, CpuSampler, CpuTelemetrySnapshot, PhaseCpuReport, ProcStatRaw, ScopedCpuProfiler,
+    read_process_rss_mib, CoreSample, CpuSampler, CpuTelemetrySnapshot, PhaseCpuReport,
+    ProcStatRaw, ScopedCpuProfiler,
 };
 pub use watchdog::{UiWatchdog, WatchdogAlert, WatchdogGuard, WatchdogScope, DEFAULT_UI_BUDGET};

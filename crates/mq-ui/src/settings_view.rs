@@ -966,11 +966,30 @@ impl SettingsView {
                 ui.set_width(ui.available_width());
 
                 // 1. RAM Allocation
-                ui.label(
-                    RichText::new("Выделение оперативной памяти (JVM RAM)")
-                        .strong()
-                        .size(14.0),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Выделение оперативной памяти (JVM RAM)")
+                            .strong()
+                            .size(14.0),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Cpu),
+                            "Оптимизировать под мой ПК",
+                        )
+                        .clicked()
+                        {
+                            let total_ram = mq_core::total_memory_mb();
+                            let rec = mq_launch::recommend_jvm_tuning(total_ram, 21, 0);
+                            state.config.default_memory_min_mb = rec.memory_min_mb;
+                            state.config.default_memory_max_mb = rec.memory_max_mb;
+                            state.config.default_jvm_args = rec.jvm_args;
+                            state.status_message = Some((rec.summary_ru.clone(), false));
+                            let _ = state.config.save(&state.paths);
+                        }
+                    });
+                });
                 ui.add_space(4.0);
 
                 ui.horizontal(|ui| {
@@ -1161,6 +1180,70 @@ impl SettingsView {
                         LaunchAction::HideUntilExit,
                         "Скрыть до выхода из игры",
                     );
+                });
+
+                ui.add_space(8.0);
+
+                // Discord Rich Presence
+                let mut d_rpc = state.config.discord_rpc_enabled;
+                if ui
+                    .checkbox(&mut d_rpc, "Discord Rich Presence (отображать статус игры)")
+                    .changed()
+                {
+                    state.config.discord_rpc_enabled = d_rpc;
+                    let _ = state.config.save(&state.paths);
+                }
+
+                // Автобэкап миров перед запуском
+                let mut auto_bk = state.config.auto_backup_worlds;
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut auto_bk, "Автобэкап миров перед запуском")
+                        .changed()
+                    {
+                        state.config.auto_backup_worlds = auto_bk;
+                        let _ = state.config.save(&state.paths);
+                    }
+                    if state.config.auto_backup_worlds {
+                        ui.add_space(12.0);
+                        ui.label("Хранить копий:");
+                        let mut max_bk = state.config.max_world_backups.clamp(1, 10);
+                        if ui.add(egui::Slider::new(&mut max_bk, 1..=10)).changed() {
+                            state.config.max_world_backups = max_bk;
+                            let _ = state.config.save(&state.paths);
+                        }
+                    }
+                });
+
+                // Скрывать лаунчер при запуске игры
+                let mut hide_on = state.config.hide_on_launch;
+                if ui
+                    .checkbox(&mut hide_on, "Скрывать лаунчер при запуске игры")
+                    .changed()
+                {
+                    state.config.hide_on_launch = hide_on;
+                    let _ = state.config.save(&state.paths);
+                }
+
+                // Компактный мини-оверлей при запуске
+                ui.horizontal(|ui| {
+                    let mut mini_ov = state.config.mini_overlay_on_launch;
+                    if ui
+                        .checkbox(&mut mini_ov, "Компактный мини-оверлей при запуске")
+                        .changed()
+                    {
+                        state.config.mini_overlay_on_launch = mini_ov;
+                        let _ = state.config.save(&state.paths);
+                    }
+                    ui.add_space(8.0);
+                    let toggle_label = if state.mini_overlay_active {
+                        "Отключить мини-оверлей"
+                    } else {
+                        "Переключить мини-оверлей"
+                    };
+                    if secondary_glass_button(ui, None, toggle_label).clicked() {
+                        state.mini_overlay_active = !state.mini_overlay_active;
+                    }
                 });
 
                 ui.add_space(10.0);

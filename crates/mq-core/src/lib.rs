@@ -37,7 +37,8 @@ pub use paths::{resolve_safe_path, MqPaths};
 pub use platform::{
     atomic_write, classpath_separator, default_cache_dir, default_config_dir, default_data_dir,
     ensure_long_path_prefix, is_process_alive, is_windows_reserved_name, is_wrapper_available,
-    link_or_copy, open_folder, open_url, os_name, sanitize_filename, WINDOWS_CREATE_NO_WINDOW,
+    link_or_copy, open_folder, open_url, os_name, sanitize_filename, total_memory_mb,
+    WINDOWS_CREATE_NO_WINDOW,
 };
 pub use secret::{redact_text, SecretString, REDACTED_PLACEHOLDER};
 

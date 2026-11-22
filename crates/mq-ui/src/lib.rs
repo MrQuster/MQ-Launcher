@@ -26,6 +26,7 @@ pub mod opener;
 pub mod perf_view;
 pub mod settings_view;
 pub mod sidebar;
+pub mod skin_3d;
 pub mod snapshot;
 pub mod state;
 #[cfg(feature = "test-hooks")]

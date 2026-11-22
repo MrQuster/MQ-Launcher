@@ -325,6 +325,9 @@ impl InstanceManager {
             created_at: Utc::now(),
             last_played: None,
             playtime_secs: 0,
+            total_playtime_secs: 0,
+            mod_profiles: src_manifest.mod_profiles,
+            active_mod_profile: src_manifest.active_mod_profile,
             modpack_source: src_manifest.modpack_source,
             mc_locale: src_manifest.mc_locale,
             lang_initialized: src_manifest.lang_initialized,
@@ -365,6 +368,7 @@ impl InstanceManager {
         let mut manifest = self.load_instance(id_or_name)?;
         manifest.last_played = Some(Utc::now());
         manifest.playtime_secs = manifest.playtime_secs.saturating_add(added_playtime_secs);
+        manifest.total_playtime_secs = manifest.playtime_secs;
         self.save_instance(&manifest)?;
         Ok(manifest)
     }

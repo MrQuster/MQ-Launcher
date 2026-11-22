@@ -3475,6 +3475,8 @@ async fn build_snapshot_app(
             settings_view,
             frame_crash_message: None,
             recovery_journal: None,
+            discord_rpc: None,
+            window_hidden_for_game: false,
         };
 
         Ok((app, Some(temp_dir)))
@@ -3521,6 +3523,8 @@ async fn build_snapshot_app(
             settings_view: mq_ui::SettingsView::default(),
             frame_crash_message: None,
             recovery_journal: None,
+            discord_rpc: None,
+            window_hidden_for_game: false,
         };
 
         if screen == "detail" {

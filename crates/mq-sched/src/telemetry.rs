@@ -422,6 +422,38 @@ pub fn read_peak_rss_mib() -> f64 {
     }
 }
 
+/// Reads current resident set size (`VmRSS` on Linux, process memory on Windows/non-Linux) in MiB for a given PID.
+pub fn read_process_rss_mib(pid: u32) -> Option<f64> {
+    if pid == 0 {
+        return None;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status_path = format!("/proc/{pid}/status");
+        let contents = fs::read_to_string(&status_path).ok()?;
+        parse_status_kb(&contents, "VmRSS").map(|kb| kb as f64 / KIB_PER_MIB)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let pid_sys = sysinfo::Pid::from_u32(pid);
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid_sys]),
+            false,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        let proc = sys.process(pid_sys)?;
+        let bytes = proc.memory();
+        if bytes == 0 {
+            None
+        } else {
+            Some(bytes as f64 / BYTES_PER_MIB)
+        }
+    }
+}
+
 /// Counts currently open file descriptors (Linux `/proc/self/fd`, macOS `/dev/fd`) or
 /// kernel handles (Windows `GetProcessHandleCount`) for this process.
 pub fn count_open_fds() -> usize {
@@ -1029,6 +1061,11 @@ Threads:\t4
         let hwm = read_peak_rss_mib();
         assert!(rss > 0.0, "expected positive VmRSS MiB, got {rss}");
         assert!(hwm >= rss * 0.5, "expected positive VmHWM MiB, got {hwm}");
+
+        let self_pid_rss = read_process_rss_mib(std::process::id());
+        assert!(self_pid_rss.is_some());
+        assert!(self_pid_rss.unwrap() > 0.0);
+        assert!(read_process_rss_mib(0).is_none());
 
         let fds_before = count_open_fds();
         assert!(

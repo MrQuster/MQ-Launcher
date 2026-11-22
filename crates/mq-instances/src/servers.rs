@@ -44,6 +44,48 @@ pub struct ServerPingResult {
     pub motd: String,
     /// Optional base64 favicon data URL.
     pub favicon: Option<String>,
+    /// Decoded raw PNG bytes from base64 favicon data URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favicon_png: Option<Vec<u8>>,
+    /// Sample of online player names.
+    #[serde(default)]
+    pub players_sample: Vec<String>,
+    /// Segmented MOTD with optional color formatting code (`§`).
+    #[serde(default)]
+    pub motd_segments: Vec<(Option<char>, String)>,
+}
+
+/// Parses a Minecraft MOTD string into segments of `(Option<color_code>, text)`.
+pub fn parse_motd_segments(motd: &str) -> Vec<(Option<char>, String)> {
+    let mut segments = Vec::new();
+    let mut current_code = None;
+    let mut current_text = String::new();
+
+    let mut chars = motd.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '§' {
+            if let Some(&code) = chars.peek() {
+                chars.next();
+                if !current_text.is_empty() {
+                    segments.push((current_code, std::mem::take(&mut current_text)));
+                }
+                let lower_code = code.to_ascii_lowercase();
+                if lower_code == 'r' {
+                    current_code = None;
+                } else {
+                    current_code = Some(lower_code);
+                }
+            }
+        } else {
+            current_text.push(c);
+        }
+    }
+
+    if !current_text.is_empty() || segments.is_empty() {
+        segments.push((current_code, current_text));
+    }
+
+    segments
 }
 
 /// Loads all multiplayer servers declared in `<instance_dir>/servers.dat`.
@@ -290,6 +332,23 @@ pub fn ping_server(server_addr: &str, timeout_ms: u64) -> MqResult<ServerPingRes
         .and_then(|f| f.as_str())
         .map(ToOwned::to_owned);
 
+    let favicon_png = favicon.as_deref().and_then(|fav| {
+        let b64 = fav.strip_prefix("data:image/png;base64,").unwrap_or(fav);
+        use base64::Engine;
+        base64::prelude::BASE64_STANDARD.decode(b64.trim()).ok()
+    });
+
+    let mut players_sample = Vec::new();
+    if let Some(sample_arr) = val.pointer("/players/sample").and_then(|v| v.as_array()) {
+        for p in sample_arr {
+            if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
+                players_sample.push(name.to_string());
+            }
+        }
+    }
+
+    let motd_segments = parse_motd_segments(&motd);
+
     Ok(ServerPingResult {
         latency_ms,
         version_name,
@@ -297,6 +356,9 @@ pub fn ping_server(server_addr: &str, timeout_ms: u64) -> MqResult<ServerPingRes
         players_max,
         motd,
         favicon,
+        favicon_png,
+        players_sample,
+        motd_segments,
     })
 }
 
@@ -336,4 +398,19 @@ fn read_varint<R: Read>(r: &mut R) -> MqResult<i32> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_motd_segments() {
+        let motd = "§aWelcome to §6§lMQ Server§r - Have Fun!";
+        let segments = parse_motd_segments(motd);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], (Some('a'), "Welcome to ".to_string()));
+        assert_eq!(segments[1], (Some('l'), "MQ Server".to_string()));
+        assert_eq!(segments[2], (None, " - Have Fun!".to_string()));
+    }
 }

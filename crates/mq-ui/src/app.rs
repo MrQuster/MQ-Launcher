@@ -95,6 +95,8 @@ pub struct MqApp {
     pub settings_view: SettingsView,
     pub recovery_journal: Option<mq_core::crash::InstallJournal>,
     pub frame_crash_message: Option<String>,
+    pub discord_rpc: Option<mq_launch::DiscordRpcClient>,
+    pub window_hidden_for_game: bool,
 }
 
 impl Drop for MqApp {
@@ -361,6 +363,7 @@ impl MqApp {
         let event_bus = state.event_bus.clone();
         let resp_tx = state.resp_sender.clone();
         let egui_ctx = cc.egui_ctx.clone();
+        let running_pids = state.running_pids.clone();
         let _ = std::thread::Builder::new()
             .name("mq-telemetry".to_string())
             .spawn(move || {
@@ -410,6 +413,24 @@ impl MqApp {
                         peak_rss_mib,
                         open_fds,
                     });
+
+                    // Sample live RSS for all active game processes
+                    let pids: Vec<(mq_core::InstanceId, u32)> = {
+                        let map = running_pids.lock();
+                        map.iter().map(|(id, &pid)| (id.clone(), pid)).collect()
+                    };
+                    if !pids.is_empty() {
+                        let mut samples = Vec::new();
+                        for (id, pid) in pids {
+                            if let Some(rss) = mq_sched::read_process_rss_mib(pid) {
+                                samples.push((id, rss as f32));
+                            }
+                        }
+                        if !samples.is_empty() {
+                            let _ = resp_tx.try_send(UiWorkerResponse::GameRssSamples(samples));
+                        }
+                    }
+
                     egui_ctx.request_repaint();
                 }
             });
@@ -435,6 +456,313 @@ impl MqApp {
             settings_view: SettingsView::default(),
             recovery_journal,
             frame_crash_message: None,
+            discord_rpc: None,
+            window_hidden_for_game: false,
+        }
+    }
+
+    fn launch_instance_core(
+        &mut self,
+        instance_id: mq_core::InstanceId,
+        dry_run: bool,
+        quick_play: Option<mq_launch::QuickPlayTarget>,
+    ) {
+        let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+        let paths = self.state.paths.clone();
+        let bus = self.state.event_bus.clone();
+        let net = self.state.net.clone();
+        let cas = self.state.cas.clone();
+        let pool = self.state.compute_pool.clone();
+        let guard = self.state.cancel_epoch.snapshot();
+        let resp_tx = self.state.resp_sender.clone();
+        let default_mc_loc = self.state.config.default_mc_locale.clone();
+
+        if let Some(inst) = self
+            .state
+            .instances
+            .iter()
+            .find(|i| i.id == instance_id)
+            .cloned()
+        {
+            if self.state.config.auto_backup_worlds {
+                let _ = mq_instances::auto_backup_instance_worlds(
+                    &inst_dir,
+                    self.state.config.max_world_backups,
+                );
+            }
+
+            self.state
+                .game_session_starts
+                .insert(instance_id.clone(), std::time::Instant::now());
+
+            if self.state.config.discord_rpc_enabled {
+                if self.discord_rpc.is_none() {
+                    self.discord_rpc = mq_launch::DiscordRpcClient::connect_default();
+                }
+                if let Some(ref mut rpc) = self.discord_rpc {
+                    rpc.set_playing_activity(
+                        &inst.name,
+                        &format!("Minecraft {}", inst.mc_version),
+                        chrono::Utc::now().timestamp() as u64,
+                    );
+                }
+            }
+
+            if self.state.config.hide_on_launch {
+                self.window_hidden_for_game = true;
+            }
+            if self.state.config.mini_overlay_on_launch {
+                self.state.mini_overlay_active = true;
+            }
+
+            let active_acc = self
+                .state
+                .accounts
+                .active_account()
+                .cloned()
+                .unwrap_or_else(|| mq_auth::create_offline_account("Player").unwrap());
+
+            spawn_monitored_task(
+                "launch_instance",
+                paths.clone(),
+                instance_id.clone(),
+                resp_tx.clone(),
+                async move {
+                    // 1. Check if installation is needed
+                    let resolved_path = inst_dir.join("resolved_version.json");
+                    let client_jar_path = inst_dir.join("client.jar");
+                    let is_installed = resolved_path.exists() && client_jar_path.exists();
+
+                    if !is_installed {
+                        let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
+                            instance_id.clone(),
+                        ));
+                        let req = mq_install::InstallRequest {
+                            mc_version: inst.mc_version.clone(),
+                            loader: inst.loader,
+                            loader_version: inst.loader_version.clone(),
+                            instance_dir: inst_dir.clone(),
+                            mock_base_url: configured_mock_base_url(),
+                        };
+
+                        match mq_install::install_game(
+                            &req,
+                            &paths,
+                            &net,
+                            &cas,
+                            &pool,
+                            &guard,
+                            Some(&bus),
+                        )
+                        .await
+                        {
+                            Ok(summary) => {
+                                bus.publish(mq_core::Event::PhaseCompleted {
+                                    phase: "install_game".to_string(),
+                                    elapsed_ms: summary.elapsed_ms,
+                                });
+                                let _ = resp_tx.send(UiWorkerResponse::InstanceInstallCompleted(
+                                    instance_id.clone(),
+                                ));
+                            }
+                            Err(e) => {
+                                if guard.is_cancelled() {
+                                    return;
+                                }
+                                let err_msg =
+                                    format!("Ошибка скачивания инстанса {}: {e}", inst.name);
+                                bus.publish(mq_core::Event::TaskError {
+                                    context: format!("Установка {}", inst.name),
+                                    message: e.to_string(),
+                                });
+                                let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                    instance_id,
+                                    error: err_msg,
+                                });
+                                return;
+                            }
+                        }
+                    }
+
+                    // 2. Read resolved version metadata
+                    let bytes = match std::fs::read(&resolved_path) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let err_msg =
+                                format!("Не удалось прочитать resolved_version.json: {e}");
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                instance_id,
+                                error: err_msg,
+                            });
+                            return;
+                        }
+                    };
+
+                    let ver = match serde_json::from_slice::<mq_meta::ResolvedVersion>(&bytes) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let err_msg = format!("Ошибка структуры resolved_version.json: {e}");
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                instance_id,
+                                error: err_msg,
+                            });
+                            return;
+                        }
+                    };
+
+                    // 3. Ensure Ely.by authlib injector if Ely.by account is active
+                    let authlib_path = if active_acc.kind == mq_auth::AccountKind::ElyBy {
+                        let client = mq_auth::ElyByClient::new();
+                        match client.ensure_authlib_injector(&paths).await {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                bus.publish(mq_core::Event::TaskError {
+                                    context: "Ely.by Authlib".to_string(),
+                                    message: format!("Не удалось загрузить скин-инжектор: {e}"),
+                                });
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    // 4. Discover and select compatible Java Virtual Machine
+                    let java_runtimes = mq_launch::discover_java_runtimes();
+                    let req_major = mq_launch::required_java_major_for_mc(
+                        &ver.mc_version,
+                        Some(ver.java_version.major_version),
+                    );
+
+                    let selected_java = match mq_launch::select_java_runtime(
+                        &java_runtimes,
+                        req_major,
+                        inst.java_path.as_deref(),
+                    ) {
+                        Ok(j) => j,
+                        Err(e) => {
+                            let err_msg = format!(
+                            "Подходящая версия Java не найдена (требуется Java {req_major}): {e}"
+                        );
+                            bus.publish(mq_core::Event::TaskError {
+                                context: "Поиск Java".to_string(),
+                                message: err_msg.clone(),
+                            });
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                instance_id,
+                                error: err_msg,
+                            });
+                            return;
+                        }
+                    };
+
+                    // 5. Construct launch context and arguments
+                    let launch_ctx = mq_launch::LaunchContext {
+                        paths,
+                        instance: inst.clone(),
+                        version: ver,
+                        account: active_acc,
+                        java_bin: selected_java.path.clone(),
+                        authlib_injector_jar: authlib_path,
+                        extra_secrets_to_redact: Vec::new(),
+                    };
+
+                    let built_cmd = match mq_launch::build_launch_command_with_quick_play(
+                        &launch_ctx,
+                        quick_play.as_ref(),
+                    ) {
+                        Ok(cmd) => cmd,
+                        Err(e) => {
+                            let err_msg = format!("Ошибка построения аргументов JVM: {e}");
+                            bus.publish(mq_core::Event::TaskError {
+                                context: "Запуск JVM".to_string(),
+                                message: err_msg.clone(),
+                            });
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                instance_id,
+                                error: err_msg,
+                            });
+                            return;
+                        }
+                    };
+
+                    if dry_run {
+                        bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
+                            instance: instance_id.to_string(),
+                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            level: mq_core::GameLogLevel::Info,
+                            line: format!(
+                                "DRY RUN COMMAND:\n{}",
+                                built_cmd.to_shell_command_line()
+                            ),
+                        }));
+                    } else {
+                        let _ = resp_tx.send(UiWorkerResponse::GameStarted(instance_id.clone()));
+
+                        // Ensure valid assets/indexes/<id>.json and lang assets before game starts
+                        let _ = mq_launch::ensure_prelaunch_assets(
+                            &launch_ctx.paths,
+                            &inst_dir,
+                            &launch_ctx.version,
+                        )
+                        .await;
+
+                        // Auto-synchronize options.txt language
+                        let target_mc_lang =
+                            inst.mc_locale.as_deref().unwrap_or(default_mc_loc.as_str());
+                        let _ = mq_launch::sync_minecraft_options_lang(&inst_dir, target_mc_lang);
+
+                        bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
+                            instance: instance_id.to_string(),
+                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            level: mq_core::GameLogLevel::Info,
+                            line: format!(
+                                "[MQ] Запуск игры '{}' (MC {}, Java {}, Язык: {})...",
+                                inst.name,
+                                inst.mc_version,
+                                selected_java.full_version,
+                                target_mc_lang
+                            ),
+                        }));
+
+                        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+                        let pid_resp_tx = resp_tx.clone();
+                        let pid_inst = instance_id.clone();
+                        tokio::spawn(async move {
+                            if let Ok(pid) = pid_rx.await {
+                                let _ = pid_resp_tx.send(UiWorkerResponse::GamePid {
+                                    instance_id: pid_inst,
+                                    pid,
+                                });
+                            }
+                        });
+
+                        let exit_code = match mq_launch::spawn_and_stream_game_with_pid(
+                            &built_cmd,
+                            instance_id.as_str(),
+                            Vec::new(),
+                            Some(bus.clone()),
+                            Some(pid_tx),
+                        )
+                        .await
+                        {
+                            Ok(status) => mq_launch::exit_status_code(&status),
+                            Err(e) => {
+                                bus.publish(mq_core::Event::TaskError {
+                                    context: "Процесс игры".to_string(),
+                                    message: format!("Ошибка процесса: {e}"),
+                                });
+                                -1
+                            }
+                        };
+
+                        let _ = resp_tx.send(UiWorkerResponse::GameExited {
+                            instance_id,
+                            exit_code,
+                        });
+                    }
+                },
+            );
         }
     }
 
@@ -945,288 +1273,129 @@ impl MqApp {
                     instance_id,
                     dry_run,
                 } => {
+                    self.launch_instance_core(instance_id, dry_run, None);
+                }
+                UiWorkerCommand::LaunchInstanceQuickPlay {
+                    instance_id,
+                    quick_play,
+                } => {
+                    self.launch_instance_core(instance_id, false, Some(quick_play));
+                }
+                UiWorkerCommand::AutoInstallMissingDeps {
+                    instance_id,
+                    missing_ids,
+                } => {
                     let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
-                    let paths = self.state.paths.clone();
-                    let bus = self.state.event_bus.clone();
-                    let net = self.state.net.clone();
-                    let cas = self.state.cas.clone();
-                    let pool = self.state.compute_pool.clone();
-                    let guard = self.state.cancel_epoch.snapshot();
+                    let mods_dir = inst_dir.join("mods");
                     let resp_tx = self.state.resp_sender.clone();
-                    let default_mc_loc = self.state.config.default_mc_locale.clone();
-
-                    if let Some(inst) = self
+                    let cf_api_key = self.state.config.curseforge_api_key.clone();
+                    let inst = self
                         .state
                         .instances
                         .iter()
                         .find(|i| i.id == instance_id)
-                        .cloned()
-                    {
-                        let active_acc = self
-                            .state
-                            .accounts
-                            .active_account()
-                            .cloned()
-                            .unwrap_or_else(|| mq_auth::create_offline_account("Player").unwrap());
-
-                        spawn_monitored_task(
-                            "launch_instance",
-                            paths.clone(),
-                            instance_id.clone(),
-                            resp_tx.clone(),
-                            async move {
-                                // 1. Check if installation is needed
-                                let resolved_path = inst_dir.join("resolved_version.json");
-                                let client_jar_path = inst_dir.join("client.jar");
-                                let is_installed =
-                                    resolved_path.exists() && client_jar_path.exists();
-
-                                if !is_installed {
-                                    let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
-                                        instance_id.clone(),
-                                    ));
-                                    let req = mq_install::InstallRequest {
-                                        mc_version: inst.mc_version.clone(),
-                                        loader: inst.loader,
-                                        loader_version: inst.loader_version.clone(),
-                                        instance_dir: inst_dir.clone(),
-                                        mock_base_url: configured_mock_base_url(),
-                                    };
-
-                                    match mq_install::install_game(
-                                        &req,
-                                        &paths,
-                                        &net,
-                                        &cas,
-                                        &pool,
-                                        &guard,
-                                        Some(&bus),
-                                    )
-                                    .await
-                                    {
-                                        Ok(summary) => {
-                                            bus.publish(mq_core::Event::PhaseCompleted {
-                                                phase: "install_game".to_string(),
-                                                elapsed_ms: summary.elapsed_ms,
-                                            });
-                                            let _ = resp_tx.send(
-                                                UiWorkerResponse::InstanceInstallCompleted(
-                                                    instance_id.clone(),
-                                                ),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            if guard.is_cancelled() {
-                                                return;
-                                            }
-                                            let err_msg = format!(
-                                                "Ошибка скачивания инстанса {}: {e}",
-                                                inst.name
-                                            );
-                                            bus.publish(mq_core::Event::TaskError {
-                                                context: format!("Установка {}", inst.name),
-                                                message: e.to_string(),
-                                            });
-                                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                                instance_id,
-                                                error: err_msg,
-                                            });
-                                            return;
-                                        }
-                                    }
-                                }
-
-                                // 2. Read resolved version metadata
-                                let bytes = match std::fs::read(&resolved_path) {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        let err_msg = format!(
-                                            "Не удалось прочитать resolved_version.json: {e}"
-                                        );
-                                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                            instance_id,
-                                            error: err_msg,
-                                        });
-                                        return;
-                                    }
-                                };
-
-                                let ver = match serde_json::from_slice::<mq_meta::ResolvedVersion>(
-                                    &bytes,
-                                ) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        let err_msg =
-                                            format!("Ошибка структуры resolved_version.json: {e}");
-                                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                            instance_id,
-                                            error: err_msg,
-                                        });
-                                        return;
-                                    }
-                                };
-
-                                // 3. Ensure Ely.by authlib injector if Ely.by account is active
-                                let authlib_path = if active_acc.kind == mq_auth::AccountKind::ElyBy
-                                {
-                                    let client = mq_auth::ElyByClient::new();
-                                    match client.ensure_authlib_injector(&paths).await {
-                                        Ok(p) => Some(p),
-                                        Err(e) => {
-                                            bus.publish(mq_core::Event::TaskError {
-                                                context: "Ely.by Authlib".to_string(),
-                                                message: format!(
-                                                    "Не удалось загрузить скин-инжектор: {e}"
-                                                ),
-                                            });
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                // 4. Discover and select compatible Java Virtual Machine
-                                let java_runtimes = mq_launch::discover_java_runtimes();
-                                let req_major = mq_launch::required_java_major_for_mc(
-                                    &ver.mc_version,
-                                    Some(ver.java_version.major_version),
-                                );
-
-                                let selected_java = match mq_launch::select_java_runtime(
-                                    &java_runtimes,
-                                    req_major,
-                                    inst.java_path.as_deref(),
-                                ) {
-                                    Ok(j) => j,
-                                    Err(e) => {
-                                        let err_msg = format!(
-                                        "Подходящая версия Java не найдена (требуется Java {req_major}): {e}"
-                                    );
-                                        bus.publish(mq_core::Event::TaskError {
-                                            context: "Поиск Java".to_string(),
-                                            message: err_msg.clone(),
-                                        });
-                                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                            instance_id,
-                                            error: err_msg,
-                                        });
-                                        return;
-                                    }
-                                };
-
-                                // 5. Construct launch context and arguments
-                                let launch_ctx = mq_launch::LaunchContext {
-                                    paths,
-                                    instance: inst.clone(),
-                                    version: ver,
-                                    account: active_acc,
-                                    java_bin: selected_java.path.clone(),
-                                    authlib_injector_jar: authlib_path,
-                                    extra_secrets_to_redact: Vec::new(),
-                                };
-
-                                let built_cmd = match mq_launch::build_launch_command(&launch_ctx) {
-                                    Ok(cmd) => cmd,
-                                    Err(e) => {
-                                        let err_msg =
-                                            format!("Ошибка построения аргументов JVM: {e}");
-                                        bus.publish(mq_core::Event::TaskError {
-                                            context: "Запуск JVM".to_string(),
-                                            message: err_msg.clone(),
-                                        });
-                                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                            instance_id,
-                                            error: err_msg,
-                                        });
-                                        return;
-                                    }
-                                };
-
-                                if dry_run {
-                                    bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
-                                        instance: instance_id.to_string(),
-                                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                                        level: mq_core::GameLogLevel::Info,
-                                        line: format!(
-                                            "DRY RUN COMMAND:\n{}",
-                                            built_cmd.to_shell_command_line()
-                                        ),
-                                    }));
-                                } else {
-                                    let _ = resp_tx
-                                        .send(UiWorkerResponse::GameStarted(instance_id.clone()));
-
-                                    // Ensure valid assets/indexes/<id>.json and lang assets before game starts
-                                    let _ = mq_launch::ensure_prelaunch_assets(
-                                        &launch_ctx.paths,
-                                        &inst_dir,
-                                        &launch_ctx.version,
-                                    )
-                                    .await;
-
-                                    // Auto-synchronize options.txt language
-                                    let target_mc_lang = inst
-                                        .mc_locale
-                                        .as_deref()
-                                        .unwrap_or(default_mc_loc.as_str());
-                                    let _ = mq_launch::sync_minecraft_options_lang(
-                                        &inst_dir,
-                                        target_mc_lang,
-                                    );
-
-                                    bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
-                                        instance: instance_id.to_string(),
-                                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                                        level: mq_core::GameLogLevel::Info,
-                                        line: format!(
-                                            "[MQ] Запуск игры '{}' (MC {}, Java {}, Язык: {})...",
-                                            inst.name,
-                                            inst.mc_version,
-                                            selected_java.full_version,
-                                            target_mc_lang
-                                        ),
-                                    }));
-
-                                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
-                                    let pid_resp_tx = resp_tx.clone();
-                                    let pid_inst = instance_id.clone();
-                                    tokio::spawn(async move {
-                                        if let Ok(pid) = pid_rx.await {
-                                            let _ = pid_resp_tx.send(UiWorkerResponse::GamePid {
-                                                instance_id: pid_inst,
-                                                pid,
-                                            });
-                                        }
-                                    });
-
-                                    let exit_code = match mq_launch::spawn_and_stream_game_with_pid(
-                                        &built_cmd,
-                                        instance_id.as_str(),
-                                        Vec::new(),
-                                        Some(bus.clone()),
-                                        Some(pid_tx),
-                                    )
-                                    .await
-                                    {
-                                        Ok(status) => mq_launch::exit_status_code(&status),
-                                        Err(e) => {
-                                            bus.publish(mq_core::Event::TaskError {
-                                                context: "Процесс игры".to_string(),
-                                                message: format!("Ошибка процесса: {e}"),
-                                            });
-                                            -1
-                                        }
-                                    };
-
-                                    let _ = resp_tx.send(UiWorkerResponse::GameExited {
-                                        instance_id,
-                                        exit_code,
-                                    });
-                                }
-                            },
-                        );
-                    }
+                        .cloned();
+                    self.state.is_auto_fixing_deps = true;
+                    tokio::spawn(async move {
+                        if let Some(inst) = inst {
+                            let report = mq_mods::auto_install_missing_dependencies(
+                                &mods_dir,
+                                &missing_ids,
+                                &inst.mc_version,
+                                inst.loader,
+                                cf_api_key.as_ref().map(|k| k.expose_secret()),
+                            )
+                            .await
+                            .map_err(|e| e.to_string());
+                            let _ = resp_tx.send(UiWorkerResponse::AutoFixDepsDone {
+                                instance_id,
+                                report,
+                            });
+                        }
+                    });
+                }
+                UiWorkerCommand::CheckModpackUpdate { instance_id } => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    let cf_api_key = self.state.config.curseforge_api_key.clone();
+                    let inst = self
+                        .state
+                        .instances
+                        .iter()
+                        .find(|i| i.id == instance_id)
+                        .cloned();
+                    self.state.is_checking_modpack_update = true;
+                    tokio::spawn(async move {
+                        if let Some(inst) = inst {
+                            if let Some(meta) = inst.modpack_source {
+                                let result = mq_mods::check_modpack_update(
+                                    &meta.source,
+                                    &meta.project_id,
+                                    &meta.version_id,
+                                    cf_api_key.as_ref().map(|k| k.expose_secret()),
+                                )
+                                .await
+                                .map_err(|e| e.to_string());
+                                let _ = resp_tx.send(UiWorkerResponse::ModpackUpdateChecked {
+                                    instance_id,
+                                    result,
+                                });
+                                return;
+                            }
+                        }
+                        let _ = resp_tx.send(UiWorkerResponse::ModpackUpdateChecked {
+                            instance_id,
+                            result: Ok(None),
+                        });
+                    });
+                }
+                UiWorkerCommand::ApplyModpackUpdate { instance_id, info } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let resp_tx = self.state.resp_sender.clone();
+                    let cf_api_key = self.state.config.curseforge_api_key.clone();
+                    tokio::spawn(async move {
+                        let result = mq_mods::apply_modpack_update(
+                            &inst_dir,
+                            &info,
+                            cf_api_key.as_ref().map(|k| k.expose_secret()),
+                        )
+                        .await
+                        .map_err(|e| e.to_string());
+                        let _ = resp_tx.send(UiWorkerResponse::ModpackUpdateApplied {
+                            instance_id,
+                            result,
+                        });
+                    });
+                }
+                UiWorkerCommand::DiscoverExternalInstances => {
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let list = mq_instances::discover_external_instances();
+                        let _ = resp_tx.send(UiWorkerResponse::ExternalInstancesDiscovered(list));
+                    });
+                }
+                UiWorkerCommand::ImportExternalInstance { item } => {
+                    let mgr = self.state.instance_mgr.clone();
+                    let paths = self.state.paths.clone();
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = mq_instances::import_external_instance(&mgr, &paths, &item)
+                            .map_err(|e| e.to_string());
+                        let _ = resp_tx
+                            .send(UiWorkerResponse::ExternalInstanceImported(Box::new(result)));
+                    });
+                }
+                UiWorkerCommand::AutoBackupWorlds { instance_id } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let max_keep = self.state.config.max_world_backups;
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = mq_instances::auto_backup_instance_worlds(&inst_dir, max_keep)
+                            .map_err(|e| e.to_string());
+                        let _ = resp_tx.send(UiWorkerResponse::WorldsBackedUp {
+                            instance_id,
+                            result,
+                        });
+                    });
                 }
                 UiWorkerCommand::SearchCatalog {
                     request_id,
@@ -2283,6 +2452,106 @@ impl MqApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
+
+        if self.window_hidden_for_game {
+            if self.state.game_running {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                self.window_hidden_for_game = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                if let Some(ref mut rpc) = self.discord_rpc {
+                    rpc.clear_activity();
+                }
+            }
+        } else if !self.state.game_running {
+            if let Some(ref mut rpc) = self.discord_rpc {
+                rpc.clear_activity();
+            }
+        }
+    }
+
+    fn render_mini_overlay(&mut self, ctx: &egui::Context, tokens: &Tokens) {
+        CentralPanel::default()
+            .frame(solid_hud_frame_with_config(
+                tokens,
+                &self.state.config.theme,
+            ))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::new(10.0, 4.0);
+                    let active_name = if let Some(ref rid) = self.state.running_instance {
+                        self.state
+                            .instances
+                            .iter()
+                            .find(|i| i.id == *rid)
+                            .map_or("Игра запущена", |i| i.name.as_str())
+                    } else if let Some(ref sid) = self.state.selected_instance_id {
+                        self.state
+                            .instances
+                            .iter()
+                            .find(|i| i.id == *sid)
+                            .map_or("Нет инстанса", |i| i.name.as_str())
+                    } else {
+                        "MQ Launcher"
+                    };
+
+                    ui.label(
+                        egui::RichText::new(active_name)
+                            .color(tokens.text)
+                            .strong()
+                            .size(13.0),
+                    );
+
+                    if self.state.game_running {
+                        if let Some(ref rid) = self.state.running_instance.clone() {
+                            if ui
+                                .button(egui::RichText::new("Остановить").color(tokens.danger))
+                                .clicked()
+                            {
+                                let _ = self.state.cmd_sender.send(UiWorkerCommand::StopGame {
+                                    instance_id: rid.clone(),
+                                });
+                            }
+                        }
+                    } else if let Some(ref sid) = self.state.selected_instance_id.clone() {
+                        if ui
+                            .button(egui::RichText::new("Запуск").color(tokens.accent))
+                            .clicked()
+                        {
+                            let _ = self.state.cmd_sender.send(UiWorkerCommand::LaunchInstance {
+                                instance_id: sid.clone(),
+                                dry_run: false,
+                            });
+                        }
+                    }
+
+                    ui.separator();
+
+                    let cpu_pct = self.state.latest_cpu.total_pct;
+                    let ram_mib = self.state.latest_cpu.rss_mib;
+                    ui.label(
+                        egui::RichText::new(format!("CPU: {cpu_pct:.1}% | RAM: {ram_mib:.0} МБ"))
+                            .color(tokens.text_muted)
+                            .small(),
+                    );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Развернуть").clicked() {
+                            self.state.mini_overlay_active = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                                egui::WindowLevel::Normal,
+                            ));
+                        }
+                    });
+                });
+            });
+
+        if self.state.game_running || self.state.is_launching {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
     }
 
     /// Internal per-frame rendering logic executed under `catch_unwind`.
@@ -2293,6 +2562,15 @@ impl MqApp {
 
         // Drain background worker events and IPC
         self.drain_background_and_ipc(ctx);
+
+        let tokens = Tokens::from_config(&self.state.config.theme);
+        if self.state.mini_overlay_active {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::AlwaysOnTop,
+            ));
+            self.render_mini_overlay(ctx, &tokens);
+            return;
+        }
 
         // 1. Sidebar (Left)
         let accounts_list = self.state.accounts.list_accounts().to_vec();
