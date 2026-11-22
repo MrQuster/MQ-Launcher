@@ -4,10 +4,11 @@
 //! sending JSON frames prefixed with opcode and length headers. Fails silently if Discord is absent.
 
 use std::io::{Read, Write};
-use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::fs::{File, OpenOptions};
