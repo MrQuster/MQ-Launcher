@@ -162,7 +162,7 @@ mod tests {
     fn slow_ui_operation_exceeding_8ms_records_violation_and_alert() {
         let (watchdog, rx) = UiWatchdog::bounded_channel(DEFAULT_UI_BUDGET, 4);
         watchdog.scope("sync_tree_rebuild", || {
-            thread::sleep(Duration::from_millis(14));
+            thread::sleep(Duration::from_millis(20));
         });
 
         assert_eq!(watchdog.violation_count(), 1);

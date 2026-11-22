@@ -5,6 +5,16 @@
 
 ---
 
+## [v2.7.5] — 2026-11-22 ("Windows CI Test Parity & Uninstall Guard")
+
+### Исправлено и улучшено / Fixed and improved
+- **Удаление на Windows (`mq-update`):** в `execute_uninstall_with_roots` добавлена проверка `clean_exe.exists()` перед запуском отложенного процесса `cmd.exe` для самоудаления, чтобы не создавать лишние фоновые процессы для несуществующих или уже удалённых бинарников. / Guarded deferred Windows `cmd.exe` self-delete in `execute_uninstall_with_roots` with `clean_exe.exists()`.
+- **Надёжность тестов и Windows CI (`mq-cli`, `mq-net`, `mq-sched`, `.github/workflows/ci.yml`):**
+  - Исправлена нормализация путей в тесте `equivalence_and_stress` для Windows 8.3 short paths (`RUNNER~1`) и verbatim-префиксов (`\\?\`) с использованием `canonicalize_clean`. / Fixed Windows 8.3 short-path and verbatim `\\?\` normalization in `equivalence_and_stress` tests.
+  - Увеличен запас таймеров в тестах конкурентной дедупликации (`mq-net`), отмены задач/DAG и watchdog (`mq-sched`) с учётом квантования таймеров Windows (`15.6ms`); включён `--no-fail-fast` для Windows-тестов в CI. / Hardened timer margins in `mq-net` and `mq-sched` tests for Windows timer quantization and enabled `--no-fail-fast` in Windows CI tests.
+
+---
+
 ## [v2.7.4] — 2026-11-22 ("Rust 1.100 Clippy & Modrinth Cache Reliability")
 
 ### Исправлено и улучшено / Fixed and improved

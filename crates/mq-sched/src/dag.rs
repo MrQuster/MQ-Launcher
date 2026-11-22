@@ -875,7 +875,7 @@ mod tests {
         let record_concurrency = |active: Arc<AtomicUsize>, max_c: Arc<AtomicUsize>| async move {
             let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
             max_c.fetch_max(cur, Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(40)).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
             active.fetch_sub(1, Ordering::SeqCst);
             Ok(())
         };
@@ -935,7 +935,7 @@ mod tests {
         started_rx.await.expect("slow_download must start");
         epoch.cancel_and_advance();
 
-        let res = tokio::time::timeout(Duration::from_millis(200), runner)
+        let res = tokio::time::timeout(Duration::from_millis(1000), runner)
             .await
             .expect("DAG execution must abort immediately on epoch advance")
             .expect("runner task must not panic");

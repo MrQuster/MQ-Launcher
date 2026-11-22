@@ -139,19 +139,42 @@ async fn test_multithreading_equivalence_single_vs_multi_threaded() {
     let cmd2 = build_launch_command(&ctx2).unwrap();
 
     let normalize = |args: &[String], root: &std::path::Path, inst: &str| -> Vec<String> {
-        let canon = root
-            .canonicalize()
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_owned));
-        let raw = root.to_str().unwrap();
+        let mut raw_prefixes = Vec::new();
+        if let Ok(canon) = root.canonicalize() {
+            if let Some(s) = canon.to_str() {
+                raw_prefixes.push(s.to_owned());
+            }
+        }
+        if let Ok(clean) = mq_core::fs_util::canonicalize_clean(root) {
+            if let Some(s) = clean.to_str() {
+                raw_prefixes.push(s.to_owned());
+            }
+        }
+        if let Some(raw) = root.to_str() {
+            raw_prefixes.push(raw.to_owned());
+        }
+
+        let mut prefixes = Vec::new();
+        for p in raw_prefixes {
+            if p.is_empty() {
+                continue;
+            }
+            let fwd = p.replace('\\', "/");
+            let bwd = p.replace('/', "\\");
+            prefixes.push(p);
+            prefixes.push(fwd);
+            prefixes.push(bwd);
+        }
+        prefixes.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        prefixes.dedup();
+
         args.iter()
             .map(|s| {
-                let s = if let Some(ref c) = canon {
-                    s.replace(c.as_str(), "<ROOT>")
-                } else {
-                    s.clone()
-                };
-                s.replace(raw, "<ROOT>").replace(inst, "<INST>")
+                let mut out = s.clone();
+                for prefix in &prefixes {
+                    out = out.replace(prefix.as_str(), "<ROOT>");
+                }
+                out.replace(inst, "<INST>")
             })
             .collect()
     };

@@ -1010,7 +1010,7 @@ pub fn execute_uninstall_with_roots(
         if !outcome.spawned_external_uninstaller {
             if let Some(exe) = current_exe {
                 let clean_exe = strip_windows_verbatim_prefix(exe);
-                if !is_dev_or_system_exe(&clean_exe) {
+                if clean_exe.exists() && !is_dev_or_system_exe(&clean_exe) {
                     use std::os::windows::process::CommandExt;
                     let exe_quoted = clean_exe.to_string_lossy().replace('"', "\"\"");
                     let _ = Command::new("cmd.exe")

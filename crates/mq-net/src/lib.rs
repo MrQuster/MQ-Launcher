@@ -387,7 +387,7 @@ mod tests {
                     // Stream in two halves with a brief pause so all 10 callers overlap in flight.
                     let mid = data.len() / 2;
                     let _ = socket.write_all(&data[..mid]).await;
-                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    tokio::time::sleep(Duration::from_millis(150)).await;
                     let _ = socket.write_all(&data[mid..]).await;
                     let _ = socket.shutdown().await;
                 });

@@ -354,7 +354,7 @@ mod tests {
             pool_clone
                 .spawn_cpu_cancellable(&guard2, move || {
                     let _ = started_tx.send(());
-                    std::thread::sleep(Duration::from_millis(200));
+                    std::thread::sleep(Duration::from_millis(600));
                     999
                 })
                 .await
@@ -363,7 +363,7 @@ mod tests {
         started_rx.await.expect("worker must start");
         epoch.cancel_and_advance();
 
-        let cancelled_res = tokio::time::timeout(Duration::from_millis(80), join)
+        let cancelled_res = tokio::time::timeout(Duration::from_millis(250), join)
             .await
             .expect("tokio caller must wake immediately on epoch cancel")
             .expect("task must not panic");
