@@ -1378,7 +1378,29 @@ fn now_unix_ms() -> u64 {
 }
 
 fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    mq_core::platform::atomic_write(path, bytes)
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("cache");
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_file_name(format!("{file_name}.tmp.{}.{seq}", std::process::id()));
+
+    if let Err(err) = fs::write(&tmp_path, bytes) {
+        let _ = mq_core::fs_util::remove_file_with_retry(&tmp_path);
+        return Err(err);
+    }
+
+    if let Err(err) = mq_core::fs_util::rename_with_retry(&tmp_path, path) {
+        let _ = mq_core::fs_util::remove_file_with_retry(&tmp_path);
+        return Err(err);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2290,7 +2312,7 @@ mod tests {
         let client = ModrinthClient::with_base_url(&base_url)
             .expect("client")
             .with_retry_policy(3, Duration::from_millis(10))
-            .with_disk_cache(tmp.path(), Duration::from_millis(500));
+            .with_disk_cache(tmp.path(), Duration::from_millis(1000));
 
         // 1st call: experiences 429 -> 503 -> 200 OK and writes to disk cache with ETag.
         let hit1 = client
@@ -2309,7 +2331,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
         // Wait for TTL to expire, then 3rd call sends If-None-Match and receives 304 Not Modified!
-        tokio::time::sleep(Duration::from_millis(550)).await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         let hit3 = client
             .get_project("sodium")
             .await

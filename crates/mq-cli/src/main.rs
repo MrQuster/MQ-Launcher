@@ -694,12 +694,8 @@ fn should_attach_parent_console(args: &[std::ffi::OsString]) -> bool {
     let Some(first_arg) = args.get(1) else {
         return false;
     };
-    if args.len() == 2
-        && (first_arg == "--after-update" || is_mrpack_arg(std::path::Path::new(first_arg)))
-    {
-        return false;
-    }
-    true
+    !(args.len() == 2
+        && (first_arg == "--after-update" || is_mrpack_arg(std::path::Path::new(first_arg))))
 }
 
 #[cfg(target_os = "windows")]

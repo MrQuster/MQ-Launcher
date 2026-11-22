@@ -5,6 +5,16 @@
 
 ---
 
+## [v2.7.4] — 2026-11-22 ("Rust 1.100 Clippy & Modrinth Cache Reliability")
+
+### Исправлено и улучшено / Fixed and improved
+- **Совместимость с Rust 1.100 Clippy (Windows и Linux) / Rust 1.100 Clippy Compatibility (`mq-launch`, `mq-cli`, `mq-mods`):**
+  - Устранены предупреждения `clippy::needless_bool` в `mq-launch/src/java.rs` (`is_executable_file` на ветках `unix`/`not(unix)`), `mq-cli/src/main.rs` (`should_attach_parent_console`) и `mq-mods/src/scanner.rs` (`is_dependency_satisfied`) для чистой сборки с `-D warnings` на Windows и Linux. / Eliminated Rust 1.100 `clippy::needless_bool` lints across `java.rs`, `main.rs`, and `scanner.rs` so both Windows and Linux CI pass cleanly with `-D warnings`.
+- **Дисковый кэш Modrinth API / Modrinth Disk Cache Performance & Reliability (`mq-mods`):**
+  - Запись временных файлов дискового HTTP-кэша в `mq-mods/src/modrinth.rs` переведена на уникальные соседние `.tmp.<pid>.<seq>` файлы с атомарным переименованием через `rename_with_retry` без блокирующего `fsync` (`sync_all`), что ускоряет кэширование и устраняет таймауты на нагруженных дисках CI; увеличен запас TTL в тесте кэширования с ETag. / Updated Modrinth HTTP disk cache writes to atomic sibling temp-file renames via `rename_with_retry` without blocking `fsync`, eliminating stalls on loaded disks and hardening the ETag cache TTL test.
+
+---
+
 ## [v2.7.3] — 2026-11-21 ("Full Windows Compatibility & Reliability")
 
 ### Исправлено и улучшено / Fixed and improved

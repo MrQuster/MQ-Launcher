@@ -358,12 +358,8 @@ fn is_dependency_satisfied(dep: &str, satisfied_ids: &BTreeSet<String>) -> bool 
     {
         return true;
     }
-    if (lower.starts_with("quilt_") || lower.starts_with("quilt-"))
+    (lower.starts_with("quilt_") || lower.starts_with("quilt-"))
         && (satisfied_ids.contains("quilted_fabric_api") || satisfied_ids.contains("qsl"))
-    {
-        return true;
-    }
-    false
 }
 
 fn is_filename_stop_token(
