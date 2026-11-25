@@ -1,27 +1,27 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo.svg">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-  <img alt="MQ Launcher" src="docs/assets/logo.svg" width="104" height="104">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/m3/hero-en-dark.svg">
+  <img src="docs/assets/m3/hero-en-light.svg" width="100%" alt="MQ Launcher — fast modular Minecraft launcher in Rust">
 </picture>
 
-# MQ Launcher
+<br/>
 
-Cross-platform Minecraft launcher written in Rust with isolated instances, batch mod installation, and live UI customization.
-
-[![Release](https://img.shields.io/github/v/release/MrQuster/mq?style=flat-square&color=4C9A82&labelColor=1F242D)](https://github.com/MrQuster/mq/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/MrQuster/mq/ci.yml?style=flat-square&color=3A4659&labelColor=1F242D&label=CI)](https://github.com/MrQuster/mq/actions/workflows/ci.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-3A4659?style=flat-square&labelColor=1F242D)](#installation)
-[![Rust](https://img.shields.io/badge/rust-1.80%2B-3A4659?style=flat-square&labelColor=1F242D)](#building-from-source)
+[![Release](https://img.shields.io/github/v/release/MrQuster/mq?style=for-the-badge&color=425E91&labelColor=1E2025)](https://github.com/MrQuster/mq/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/MrQuster/mq/ci.yml?style=for-the-badge&color=3E4759&labelColor=1E2025&label=CI)](https://github.com/MrQuster/mq/actions/workflows/ci.yml)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-3E4759?style=for-the-badge&labelColor=1E2025)](#installation)
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-3E4759?style=for-the-badge&labelColor=1E2025)](#building-from-source)
 
 [Русский](README.md) · **English**
 
 [Features](#features) · [Screenshots](#screenshots) · [Installation](#installation) · [Building from Source](#building-from-source) · [Security](#security--privacy)
 
-</div>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/m3/wave-dark.svg">
+  <img src="docs/assets/m3/wave-light.svg" width="100%" alt="">
+</picture>
 
----
+</div>
 
 ## Features
 
