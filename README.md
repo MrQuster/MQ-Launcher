@@ -7,8 +7,8 @@
 
 <br/>
 
-[![Release](https://img.shields.io/github/v/release/MrQuster/mq?style=for-the-badge&color=425E91&labelColor=1E2025)](https://github.com/MrQuster/mq/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/MrQuster/mq/ci.yml?style=for-the-badge&color=3E4759&labelColor=1E2025&label=CI)](https://github.com/MrQuster/mq/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/MrQuster/MQ-Launcher?style=for-the-badge&color=425E91&labelColor=1E2025)](https://github.com/MrQuster/MQ-Launcher/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/MrQuster/MQ-Launcher/ci.yml?style=for-the-badge&color=3E4759&labelColor=1E2025&label=CI)](https://github.com/MrQuster/MQ-Launcher/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-3E4759?style=for-the-badge&labelColor=1E2025)](#установка)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-3E4759?style=for-the-badge&labelColor=1E2025)](#сборка-из-исходников)
 
@@ -55,7 +55,7 @@
 
 ## Установка
 
-Готовые сборки и контрольные суммы (`SHA256SUMS`, подпись Minisign `SHA256SUMS.minisig`) публикуются на странице [GitHub Releases](https://github.com/MrQuster/mq/releases).
+Готовые сборки и контрольные суммы (`SHA256SUMS`, подпись Minisign `SHA256SUMS.minisig`) публикуются на странице [GitHub Releases](https://github.com/MrQuster/MQ-Launcher/releases).
 
 ### Windows (x64)
 
@@ -67,7 +67,7 @@
 Установщик загружает релизный архив, проверяет SHA-256 и регистрирует приложение в меню:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrQuster/mq/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MrQuster/MQ-Launcher/main/install.sh | bash
 ```
 
 Также доступны архив `mq-linux-x86_64.tar.gz`, отдельный бинарный файл `mq-linux-x86_64` и пакет для Arch Linux в `packaging/PKGBUILD`.
@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/MrQuster/mq/main/install.sh | bash
 
 ```bash
 # 1. Клонирование репозитория
-git clone https://github.com/MrQuster/mq.git
+git clone https://github.com/MrQuster/MQ-Launcher.git
 cd mq
 
 # 2. Запуск GUI из исходников
