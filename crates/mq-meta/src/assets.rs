@@ -167,6 +167,11 @@ pub fn parse_asset_index(index_id: &str, json: &str) -> MqResult<AssetIndex> {
             "asset index id must not be empty".to_string(),
         ));
     }
+    if index_id.contains("..") || index_id.contains('/') || index_id.contains('\\') {
+        return Err(MqError::Metadata(format!(
+            "invalid asset index id '{index_id}': path traversal or separators not allowed"
+        )));
+    }
 
     let raw: RawAssetIndex = serde_json::from_str(json)?;
     let mut objects = Vec::with_capacity(raw.objects.len());
@@ -196,8 +201,19 @@ pub fn asset_index_file_path(assets_dir: &Path, index_id: &str) -> PathBuf {
 
 /// Saves raw asset index JSON bytes byte-for-byte to `<indexes_dir>/<id>.json` atomically.
 pub fn save_asset_index_raw(indexes_dir: &Path, id: &str, raw_json: &str) -> MqResult<PathBuf> {
+    let clean_id = id.trim();
+    if clean_id.is_empty() {
+        return Err(MqError::Metadata(
+            "asset index id must not be empty".to_string(),
+        ));
+    }
+    if clean_id.contains("..") || clean_id.contains('/') || clean_id.contains('\\') {
+        return Err(MqError::Metadata(format!(
+            "invalid asset index id '{id}': path traversal or separators not allowed"
+        )));
+    }
     fs::create_dir_all(indexes_dir)?;
-    let path = indexes_dir.join(format!("{}.json", id.trim()));
+    let path = indexes_dir.join(format!("{clean_id}.json"));
     mq_core::platform::atomic_write(&path, raw_json.as_bytes())?;
     Ok(path)
 }
@@ -248,6 +264,14 @@ pub async fn fetch_asset_index(
 /// Parses the optional `logging.client` configuration from a Mojang `version.json` document.
 pub fn parse_client_logging_config(version_json: &str) -> MqResult<Option<ClientLoggingConfig>> {
     let root: RawLoggingRoot = serde_json::from_str(version_json)?;
+    if let Some(client) = root.logging.as_ref().and_then(|l| l.client.as_ref()) {
+        let fid = &client.file.id;
+        if fid.contains("..") || fid.contains('/') || fid.contains('\\') {
+            return Err(MqError::Metadata(format!(
+                "invalid logging file id '{fid}': path traversal or separators not allowed"
+            )));
+        }
+    }
     Ok(root.logging.and_then(|l| l.client))
 }
 

@@ -509,6 +509,31 @@ pub fn open_url(url: &str) -> io::Result<()> {
         ));
     }
 
+    if trimmed.starts_with('-')
+        || trimmed.contains('\0')
+        || trimmed.contains('\r')
+        || trimmed.contains('\n')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "URL contains disallowed control characters or leading flag option",
+        ));
+    }
+
+    let is_valid_scheme = trimmed
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+        || trimmed
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+
+    if !is_valid_scheme {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only http:// and https:// URLs are allowed",
+        ));
+    }
+
     #[cfg(target_os = "windows")]
     {
         if win32_platform::open_shell_target(trimmed) {
@@ -707,5 +732,15 @@ mod tests {
             assert!(!is_wrapper_available("mangohud"));
             assert!(!is_wrapper_available("prime-run"));
         }
+    }
+
+    #[test]
+    fn test_open_url_validation() {
+        assert!(open_url("").is_err());
+        assert!(open_url("-flag").is_err());
+        assert!(open_url("file:///etc/passwd").is_err());
+        assert!(open_url("javascript:alert(1)").is_err());
+        assert!(open_url("https://example.com\0bad").is_err());
+        assert!(open_url("https://example.com\r\nbad").is_err());
     }
 }

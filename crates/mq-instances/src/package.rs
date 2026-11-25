@@ -275,6 +275,8 @@ struct MmcComponent {
     uid: String,
     #[serde(default)]
     version: String,
+    #[serde(default, rename = "cachedVersion")]
+    cached_version: Option<String>,
 }
 
 fn parse_mmc_pack(json_str: &str) -> (Option<String>, ModLoaderKind, Option<String>) {
@@ -287,7 +289,13 @@ fn parse_mmc_pack(json_str: &str) -> (Option<String>, ModLoaderKind, Option<Stri
 
     for comp in parsed.components {
         let uid = comp.uid.trim();
-        let ver = comp.version.trim();
+        let ver = if !comp.version.trim().is_empty() {
+            comp.version.trim()
+        } else if let Some(ref cv) = comp.cached_version {
+            cv.trim()
+        } else {
+            ""
+        };
         if ver.is_empty() {
             continue;
         }
@@ -303,7 +311,7 @@ fn parse_mmc_pack(json_str: &str) -> (Option<String>, ModLoaderKind, Option<Stri
                 loader = ModLoaderKind::Quilt;
                 loader_version = Some(ver.to_owned());
             }
-            "net.neoforged" => {
+            "net.neoforged" | "net.neoforged.neoforge" => {
                 loader = ModLoaderKind::NeoForge;
                 loader_version = Some(ver.to_owned());
             }
@@ -530,323 +538,335 @@ pub fn import_instance_archive_detailed(
     };
 
     fs::create_dir_all(&dest_dir)?;
-    for sub in INSTANCE_SUBDIRS {
-        fs::create_dir_all(dest_dir.join(sub))?;
-    }
 
-    // 3. Stream-extract archive entries according to the detected format.
-    let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
-    let mut total_written = 0u64;
+    let perform_import = || -> MqResult<ImportedInstanceOutcome> {
+        for sub in INSTANCE_SUBDIRS {
+            fs::create_dir_all(dest_dir.join(sub))?;
+        }
 
-    let extract_pass = |archive: &mut ZipArchive<File>,
-                        total_written: &mut u64,
-                        buf: &mut [u8],
-                        map_rel: &dyn Fn(&str) -> Option<String>|
-     -> MqResult<()> {
-        for i in 0..archive.len() {
-            let mut entry = archive
-                .by_index(i)
-                .map_err(|e| MqError::Archive(format!("corrupt entry in ZIP: {e}")))?;
+        // 3. Stream-extract archive entries according to the detected format.
+        let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+        let mut total_written = 0u64;
 
-            let raw_name = entry.name().to_owned();
-            let unix_mode = entry.unix_mode();
-            let comp_size = entry.compressed_size();
-            if entry.is_symlink() {
-                return Err(MqError::ZipSlip { entry: raw_name });
-            }
+        let extract_pass = |archive: &mut ZipArchive<File>,
+                            total_written: &mut u64,
+                            buf: &mut [u8],
+                            map_rel: &dyn Fn(&str) -> Option<String>|
+         -> MqResult<()> {
+            for i in 0..archive.len() {
+                let mut entry = archive
+                    .by_index(i)
+                    .map_err(|e| MqError::Archive(format!("corrupt entry in ZIP: {e}")))?;
 
-            let norm = raw_name.replace('\\', "/");
-            let eff = effective_rel(&norm);
-            if eff.is_empty() {
-                continue;
-            }
-
-            let Some(mapped_rel) = map_rel(&eff) else {
-                continue;
-            };
-            let mapped_trimmed = mapped_rel.trim_matches('/');
-            if mapped_trimmed.is_empty() {
-                continue;
-            }
-
-            let out_path = validate_entry_path_strict(&dest_dir, mapped_trimmed, unix_mode)?;
-
-            if entry.is_dir() || norm.ends_with('/') {
-                fs::create_dir_all(&out_path)?;
-                continue;
-            }
-
-            if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            if out_path.exists() {
-                let _ = remove_file_with_retry(&out_path);
-            }
-
-            let mut out_file = File::create(&out_path)?;
-            let mut entry_written = 0u64;
-            loop {
-                let n = entry.read(buf)?;
-                if n == 0 {
-                    break;
+                let raw_name = entry.name().to_owned();
+                let unix_mode = entry.unix_mode();
+                let comp_size = entry.compressed_size();
+                if entry.is_symlink() {
+                    return Err(MqError::ZipSlip { entry: raw_name });
                 }
-                entry_written = entry_written.saturating_add(n as u64);
-                *total_written = total_written.saturating_add(n as u64);
 
-                if entry_written > MAX_IMPORT_ENTRY_BYTES || *total_written > MAX_IMPORT_TOTAL_BYTES
-                {
-                    drop(out_file);
-                    let _ = remove_dir_all_with_retry(&dest_dir);
-                    return Err(MqError::Archive(format!(
-                        "zip-bomb detected while extracting '{raw_name}': size limit exceeded"
-                    )));
+                let norm = raw_name.replace('\\', "/");
+                let eff = effective_rel(&norm);
+                if eff.is_empty() {
+                    continue;
                 }
-                if entry_written >= MIN_BYTES_FOR_RATIO_CHECK
-                    && (comp_size == 0
-                        || (entry_written / comp_size) > MAX_IMPORT_COMPRESSION_RATIO)
-                {
-                    drop(out_file);
-                    let _ = remove_dir_all_with_retry(&dest_dir);
-                    return Err(MqError::Archive(format!(
+
+                let Some(mapped_rel) = map_rel(&eff) else {
+                    continue;
+                };
+                let mapped_trimmed = mapped_rel.trim_matches('/');
+                if mapped_trimmed.is_empty() {
+                    continue;
+                }
+
+                let out_path = validate_entry_path_strict(&dest_dir, mapped_trimmed, unix_mode)?;
+
+                if entry.is_dir() || norm.ends_with('/') {
+                    fs::create_dir_all(&out_path)?;
+                    continue;
+                }
+
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if out_path.exists() {
+                    let _ = remove_file_with_retry(&out_path);
+                }
+
+                let mut out_file = File::create(&out_path)?;
+                let mut entry_written = 0u64;
+                loop {
+                    let n = entry.read(buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    entry_written = entry_written.saturating_add(n as u64);
+                    *total_written = total_written.saturating_add(n as u64);
+
+                    if entry_written > MAX_IMPORT_ENTRY_BYTES
+                        || *total_written > MAX_IMPORT_TOTAL_BYTES
+                    {
+                        drop(out_file);
+                        let _ = remove_dir_all_with_retry(&dest_dir);
+                        return Err(MqError::Archive(format!(
+                            "zip-bomb detected while extracting '{raw_name}': size limit exceeded"
+                        )));
+                    }
+                    if entry_written >= MIN_BYTES_FOR_RATIO_CHECK
+                        && (comp_size == 0
+                            || (entry_written / comp_size) > MAX_IMPORT_COMPRESSION_RATIO)
+                    {
+                        drop(out_file);
+                        let _ = remove_dir_all_with_retry(&dest_dir);
+                        return Err(MqError::Archive(format!(
                         "zip-bomb detected while extracting '{raw_name}': compression ratio limit exceeded"
                     )));
-                }
+                    }
 
-                out_file.write_all(&buf[..n])?;
+                    out_file.write_all(&buf[..n])?;
+                }
+                out_file.flush()?;
             }
-            out_file.flush()?;
-        }
-        Ok(())
-    };
-
-    match format {
-        ImportedArchiveFormat::ModrinthMrpack => {
-            // Pass 1: modrinth.index.json + overrides/
-            extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
-                if eff.eq_ignore_ascii_case("modrinth.index.json") {
-                    Some("modrinth.index.json".to_owned())
-                } else {
-                    eff.strip_prefix("overrides/").map(str::to_owned)
-                }
-            })?;
-            // Pass 2: client-overrides/ overlaid on top of overrides/
-            extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
-                eff.strip_prefix("client-overrides/").map(str::to_owned)
-            })?;
-        }
-        ImportedArchiveFormat::CurseForgeZip => {
-            // First extract manifest.json to inspect custom `overrides` folder name if any.
-            extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
-                eff.eq_ignore_ascii_case("manifest.json")
-                    .then(|| "manifest.json".to_owned())
-            })?;
-            let cf_overrides_prefix = fs::read_to_string(dest_dir.join("manifest.json"))
-                .ok()
-                .and_then(|s| serde_json::from_str::<CfMiniManifest>(&s).ok())
-                .and_then(|m| m.overrides)
-                .unwrap_or_else(|| "overrides".to_owned());
-            let clean_pref = format!(
-                "{}/",
-                cf_overrides_prefix.replace('\\', "/").trim_matches('/')
-            );
-            extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
-                eff.strip_prefix(clean_pref.as_str()).map(str::to_owned)
-            })?;
-        }
-        ImportedArchiveFormat::MultiMcPrism => {
-            // Relocate `.minecraft/...` or `minecraft/...` directly into `dest_dir/...`
-            extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
-                if let Some(stripped) = eff.strip_prefix(".minecraft/") {
-                    Some(stripped.to_owned())
-                } else if let Some(stripped) = eff.strip_prefix("minecraft/") {
-                    Some(stripped.to_owned())
-                } else {
-                    Some(eff.to_owned())
-                }
-            })?;
-        }
-        ImportedArchiveFormat::MqNative => {
-            extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
-                Some(eff.to_owned())
-            })?;
-        }
-    }
-
-    // 4. Sanitize any dangerous MultiMC / Prism `instance.cfg` hook commands in all formats.
-    let mut ignored_dangerous_hooks = Vec::new();
-    let mut parsed_mmc_cfg: Option<SanitizedMmcCfg> = None;
-
-    let mmc_cfg_path = dest_dir.join("instance.cfg");
-    if mmc_cfg_path.is_file() {
-        if let Ok(cfg_content) = fs::read_to_string(&mmc_cfg_path) {
-            let res = sanitize_and_parse_instance_cfg(&cfg_content);
-            ignored_dangerous_hooks.extend(res.ignored_hooks.iter().cloned());
-            let _ = atomic_write(&mmc_cfg_path, res.sanitized_content.as_bytes());
-            parsed_mmc_cfg = Some(res);
-        }
-    }
-
-    // 5. Build or load `InstanceManifest` (`instance.toml`).
-    let manifest_path = dest_dir.join(INSTANCE_MANIFEST_FILE);
-    let manifest = if manifest_path.is_file() {
-        let content = fs::read_to_string(&manifest_path)?;
-        let mut m: InstanceManifest = toml::from_str(&content).map_err(|e| {
-            MqError::Internal(format!("invalid instance.toml in imported archive: {e}"))
-        })?;
-        m.name = target_name.to_string();
-        m.id = slug;
-
-        // Security: strip wrapper_cmd from imported instances to prevent arbitrary code execution
-        if let Some(cmd) = m.wrapper_cmd.take() {
-            tracing::warn!(
-                "[SECURITY] Stripped wrapper_cmd '{cmd}' from imported instance '{}' to prevent arbitrary execution",
-                m.name
-            );
-            ignored_dangerous_hooks.push(format!("wrapper_cmd={cmd}"));
-        }
-
-        m.save_to_dir(&dest_dir)?;
-        m
-    } else {
-        let mut display_name = target_name.to_owned();
-        let mut mc_version = "1.21.1".to_owned();
-        let mut loader = ModLoaderKind::Vanilla;
-        let mut loader_version = None;
-        let mut modpack_source = None;
+            Ok(())
+        };
 
         match format {
             ImportedArchiveFormat::ModrinthMrpack => {
-                if let Ok(raw) = fs::read_to_string(dest_dir.join("modrinth.index.json")) {
-                    if let Ok(idx) = serde_json::from_str::<MrpackMiniIndex>(&raw) {
-                        if override_name.is_none() && !idx.name.trim().is_empty() {
-                            display_name = idx.name.trim().to_owned();
-                        }
-                        if let Some(mc) = idx.dependencies.get("minecraft") {
-                            mc_version = mc.clone();
-                        }
-                        if let Some(v) = idx
-                            .dependencies
-                            .get("fabric-loader")
-                            .or_else(|| idx.dependencies.get("fabric"))
-                        {
-                            loader = ModLoaderKind::Fabric;
-                            loader_version = Some(v.clone());
-                        } else if let Some(v) = idx
-                            .dependencies
-                            .get("quilt-loader")
-                            .or_else(|| idx.dependencies.get("quilt"))
-                        {
-                            loader = ModLoaderKind::Quilt;
-                            loader_version = Some(v.clone());
-                        } else if let Some(v) = idx
-                            .dependencies
-                            .get("neoforge")
-                            .or_else(|| idx.dependencies.get("neo-forge"))
-                        {
-                            loader = ModLoaderKind::NeoForge;
-                            loader_version = Some(v.clone());
-                        } else if let Some(v) = idx.dependencies.get("forge") {
-                            loader = ModLoaderKind::Forge;
-                            loader_version = Some(v.clone());
-                        }
-                        modpack_source = Some(crate::manifest::ModpackSourceMeta {
-                            source: "modrinth".to_string(),
-                            project_id: idx.name.clone(),
-                            version_id: String::new(),
-                            version_name: idx.name.clone(),
-                        });
+                // Pass 1: modrinth.index.json + overrides/
+                extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
+                    if eff.eq_ignore_ascii_case("modrinth.index.json") {
+                        Some("modrinth.index.json".to_owned())
+                    } else {
+                        eff.strip_prefix("overrides/").map(str::to_owned)
                     }
-                }
+                })?;
+                // Pass 2: client-overrides/ overlaid on top of overrides/
+                extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
+                    eff.strip_prefix("client-overrides/").map(str::to_owned)
+                })?;
             }
             ImportedArchiveFormat::CurseForgeZip => {
-                if let Ok(raw) = fs::read_to_string(dest_dir.join("manifest.json")) {
-                    if let Ok(cf) = serde_json::from_str::<CfMiniManifest>(&raw) {
-                        if override_name.is_none() && !cf.name.trim().is_empty() {
-                            display_name = cf.name.trim().to_owned();
-                        }
-                        if !cf.minecraft.version.trim().is_empty() {
-                            mc_version = cf.minecraft.version.trim().to_owned();
-                        }
-                        for l in &cf.minecraft.mod_loaders {
-                            let lower = l.id.to_ascii_lowercase();
-                            if let Some(v) = lower.strip_prefix("fabric-") {
-                                loader = ModLoaderKind::Fabric;
-                                loader_version = Some(v.to_owned());
-                                break;
-                            } else if let Some(v) = lower.strip_prefix("quilt-") {
-                                loader = ModLoaderKind::Quilt;
-                                loader_version = Some(v.to_owned());
-                                break;
-                            } else if let Some(v) = lower.strip_prefix("neoforge-") {
-                                loader = ModLoaderKind::NeoForge;
-                                loader_version = Some(v.to_owned());
-                                break;
-                            } else if let Some(v) = lower.strip_prefix("forge-") {
-                                loader = ModLoaderKind::Forge;
-                                loader_version = Some(v.to_owned());
-                                break;
-                            }
-                        }
-                        modpack_source = Some(crate::manifest::ModpackSourceMeta {
-                            source: "curseforge".to_string(),
-                            project_id: cf.name.clone(),
-                            version_id: String::new(),
-                            version_name: cf.name.clone(),
-                        });
-                    }
-                }
+                // First extract manifest.json to inspect custom `overrides` folder name if any.
+                extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
+                    eff.eq_ignore_ascii_case("manifest.json")
+                        .then(|| "manifest.json".to_owned())
+                })?;
+                let cf_overrides_prefix = fs::read_to_string(dest_dir.join("manifest.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<CfMiniManifest>(&s).ok())
+                    .and_then(|m| m.overrides)
+                    .unwrap_or_else(|| "overrides".to_owned());
+                let clean_pref = format!(
+                    "{}/",
+                    cf_overrides_prefix.replace('\\', "/").trim_matches('/')
+                );
+                extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
+                    eff.strip_prefix(clean_pref.as_str()).map(str::to_owned)
+                })?;
             }
             ImportedArchiveFormat::MultiMcPrism => {
-                if let Some(ref cfg) = parsed_mmc_cfg {
-                    if override_name.is_none() {
-                        if let Some(ref n) = cfg.name {
-                            display_name = n.clone();
+                // Relocate `.minecraft/...` or `minecraft/...` directly into `dest_dir/...`
+                extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
+                    if let Some(stripped) = eff.strip_prefix(".minecraft/") {
+                        Some(stripped.to_owned())
+                    } else if let Some(stripped) = eff.strip_prefix("minecraft/") {
+                        Some(stripped.to_owned())
+                    } else {
+                        Some(eff.to_owned())
+                    }
+                })?;
+            }
+            ImportedArchiveFormat::MqNative => {
+                extract_pass(&mut archive, &mut total_written, &mut buf, &|eff| {
+                    Some(eff.to_owned())
+                })?;
+            }
+        }
+
+        // 4. Sanitize any dangerous MultiMC / Prism `instance.cfg` hook commands in all formats.
+        let mut ignored_dangerous_hooks = Vec::new();
+        let mut parsed_mmc_cfg: Option<SanitizedMmcCfg> = None;
+
+        let mmc_cfg_path = dest_dir.join("instance.cfg");
+        if mmc_cfg_path.is_file() {
+            if let Ok(cfg_content) = fs::read_to_string(&mmc_cfg_path) {
+                let res = sanitize_and_parse_instance_cfg(&cfg_content);
+                ignored_dangerous_hooks.extend(res.ignored_hooks.iter().cloned());
+                let _ = atomic_write(&mmc_cfg_path, res.sanitized_content.as_bytes());
+                parsed_mmc_cfg = Some(res);
+            }
+        }
+
+        // 5. Build or load `InstanceManifest` (`instance.toml`).
+        let manifest_path = dest_dir.join(INSTANCE_MANIFEST_FILE);
+        let manifest = if manifest_path.is_file() {
+            let content = fs::read_to_string(&manifest_path)?;
+            let mut m: InstanceManifest = toml::from_str(&content).map_err(|e| {
+                MqError::Internal(format!("invalid instance.toml in imported archive: {e}"))
+            })?;
+            m.name = target_name.to_string();
+            m.id = slug;
+
+            // Security: strip wrapper_cmd from imported instances to prevent arbitrary code execution
+            if let Some(cmd) = m.wrapper_cmd.take() {
+                tracing::warn!(
+                "[SECURITY] Stripped wrapper_cmd '{cmd}' from imported instance '{}' to prevent arbitrary execution",
+                m.name
+            );
+                ignored_dangerous_hooks.push(format!("wrapper_cmd={cmd}"));
+            }
+
+            m.save_to_dir(&dest_dir)?;
+            m
+        } else {
+            let mut display_name = target_name.to_owned();
+            let mut mc_version = "1.21.1".to_owned();
+            let mut loader = ModLoaderKind::Vanilla;
+            let mut loader_version = None;
+            let mut modpack_source = None;
+
+            match format {
+                ImportedArchiveFormat::ModrinthMrpack => {
+                    if let Ok(raw) = fs::read_to_string(dest_dir.join("modrinth.index.json")) {
+                        if let Ok(idx) = serde_json::from_str::<MrpackMiniIndex>(&raw) {
+                            if override_name.is_none() && !idx.name.trim().is_empty() {
+                                display_name = idx.name.trim().to_owned();
+                            }
+                            if let Some(mc) = idx.dependencies.get("minecraft") {
+                                mc_version = mc.clone();
+                            }
+                            if let Some(v) = idx
+                                .dependencies
+                                .get("fabric-loader")
+                                .or_else(|| idx.dependencies.get("fabric"))
+                            {
+                                loader = ModLoaderKind::Fabric;
+                                loader_version = Some(v.clone());
+                            } else if let Some(v) = idx
+                                .dependencies
+                                .get("quilt-loader")
+                                .or_else(|| idx.dependencies.get("quilt"))
+                            {
+                                loader = ModLoaderKind::Quilt;
+                                loader_version = Some(v.clone());
+                            } else if let Some(v) = idx
+                                .dependencies
+                                .get("neoforge")
+                                .or_else(|| idx.dependencies.get("neo-forge"))
+                            {
+                                loader = ModLoaderKind::NeoForge;
+                                loader_version = Some(v.clone());
+                            } else if let Some(v) = idx.dependencies.get("forge") {
+                                loader = ModLoaderKind::Forge;
+                                loader_version = Some(v.clone());
+                            }
+                            modpack_source = Some(crate::manifest::ModpackSourceMeta {
+                                source: "modrinth".to_string(),
+                                project_id: idx.name.clone(),
+                                version_id: String::new(),
+                                version_name: idx.name.clone(),
+                            });
                         }
                     }
                 }
-                if let Ok(raw) = fs::read_to_string(dest_dir.join("mmc-pack.json")) {
-                    let (mmc_mc, mmc_loader, mmc_lver) = parse_mmc_pack(&raw);
-                    if let Some(mc) = mmc_mc {
-                        mc_version = mc;
+                ImportedArchiveFormat::CurseForgeZip => {
+                    if let Ok(raw) = fs::read_to_string(dest_dir.join("manifest.json")) {
+                        if let Ok(cf) = serde_json::from_str::<CfMiniManifest>(&raw) {
+                            if override_name.is_none() && !cf.name.trim().is_empty() {
+                                display_name = cf.name.trim().to_owned();
+                            }
+                            if !cf.minecraft.version.trim().is_empty() {
+                                mc_version = cf.minecraft.version.trim().to_owned();
+                            }
+                            for l in &cf.minecraft.mod_loaders {
+                                let lower = l.id.to_ascii_lowercase();
+                                if let Some(v) = lower.strip_prefix("fabric-") {
+                                    loader = ModLoaderKind::Fabric;
+                                    loader_version = Some(v.to_owned());
+                                    break;
+                                } else if let Some(v) = lower.strip_prefix("quilt-") {
+                                    loader = ModLoaderKind::Quilt;
+                                    loader_version = Some(v.to_owned());
+                                    break;
+                                } else if let Some(v) = lower.strip_prefix("neoforge-") {
+                                    loader = ModLoaderKind::NeoForge;
+                                    loader_version = Some(v.to_owned());
+                                    break;
+                                } else if let Some(v) = lower.strip_prefix("forge-") {
+                                    loader = ModLoaderKind::Forge;
+                                    loader_version = Some(v.to_owned());
+                                    break;
+                                }
+                            }
+                            modpack_source = Some(crate::manifest::ModpackSourceMeta {
+                                source: "curseforge".to_string(),
+                                project_id: cf.name.clone(),
+                                version_id: String::new(),
+                                version_name: cf.name.clone(),
+                            });
+                        }
                     }
-                    loader = mmc_loader;
-                    loader_version = mmc_lver;
                 }
-                modpack_source = Some(crate::manifest::ModpackSourceMeta {
-                    source: "multimc".to_string(),
-                    project_id: display_name.clone(),
-                    version_id: String::new(),
-                    version_name: display_name.clone(),
-                });
+                ImportedArchiveFormat::MultiMcPrism => {
+                    if let Some(ref cfg) = parsed_mmc_cfg {
+                        if override_name.is_none() {
+                            if let Some(ref n) = cfg.name {
+                                display_name = n.clone();
+                            }
+                        }
+                    }
+                    if let Ok(raw) = fs::read_to_string(dest_dir.join("mmc-pack.json")) {
+                        let (mmc_mc, mmc_loader, mmc_lver) = parse_mmc_pack(&raw);
+                        if let Some(mc) = mmc_mc {
+                            mc_version = mc;
+                        }
+                        loader = mmc_loader;
+                        loader_version = mmc_lver;
+                    }
+                    modpack_source = Some(crate::manifest::ModpackSourceMeta {
+                        source: "multimc".to_string(),
+                        project_id: display_name.clone(),
+                        version_id: String::new(),
+                        version_name: display_name.clone(),
+                    });
+                }
+                ImportedArchiveFormat::MqNative => {}
             }
-            ImportedArchiveFormat::MqNative => {}
-        }
 
-        let mut m = InstanceManifest::new(&display_name, mc_version, loader, loader_version);
-        m.id = slug;
-        m.modpack_source = modpack_source;
-        if let Some(cfg) = parsed_mmc_cfg {
-            if let Some(min_mb) = cfg.min_mem_mb {
-                m.memory_min_mb = min_mb;
+            let mut m = InstanceManifest::new(&display_name, mc_version, loader, loader_version);
+            m.id = slug;
+            m.modpack_source = modpack_source;
+            if let Some(cfg) = parsed_mmc_cfg {
+                if let Some(min_mb) = cfg.min_mem_mb {
+                    m.memory_min_mb = min_mb;
+                }
+                if let Some(max_mb) = cfg.max_mem_mb {
+                    m.memory_max_mb = max_mb;
+                }
+                if !cfg.jvm_args.is_empty() {
+                    m.jvm_args = cfg.jvm_args;
+                }
             }
-            if let Some(max_mb) = cfg.max_mem_mb {
-                m.memory_max_mb = max_mb;
-            }
-            if !cfg.jvm_args.is_empty() {
-                m.jvm_args = cfg.jvm_args;
-            }
-        }
-        m.wrapper_cmd = None;
-        m.save_to_dir(&dest_dir)?;
-        m
+            m.wrapper_cmd = None;
+            m.save_to_dir(&dest_dir)?;
+            m
+        };
+
+        Ok(ImportedInstanceOutcome {
+            manifest,
+            format,
+            instance_dir: dest_dir.clone(),
+            ignored_dangerous_hooks,
+        })
     };
 
-    Ok(ImportedInstanceOutcome {
-        manifest,
-        format,
-        instance_dir: dest_dir,
-        ignored_dangerous_hooks,
-    })
+    match perform_import() {
+        Ok(outcome) => Ok(outcome),
+        Err(err) => {
+            let _ = remove_dir_all_with_retry(&dest_dir);
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]

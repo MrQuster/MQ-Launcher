@@ -37,7 +37,10 @@ extern "system" {
 /// Strips Windows verbatim path prefixes (`\\?\C:\...` -> `C:\...`, `\\?\UNC\host\share` -> `\\host\share`).
 /// Safe to call on all platforms and non-verbatim paths.
 pub fn strip_windows_verbatim_prefix(raw: &str) -> String {
-    if raw.len() >= 8 && raw[..8].eq_ignore_ascii_case(r"\\?\UNC\") {
+    if raw
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case(r"\\?\UNC\"))
+    {
         return format!(r"\\{}", &raw[8..]);
     }
     if let Some(rest) = raw.strip_prefix(r"\\?\") {
@@ -63,9 +66,12 @@ pub fn clean_user_path(raw: &str) -> String {
 /// Returns `true` when `target` is an HTTP or HTTPS URL.
 pub fn is_web_url(target: &str) -> bool {
     let trimmed = target.trim();
-    trimmed.len() >= 7
-        && (trimmed[..7].eq_ignore_ascii_case("http://")
-            || (trimmed.len() >= 8 && trimmed[..8].eq_ignore_ascii_case("https://")))
+    trimmed
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+        || trimmed
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
 }
 
 /// Validates and normalizes an open target for Windows `ShellExecuteW` / native fallbacks.
@@ -142,6 +148,46 @@ pub fn encode_powershell_utf16le_base64(script: &str) -> String {
     out
 }
 
+/// Validates an open target on Unix/macOS so non-existent values starting with `'-'` cannot be
+/// interpreted as command-line flags by `xdg-open` / `open`, and prefixes existing relative paths
+/// starting with `'-'` with `./`.
+pub fn prepare_unix_open_target(raw: &OsStr) -> io::Result<std::ffi::OsString> {
+    let text = raw.to_string_lossy();
+    if text.contains('\0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "open target contains NUL byte",
+        ));
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "open target is empty",
+        ));
+    }
+    if is_web_url(trimmed) {
+        if trimmed.contains('\r') || trimmed.contains('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "URL contains newline control characters",
+            ));
+        }
+        return Ok(std::ffi::OsString::from(trimmed));
+    }
+    if text.starts_with('-') || trimmed.starts_with('-') {
+        let candidate = std::path::Path::new(raw);
+        if !candidate.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "open target must not start with '-'",
+            ));
+        }
+        return Ok(std::path::Path::new(".").join(raw).into_os_string());
+    }
+    Ok(raw.to_os_string())
+}
+
 /// Opens a path or URL using the platform-specific default application.
 pub fn open_that<T: AsRef<OsStr>>(target: T) -> io::Result<()> {
     let target = target.as_ref();
@@ -189,12 +235,17 @@ pub fn open_that<T: AsRef<OsStr>>(target: T) -> io::Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(target).spawn().map(|_| ())
+        let safe_target = prepare_unix_open_target(target)?;
+        Command::new("open").arg(safe_target).spawn().map(|_| ())
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        Command::new("xdg-open").arg(target).spawn().map(|_| ())
+        let safe_target = prepare_unix_open_target(target)?;
+        Command::new("xdg-open")
+            .arg(safe_target)
+            .spawn()
+            .map(|_| ())
     }
 }
 
@@ -373,5 +424,37 @@ mod tests {
         let b64 = encode_powershell_utf16le_base64("Выберите сборку");
         assert_eq!(b64.len() % 4, 0);
         assert!(!b64.is_empty());
+    }
+
+    #[test]
+    fn cyrillic_paths_and_unix_flag_injection_guards() {
+        let cases = [
+            (r"C:\Пользователи\Имя\Игры", r"C:\Пользователи\Имя\Игры"),
+            (r"D:\Игры\Сборка", r"D:\Игры\Сборка"),
+            ("/tmp/Папка", "/tmp/Папка"),
+            (r"\\?\UNC\Сервер\Шара", r"\\Сервер\Шара"),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(strip_windows_verbatim_prefix(raw), expected);
+            assert_eq!(clean_user_path(raw), expected);
+            assert!(!is_web_url(raw));
+            let win_target =
+                prepare_windows_open_target(OsStr::new(raw)).expect("valid cyrillic target");
+            assert_eq!(win_target, expected);
+            let unix_target =
+                prepare_unix_open_target(OsStr::new(raw)).expect("valid unix cyrillic target");
+            assert_eq!(unix_target, OsStr::new(raw));
+        }
+
+        assert!(is_web_url("http://example.com/путь"));
+        assert!(is_web_url("HTTPS://example.com/путь"));
+
+        // Non-existent targets starting with '-' must be rejected to prevent xdg-open flag injection
+        assert!(prepare_unix_open_target(OsStr::new("-help")).is_err());
+        assert!(prepare_unix_open_target(OsStr::new("--version")).is_err());
+        assert!(prepare_unix_open_target(OsStr::new("  -o")).is_err());
+        #[cfg(not(target_os = "windows"))]
+        assert!(open_that("--version").is_err());
     }
 }

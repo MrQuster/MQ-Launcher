@@ -1,14 +1,17 @@
 //! Minecraft `servers.dat` parser, editor, and live Server List Ping client.
 
-use std::fs;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use flate2::read::GzDecoder;
 use mq_core::{MqError, MqResult};
 use serde::{Deserialize, Serialize};
+
+use crate::nbt::{parse_nbt_root, read_nbt_file_bounded};
+
+/// Maximum decompressed size accepted for `servers.dat` (16 MiB).
+const MAX_SERVERS_DAT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stored multiplayer server entry in `servers.dat`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +59,7 @@ pub struct ServerPingResult {
 }
 
 /// Parses a Minecraft MOTD string into segments of `(Option<color_code>, text)`.
+/// Preserves active color code (`0-9`, `a-f`) when style formatting codes (`k-o`) are encountered.
 pub fn parse_motd_segments(motd: &str) -> Vec<(Option<char>, String)> {
     let mut segments = Vec::new();
     let mut current_code = None;
@@ -66,13 +70,18 @@ pub fn parse_motd_segments(motd: &str) -> Vec<(Option<char>, String)> {
         if c == '§' {
             if let Some(&code) = chars.peek() {
                 chars.next();
-                if !current_text.is_empty() {
-                    segments.push((current_code, std::mem::take(&mut current_text)));
-                }
                 let lower_code = code.to_ascii_lowercase();
                 if lower_code == 'r' {
+                    if !current_text.is_empty() {
+                        segments.push((current_code, std::mem::take(&mut current_text)));
+                    }
                     current_code = None;
-                } else {
+                } else if matches!(lower_code, '0'..='9' | 'a'..='f')
+                    || (matches!(lower_code, 'k'..='o') && current_code.is_none())
+                {
+                    if !current_text.is_empty() {
+                        segments.push((current_code, std::mem::take(&mut current_text)));
+                    }
                     current_code = Some(lower_code);
                 }
             }
@@ -95,23 +104,10 @@ pub fn load_servers_dat(instance_dir: &Path) -> MqResult<Vec<ServerEntry>> {
         return Ok(Vec::new());
     }
 
-    let raw_bytes = fs::read(&dat_path)?;
-    if raw_bytes.is_empty() {
+    let bytes = read_nbt_file_bounded(&dat_path, MAX_SERVERS_DAT_BYTES)?;
+    if bytes.is_empty() {
         return Ok(Vec::new());
     }
-
-    // Try gzip decompress, or fallback to raw
-    let bytes = if raw_bytes.starts_with(&[0x1F, 0x8B]) {
-        let mut gz = GzDecoder::new(&raw_bytes[..]);
-        let mut decompressed = Vec::new();
-        if gz.read_to_end(&mut decompressed).is_ok() {
-            decompressed
-        } else {
-            raw_bytes
-        }
-    } else {
-        raw_bytes
-    };
 
     parse_servers_nbt(&bytes)
 }
@@ -127,32 +123,38 @@ pub fn save_servers_dat(instance_dir: &Path, servers: &[ServerEntry]) -> MqResul
 
     // TAG_List (0x09) + name "servers"
     buf.push(0x09);
-    write_nbt_string_header(&mut buf, "servers");
+    write_nbt_string_checked(&mut buf, "servers")?;
     // List item type: TAG_Compound (0x0A)
     buf.push(0x0A);
-    // List size (i32 big-endian)
-    buf.extend_from_slice(&(servers.len() as i32).to_be_bytes());
+    let list_len: i32 = i32::try_from(servers.len())
+        .map_err(|_| MqError::Metadata("too many servers for servers.dat".to_string()))?;
+    buf.extend_from_slice(&list_len.to_be_bytes());
 
     for s in servers {
         // TAG_String "name"
         buf.push(0x08);
-        write_nbt_string_header(&mut buf, "name");
-        write_nbt_string_payload(&mut buf, &s.name);
+        write_nbt_string_checked(&mut buf, "name")?;
+        write_nbt_string_checked(&mut buf, &s.name)?;
 
         // TAG_String "ip"
         buf.push(0x08);
-        write_nbt_string_header(&mut buf, "ip");
-        write_nbt_string_payload(&mut buf, &s.ip);
+        write_nbt_string_checked(&mut buf, "ip")?;
+        write_nbt_string_checked(&mut buf, &s.ip)?;
 
         // TAG_Byte "acceptTextures"
         buf.push(0x01);
-        write_nbt_string_header(&mut buf, "acceptTextures");
+        write_nbt_string_checked(&mut buf, "acceptTextures")?;
         buf.push(s.accept_textures);
 
         if let Some(ref icon) = s.icon {
-            buf.push(0x08);
-            write_nbt_string_header(&mut buf, "icon");
-            write_nbt_string_payload(&mut buf, icon);
+            // Guard string lengths against > u16::MAX: skip oversized icons
+            if u16::try_from(icon.len()).is_ok() {
+                buf.push(0x08);
+                write_nbt_string_checked(&mut buf, "icon")?;
+                write_nbt_string_checked(&mut buf, icon)?;
+            } else {
+                tracing::warn!("skipping oversized server icon exceeding u16::MAX bytes");
+            }
         }
 
         // TAG_End (0x00)
@@ -166,96 +168,125 @@ pub fn save_servers_dat(instance_dir: &Path, servers: &[ServerEntry]) -> MqResul
     Ok(())
 }
 
-fn write_nbt_string_header(buf: &mut Vec<u8>, s: &str) {
+fn write_nbt_string_checked(buf: &mut Vec<u8>, s: &str) -> MqResult<()> {
     let bytes = s.as_bytes();
-    buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    let len = u16::try_from(bytes.len()).map_err(|_| {
+        MqError::Metadata(format!(
+            "string exceeds max NBT length of 65535: len={}",
+            bytes.len()
+        ))
+    })?;
+    buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(bytes);
+    Ok(())
 }
 
-fn write_nbt_string_payload(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-    buf.extend_from_slice(bytes);
-}
-
-/// Robust scanner parsing `servers.dat` NBT structures.
+/// Robust binary NBT parser for `servers.dat` structures.
 fn parse_servers_nbt(bytes: &[u8]) -> MqResult<Vec<ServerEntry>> {
-    let mut servers = Vec::new();
-    let mut cursor = 0;
+    let (_root_name, root_val) = parse_nbt_root(bytes)?;
+    let servers_list = match root_val.get("servers").and_then(|v| v.as_list()) {
+        Some(list) => list,
+        None => return Ok(Vec::new()),
+    };
 
-    // Fast sequential search for server compounds
-    while cursor < bytes.len() {
-        let name_pos = match find_subsequence(&bytes[cursor..], b"name") {
-            Some(p) => cursor + p,
-            None => break,
+    let mut servers = Vec::with_capacity(servers_list.len());
+    for item in servers_list {
+        let ip = match item.get("ip").and_then(|v| v.as_str()) {
+            Some(ip_str) if !ip_str.is_empty() => ip_str.to_string(),
+            _ => continue,
         };
-        let ip_pos = match find_subsequence(&bytes[name_pos..], b"ip") {
-            Some(p) => name_pos + p,
-            None => break,
-        };
 
-        // Extract name
-        let name_start = name_pos + 4;
-        let mut name = String::new();
-        if name_start + 2 <= bytes.len() {
-            let len = u16::from_be_bytes([bytes[name_start], bytes[name_start + 1]]) as usize;
-            if name_start + 2 + len <= bytes.len() {
-                if let Ok(s) = std::str::from_utf8(&bytes[name_start + 2..name_start + 2 + len]) {
-                    name = s.to_string();
-                }
-            }
-        }
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&ip)
+            .to_string();
 
-        // Extract IP
-        let ip_start = ip_pos + 2;
-        let mut ip = String::new();
-        if ip_start + 2 <= bytes.len() {
-            let len = u16::from_be_bytes([bytes[ip_start], bytes[ip_start + 1]]) as usize;
-            if ip_start + 2 + len <= bytes.len() {
-                if let Ok(s) = std::str::from_utf8(&bytes[ip_start + 2..ip_start + 2 + len]) {
-                    ip = s.to_string();
-                }
-            }
-        }
+        let icon = item
+            .get("icon")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
 
-        if !ip.is_empty() {
-            servers.push(ServerEntry {
-                name: if name.is_empty() { ip.clone() } else { name },
-                ip,
-                icon: None,
-                accept_textures: 1,
-            });
-            cursor = ip_pos + 4;
-        } else {
-            cursor = name_pos + 4;
-        }
+        let accept_textures = item
+            .get("acceptTextures")
+            .and_then(|v| v.as_u8())
+            .unwrap_or(1);
+
+        servers.push(ServerEntry {
+            name,
+            ip,
+            icon,
+            accept_textures,
+        });
     }
 
     Ok(servers)
 }
 
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+/// Parses server address into `(host, port)` supporting `[ipv6]:port`, raw IPv6, and `host:port`.
+fn parse_server_addr(server_addr: &str) -> (&str, u16) {
+    let s = server_addr.trim();
+    if s.starts_with('[') {
+        if let Some(close_bracket) = s.find(']') {
+            let host = &s[1..close_bracket];
+            let rest = &s[close_bracket + 1..];
+            let port = if let Some(p) = rest.strip_prefix(':') {
+                p.trim().parse::<u16>().unwrap_or(25565)
+            } else {
+                25565
+            };
+            (host.trim(), port)
+        } else {
+            (s, 25565)
+        }
+    } else if let Some((h, p)) = s.rsplit_once(':') {
+        if h.contains(':') {
+            // Raw IPv6 address without port
+            (s, 25565)
+        } else {
+            let port = p.trim().parse::<u16>().unwrap_or(25565);
+            (h.trim(), port)
+        }
+    } else {
+        (s, 25565)
+    }
+}
+
+/// Recursively extracts plain text from a Minecraft JSON text component.
+fn extract_component_text(val: &serde_json::Value, out: &mut String) {
+    match val {
+        serde_json::Value::String(s) => out.push_str(s),
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(text)) = map.get("text") {
+                out.push_str(text);
+            }
+            if let Some(extra) = map.get("extra") {
+                extract_component_text(extra, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                extract_component_text(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Live Minecraft TCP Server List Ping implementation.
 pub fn ping_server(server_addr: &str, timeout_ms: u64) -> MqResult<ServerPingResult> {
-    let (host, port) = match server_addr.split_once(':') {
-        Some((h, p)) => (h.trim(), p.trim().parse::<u16>().unwrap_or(25565)),
-        None => (server_addr.trim(), 25565),
-    };
+    let (host, port) = parse_server_addr(server_addr);
 
     let start = Instant::now();
-    let sock_addrs: Vec<_> = format!("{host}:{port}")
+    let sock_addrs: Vec<_> = (host, port)
         .to_socket_addrs()
-        .map_err(|e| MqError::Network(format!("DNS resolution failed for {host}: {e}")))?
+        .map_err(|e| MqError::Network(format!("DNS resolution failed for {host}:{port}: {e}")))?
         .collect();
 
     if sock_addrs.is_empty() {
         return Err(MqError::Network(format!(
-            "no IP addresses resolved for {host}"
+            "no IP addresses resolved for {host}:{port}"
         )));
     }
 
@@ -293,7 +324,14 @@ pub fn ping_server(server_addr: &str, timeout_ms: u64) -> MqResult<ServerPingRes
         )));
     }
 
-    let json_len = read_varint(&mut stream)? as usize;
+    let raw_json_len = read_varint(&mut stream)?;
+    if !(1..=2 * 1024 * 1024).contains(&raw_json_len) {
+        return Err(MqError::Network(format!(
+            "invalid or oversized ping response length: {raw_json_len}"
+        )));
+    }
+
+    let json_len = raw_json_len as usize;
     let mut json_buf = vec![0u8; json_len];
     stream.read_exact(&mut json_buf)?;
 
@@ -319,10 +357,14 @@ pub fn ping_server(server_addr: &str, timeout_ms: u64) -> MqResult<ServerPingRes
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
-    let motd = if let Some(desc_str) = val.get("description").and_then(|d| d.as_str()) {
-        desc_str.to_string()
-    } else if let Some(text) = val.pointer("/description/text").and_then(|t| t.as_str()) {
-        text.to_string()
+    let motd = if let Some(desc) = val.get("description") {
+        let mut text_buf = String::new();
+        extract_component_text(desc, &mut text_buf);
+        if text_buf.is_empty() {
+            "A Minecraft Server".to_string()
+        } else {
+            text_buf
+        }
     } else {
         "A Minecraft Server".to_string()
     };
@@ -410,7 +452,42 @@ mod tests {
         let segments = parse_motd_segments(motd);
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0], (Some('a'), "Welcome to ".to_string()));
-        assert_eq!(segments[1], (Some('l'), "MQ Server".to_string()));
+        assert_eq!(segments[1], (Some('6'), "MQ Server".to_string()));
         assert_eq!(segments[2], (None, " - Have Fun!".to_string()));
+    }
+
+    #[test]
+    fn test_parse_server_addr() {
+        assert_eq!(parse_server_addr("127.0.0.1:25565"), ("127.0.0.1", 25565));
+        assert_eq!(
+            parse_server_addr("mc.hypixel.net"),
+            ("mc.hypixel.net", 25565)
+        );
+        assert_eq!(parse_server_addr("[::1]:25565"), ("::1", 25565));
+        assert_eq!(parse_server_addr("[2001:db8::1]"), ("2001:db8::1", 25565));
+        assert_eq!(parse_server_addr("2001:db8::1"), ("2001:db8::1", 25565));
+    }
+
+    #[test]
+    fn test_servers_dat_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let servers = vec![
+            ServerEntry {
+                name: "Hypixel".to_string(),
+                ip: "mc.hypixel.net".to_string(),
+                icon: Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==".to_string()),
+                accept_textures: 1,
+            },
+            ServerEntry {
+                name: "Local".to_string(),
+                ip: "127.0.0.1:25565".to_string(),
+                icon: None,
+                accept_textures: 0,
+            },
+        ];
+
+        save_servers_dat(temp_dir.path(), &servers).unwrap();
+        let loaded = load_servers_dat(temp_dir.path()).unwrap();
+        assert_eq!(loaded, servers);
     }
 }

@@ -21,7 +21,7 @@
     #expr FileClose(CargoFile)
   #endif
   #if MyAppVersion == ""
-    #expr MyAppVersion = "2.8.1"
+    #expr MyAppVersion = "2.8.2"
   #endif
 #endif
 
@@ -174,16 +174,26 @@ Root: HKA; Subkey: "Software\Classes\MQ.Modpack\shell\open\command"; ValueType: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--after-update"; Flags: nowait skipifnotsilent; Check: ShouldRelaunchAfterSilentInstall
 
 [UninstallDelete]
 ; Clean up runtime artifacts within the program installation directory
 Type: files; Name: "{app}\{#MyAppExeName}.old"
+Type: files; Name: "{app}\mq.old"
+Type: files; Name: "{app}\mq.new.exe"
+Type: files; Name: "{app}\mq.exe.failed"
+Type: files; Name: "{app}\.mq-write-probe.*"
 Type: files; Name: "{app}\*.log"
 Type: files; Name: "{app}\*.tmp"
 ; Clean up app directory if empty (user data in %LOCALAPPDATA%\MQ and %APPDATA%\MQ is handled in [Code])
 Type: dirifempty; Name: "{app}"
 
 [Code]
+function ShouldRelaunchAfterSilentInstall(): Boolean;
+begin
+  Result := (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
+
 function GetEnvRegRoot(): Integer;
 begin
   if IsAdminInstallMode then

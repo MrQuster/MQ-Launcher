@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mq_core::fs_util::remove_file_with_retry;
-use mq_core::{MqError, MqResult};
+use mq_core::{resolve_safe_path, MqError, MqResult};
 use serde::{Deserialize, Serialize};
 
 pub const SKINS_MANIFEST_FILE: &str = "skins.json";
@@ -30,7 +30,20 @@ pub fn list_local_skins(skins_dir: &Path) -> Vec<SkinLibraryEntry> {
             if let Ok(entries) = serde_json::from_str::<Vec<SkinLibraryEntry>>(&content) {
                 return entries
                     .into_iter()
-                    .filter(|e| e.file_path.is_file())
+                    .filter(|e| {
+                        if !e.file_path.is_file() {
+                            return false;
+                        }
+                        match e
+                            .file_path
+                            .strip_prefix(skins_dir)
+                            .ok()
+                            .and_then(|r| r.to_str())
+                        {
+                            Some(rel) => resolve_safe_path(skins_dir, rel).is_ok(),
+                            None => false,
+                        }
+                    })
                     .collect();
             }
         }
@@ -93,7 +106,7 @@ pub fn import_local_skin(
 
     let id = uuid::Uuid::new_v4().to_string();
     let file_name = format!("{id}.png");
-    let dest_path = skins_dir.join(file_name);
+    let dest_path = resolve_safe_path(skins_dir, &file_name)?;
 
     fs::copy(src_png, &dest_path)?;
 
@@ -118,6 +131,9 @@ pub fn import_local_skin(
 
 /// Deletes a skin entry by `id` from the local skin library and removes its file.
 pub fn delete_local_skin(skins_dir: &Path, id: &str) -> MqResult<()> {
+    let safe_id_file = format!("{id}.png");
+    let safe_fallback_path = resolve_safe_path(skins_dir, &safe_id_file)?;
+
     let mut all_skins = list_local_skins(skins_dir);
     let target = all_skins.iter().find(|s| s.id == id).cloned();
 
@@ -129,14 +145,20 @@ pub fn delete_local_skin(skins_dir: &Path, id: &str) -> MqResult<()> {
     }
 
     if let Some(entry) = target {
-        if entry.file_path.is_file() {
-            let _ = remove_file_with_retry(&entry.file_path);
+        if let Some(rel) = entry
+            .file_path
+            .strip_prefix(skins_dir)
+            .ok()
+            .and_then(|r| r.to_str())
+        {
+            if let Ok(safe_target) = resolve_safe_path(skins_dir, rel) {
+                if safe_target.is_file() {
+                    let _ = remove_file_with_retry(&safe_target);
+                }
+            }
         }
-    } else {
-        let file_path = skins_dir.join(format!("{id}.png"));
-        if file_path.is_file() {
-            let _ = remove_file_with_retry(&file_path);
-        }
+    } else if safe_fallback_path.is_file() {
+        let _ = remove_file_with_retry(&safe_fallback_path);
     }
 
     Ok(())

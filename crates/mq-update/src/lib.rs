@@ -179,6 +179,132 @@ pub fn inno_silent_args() -> [&'static str; 3] {
     ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
 }
 
+fn is_loopback_host(host_lc: &str) -> bool {
+    matches!(host_lc, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+fn validate_release_url(url: &reqwest::Url) -> Result<()> {
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("Release URL must not contain credentials");
+    }
+    let Some(host) = url.host_str() else {
+        bail!("Release URL is missing host: {url}");
+    };
+    let host_lc = host.to_ascii_lowercase();
+    let is_loopback = is_loopback_host(&host_lc);
+    let is_allowed_github = matches!(
+        host_lc.as_str(),
+        "github.com"
+            | "api.github.com"
+            | "objects.githubusercontent.com"
+            | "release-assets.githubusercontent.com"
+            | "githubusercontent.com"
+    ) || host_lc.ends_with(".githubusercontent.com");
+
+    match url.scheme() {
+        "https" if is_allowed_github || is_loopback => Ok(()),
+        "https" => bail!("Untrusted release download host '{host}' in URL: {url}"),
+        "http" if is_loopback => Ok(()),
+        "http" => bail!("Insecure HTTP release download URL rejected: {url}"),
+        other => bail!("Unsupported URL scheme '{other}' in release download URL: {url}"),
+    }
+}
+
+/// Validates that a release download URL uses `https://` on an official GitHub release host
+/// (or `http://127.0.0.1` / `localhost` for local mock-server unit tests).
+pub fn validate_release_download_url(raw_url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(raw_url.trim())
+        .with_context(|| format!("Invalid release download URL: {raw_url}"))?;
+    validate_release_url(&parsed)
+}
+
+fn build_release_http_client() -> reqwest::Client {
+    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("Too many HTTP redirects while fetching release asset");
+        }
+        if attempt
+            .previous()
+            .iter()
+            .any(|prev| prev.scheme() == "https")
+            && attempt.url().scheme() != "https"
+        {
+            return attempt.error("Blocked HTTPS to HTTP scheme downgrade redirect");
+        }
+        let prev_was_remote = attempt.previous().iter().any(|prev| {
+            prev.host_str()
+                .is_some_and(|h| !is_loopback_host(&h.to_ascii_lowercase()))
+        });
+        let next_is_loopback = attempt
+            .url()
+            .host_str()
+            .is_some_and(|h| is_loopback_host(&h.to_ascii_lowercase()));
+        if prev_was_remote && next_is_loopback {
+            return attempt.error("Blocked redirect from external release host to loopback");
+        }
+        if let Err(err) = validate_release_url(attempt.url()) {
+            return attempt.error(err.to_string());
+        }
+        attempt.follow()
+    });
+
+    reqwest::Client::builder()
+        .user_agent(concat!("mq-updater/", env!("CARGO_PKG_VERSION")))
+        .redirect(redirect_policy)
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn encode_powershell_utf16le_base64(script: &str) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn create_unique_installer_temp_dir() -> Result<PathBuf> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let base = strip_windows_verbatim_prefix(&std::env::temp_dir());
+    let pid = std::process::id();
+    for attempt in 0..32u32 {
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ts = Utc::now().timestamp_nanos_opt().unwrap_or(0).unsigned_abs();
+        let candidate = base.join(format!("mq-inno-update-{pid}-{ts:x}-{seq}-{attempt}"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).context("Failed to create unique temporary installer directory")
+            }
+        }
+    }
+    bail!("Failed to allocate unique temporary directory for Windows installer");
+}
+
 /// Extracts the SHA-256 hex digest for the highest-priority matching filename in `SHA256SUMS`.
 ///
 /// Handles UTF-8 BOM (`\u{FEFF}`), CRLF (`\r\n`) and LF (`\n`) line endings, binary-mode `*`
@@ -302,27 +428,29 @@ pub struct UpdateManager {
     repo_name: String,
     client: reqwest::Client,
     api_base_url: Option<String>,
+    relaunch_on_inno_update: bool,
 }
 
 impl UpdateManager {
     pub fn new(repo_owner: &str, repo_name: &str) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("mq-updater/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
-
         Self {
             repo_owner: repo_owner.to_string(),
             repo_name: repo_name.to_string(),
-            client,
+            client: build_release_http_client(),
             api_base_url: None,
+            relaunch_on_inno_update: true,
         }
     }
 
     pub fn with_api_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.api_base_url = Some(base_url.into());
+        self
+    }
+
+    /// Controls whether silent Windows Inno Setup self-updates pass `/RELAUNCH=1`
+    /// so the installer automatically restarts MQ after updating.
+    pub fn with_relaunch_on_update(mut self, relaunch: bool) -> Self {
+        self.relaunch_on_inno_update = relaunch;
         self
     }
 
@@ -393,7 +521,8 @@ impl UpdateManager {
         false
     }
 
-    /// Removes `.old`, `.failed`, and stale `.new` binaries left over from prior atomic swaps.
+    /// Removes `.old`, `.failed`, and stale `.new` binaries left over from prior atomic swaps,
+    /// plus stale `mq-inno-update-*` temporary installer directories.
     /// Uses retry backoff on Windows so an exiting parent `mq.exe.old` finishes releasing its handle.
     pub fn clean_old_binary_backups() {
         if let Ok(raw_exe) = std::env::current_exe() {
@@ -409,6 +538,26 @@ impl UpdateManager {
             for candidate in candidates {
                 if candidate != current_exe && candidate.exists() {
                     let _ = remove_file_with_retry(&candidate);
+                }
+            }
+        }
+
+        let temp_base = strip_windows_verbatim_prefix(&std::env::temp_dir());
+        if let Ok(entries) = fs::read_dir(temp_base) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("mq-inno-update-") {
+                        if let Ok(meta) = entry.metadata() {
+                            let is_stale = meta
+                                .modified()
+                                .ok()
+                                .and_then(|m| m.elapsed().ok())
+                                .is_some_and(|age| age > Duration::from_secs(600));
+                            if is_stale {
+                                let _ = remove_dir_all_with_retry(&entry.path());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -481,6 +630,7 @@ impl UpdateManager {
         let expected_installer = expected_inno_installer_name(remote_ver_str);
 
         let mut binary_url = String::new();
+        let mut selected_binary_name: Option<String> = None;
         let mut binary_priority = usize::MAX;
         let mut tarball_url = String::new();
         let mut has_preferred_archive = false;
@@ -500,6 +650,7 @@ impl UpdateManager {
                 if prio < binary_priority {
                     binary_priority = prio;
                     binary_url = asset.browser_download_url.clone();
+                    selected_binary_name = Some(asset.name.clone());
                 }
             } else if asset.name == expected_installer {
                 installer_url = Some(asset.browser_download_url.clone());
@@ -524,51 +675,80 @@ impl UpdateManager {
             return Ok(None);
         }
 
-        // Fetch SHA256SUMS and verify minisign signature
-        if let Some(chk_asset) = checksums_asset {
-            let chk_resp = self
+        if !binary_url.is_empty() {
+            validate_release_download_url(&binary_url)?;
+        }
+        if let Some(ref inst_url) = installer_url {
+            validate_release_download_url(inst_url)?;
+        }
+        if !tarball_url.is_empty() {
+            validate_release_download_url(&tarball_url)?;
+        }
+
+        // Always require SHA256SUMS to be present on the release
+        let chk_asset =
+            checksums_asset.context("Release is missing required SHA256SUMS checksum manifest")?;
+        validate_release_download_url(&chk_asset.browser_download_url)?;
+
+        let chk_resp = self
+            .client
+            .get(&chk_asset.browser_download_url)
+            .send()
+            .await
+            .context("Failed to download SHA256SUMS")?;
+        if !chk_resp.status().is_success() {
+            bail!("Failed to download SHA256SUMS: {}", chk_resp.status());
+        }
+        let chk_bytes = chk_resp.bytes().await?;
+
+        if let Some(sig_asset) = signature_asset {
+            validate_release_download_url(&sig_asset.browser_download_url)?;
+            let sig_resp = self
                 .client
-                .get(&chk_asset.browser_download_url)
+                .get(&sig_asset.browser_download_url)
                 .send()
                 .await
-                .context("Failed to download SHA256SUMS")?;
-            if !chk_resp.status().is_success() {
-                bail!("Failed to download SHA256SUMS: {}", chk_resp.status());
-            }
-            let chk_bytes = chk_resp.bytes().await?;
-
-            if let Some(sig_asset) = signature_asset {
-                let sig_resp = self
-                    .client
-                    .get(&sig_asset.browser_download_url)
-                    .send()
-                    .await
-                    .context("Failed to download SHA256SUMS.minisig")?;
-                if !sig_resp.status().is_success() {
-                    bail!(
-                        "Failed to download SHA256SUMS.minisig: {}",
-                        sig_resp.status()
-                    );
-                }
-                let sig_text = sig_resp.text().await?;
-                MinisignVerifier::verify_checksums(&chk_bytes, &sig_text)
-                    .context("Minisign release signature verification failed")?;
-                info!("Release SHA256SUMS verified with Minisign Ed25519 signature!");
-            } else if inno_mode {
+                .context("Failed to download SHA256SUMS.minisig")?;
+            if !sig_resp.status().is_success() {
                 bail!(
-                    "Release is missing SHA256SUMS.minisig required for Windows Inno Setup update"
+                    "Failed to download SHA256SUMS.minisig: {}",
+                    sig_resp.status()
                 );
             }
-
-            let chk_text = String::from_utf8_lossy(&chk_bytes);
-            if let Some(hash) = extract_sha256_for_targets(&chk_text, target_binary_candidates) {
-                binary_sha256 = hash;
-            }
-            if let Some(ref inst_name) = installer_filename {
-                installer_sha256 = extract_sha256_for_targets(&chk_text, &[inst_name.as_str()]);
-            }
+            let sig_text = sig_resp.text().await?;
+            MinisignVerifier::verify_checksums(&chk_bytes, &sig_text)
+                .context("Minisign release signature verification failed")?;
+            info!("Release SHA256SUMS verified with Minisign Ed25519 signature!");
         } else if inno_mode {
-            bail!("Release is missing SHA256SUMS required for Windows Inno Setup update");
+            bail!("Release is missing SHA256SUMS.minisig required for Windows Inno Setup update");
+        }
+
+        let chk_text = String::from_utf8_lossy(&chk_bytes);
+        if let Some(ref bin_name) = selected_binary_name {
+            binary_sha256 = extract_sha256_for_targets(&chk_text, &[bin_name.as_str()])
+                .with_context(|| {
+                    format!(
+                        "SHA256SUMS is missing checksum entry matching selected asset '{bin_name}'"
+                    )
+                })?;
+        }
+        if let Some(ref inst_name) = installer_filename {
+            installer_sha256 = extract_sha256_for_targets(&chk_text, &[inst_name.as_str()]);
+            if inno_mode && installer_sha256.is_none() {
+                bail!(
+                    "SHA256SUMS is missing checksum entry matching Windows installer '{inst_name}'"
+                );
+            }
+        }
+        if binary_sha256.is_empty() {
+            if let Some(ref inst_hash) = installer_sha256 {
+                if inno_mode {
+                    binary_sha256 = inst_hash.clone();
+                }
+            }
+        }
+        if binary_sha256.is_empty() {
+            bail!("Release SHA256SUMS did not yield a valid non-empty binary SHA-256 checksum");
         }
 
         Ok(Some(ReleaseAssetInfo {
@@ -602,9 +782,16 @@ impl UpdateManager {
                 .await;
         }
 
-        let current_exe = strip_windows_verbatim_prefix(
+        validate_release_download_url(&asset.binary_url)?;
+        let expected_sha256 = asset.binary_sha256.trim();
+        if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("Refusing to install update without a valid 64-character SHA-256 checksum");
+        }
+
+        let raw_exe = strip_windows_verbatim_prefix(
             &std::env::current_exe().context("Failed to determine current exe path")?,
         );
+        let current_exe = strip_old_backup_suffix(&raw_exe).unwrap_or(raw_exe);
         let new_exe = staged_new_binary_path(&current_exe);
         let old_exe = binary_sidecar_path(&current_exe, ".old");
 
@@ -613,86 +800,89 @@ impl UpdateManager {
             asset.binary_url, new_exe
         );
 
-        // Download binary with progress
-        let resp = self
-            .client
-            .get(&asset.binary_url)
-            .send()
-            .await
-            .context("Failed to download update binary")?;
-
-        if !resp.status().is_success() {
-            bail!("Download failed with status: {}", resp.status());
-        }
-
-        let total_size = resp.content_length();
-        let mut downloaded: u64 = 0;
-        let mut hasher = Sha256::new();
-
-        let mut file = tokio::fs::File::create(&new_exe)
-            .await
-            .context("Failed to create temporary update binary")?;
-
-        let mut stream = resp.bytes_stream();
-
-        while let Some(chunk_res) = stream.next().await {
-            let chunk = chunk_res.context("Error reading binary stream chunk")?;
-            hasher.update(&chunk);
-            downloaded += chunk.len() as u64;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+        let stage_res: Result<()> = async {
+            let resp = self
+                .client
+                .get(&asset.binary_url)
+                .send()
                 .await
-                .context("Failed to write to update file")?;
-            on_progress(downloaded, total_size);
-        }
+                .context("Failed to download update binary")?;
 
-        tokio::io::AsyncWriteExt::flush(&mut file).await?;
-        file.sync_all().await?;
-        drop(file);
+            if !resp.status().is_success() {
+                bail!("Download failed with status: {}", resp.status());
+            }
 
-        // Verify SHA-256 checksum if provided
-        let computed_hash = hex::encode(hasher.finalize());
-        if !asset.binary_sha256.is_empty() {
-            if !computed_hash.eq_ignore_ascii_case(&asset.binary_sha256) {
-                let _ = remove_file_with_retry(&new_exe);
+            let total_size = resp.content_length();
+            let mut downloaded: u64 = 0;
+            let mut hasher = Sha256::new();
+
+            let mut file = tokio::fs::File::create(&new_exe)
+                .await
+                .context("Failed to create temporary update binary")?;
+
+            let mut stream = resp.bytes_stream();
+
+            while let Some(chunk_res) = stream.next().await {
+                let chunk = chunk_res.context("Error reading binary stream chunk")?;
+                hasher.update(&chunk);
+                downloaded += chunk.len() as u64;
+                tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                    .await
+                    .context("Failed to write to update file")?;
+                on_progress(downloaded, total_size);
+            }
+
+            tokio::io::AsyncWriteExt::flush(&mut file).await?;
+            file.sync_all().await?;
+            drop(file);
+
+            let computed_hash = hex::encode(hasher.finalize());
+            if !computed_hash.eq_ignore_ascii_case(expected_sha256) {
                 bail!(
                     "SHA-256 checksum mismatch! Expected: {}, Computed: {}",
-                    asset.binary_sha256,
+                    expected_sha256,
                     computed_hash
                 );
             }
             info!("SHA-256 checksum verified successfully: {}", computed_hash);
-        }
 
-        // Set executable permissions (0755 on Unix)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&new_exe)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&new_exe, perms)?;
-        }
+            // Set executable permissions (0755 on Unix)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&new_exe)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&new_exe, perms)?;
+            }
 
-        // Smoke-test `<new_exe> --version` (hidden console & AV-scan retry on Windows)
-        info!("Running smoke-test on {:?}", new_exe);
-        let smoke_output = run_command_output_with_av_retry(|| {
-            let mut cmd = Command::new(&new_exe);
-            cmd.arg("--version");
-            cmd
-        })
-        .context("Failed to execute smoke-test on downloaded binary")?;
+            // Smoke-test `<new_exe> --version` (hidden console & AV-scan retry on Windows)
+            info!("Running smoke-test on {:?}", new_exe);
+            let smoke_output = run_command_output_with_av_retry(|| {
+                let mut cmd = Command::new(&new_exe);
+                cmd.arg("--version");
+                cmd
+            })
+            .context("Failed to execute smoke-test on downloaded binary")?;
 
-        if !smoke_output.status.success() {
-            let _ = remove_file_with_retry(&new_exe);
-            bail!(
-                "Smoke test failed on downloaded binary with code: {:?}",
-                smoke_output.status.code()
+            if !smoke_output.status.success() {
+                bail!(
+                    "Smoke test failed on downloaded binary with code: {:?}",
+                    smoke_output.status.code()
+                );
+            }
+
+            info!(
+                "Smoke-test succeeded: {}",
+                String::from_utf8_lossy(&smoke_output.stdout).trim()
             );
+            Ok(())
         }
+        .await;
 
-        info!(
-            "Smoke-test succeeded: {}",
-            String::from_utf8_lossy(&smoke_output.stdout).trim()
-        );
+        if let Err(err) = stage_res {
+            let _ = remove_file_with_retry(&new_exe);
+            return Err(err);
+        }
 
         // Atomic swap with rollback on failure
         swap_binary_files(&current_exe, &new_exe, &old_exe)?;
@@ -701,8 +891,8 @@ impl UpdateManager {
         Ok(current_exe)
     }
 
-    /// Downloads `MQ-Setup-<version>-x64.exe`, verifies SHA-256 (verified via Minisign `SHA256SUMS`),
-    /// and launches it with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+    /// Downloads `MQ-Setup-<version>-x64.exe` into a unique temp directory, verifies SHA-256,
+    /// and launches it with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` (plus `/RELAUNCH=1` when enabled).
     pub async fn download_and_run_inno_installer<F>(
         &self,
         asset: &ReleaseAssetInfo,
@@ -716,10 +906,13 @@ impl UpdateManager {
             .as_deref()
             .filter(|u| !u.is_empty())
             .context("Release is missing Windows Inno Setup installer asset")?;
+        validate_release_download_url(installer_url)?;
+
         let expected_sha256 = asset
             .installer_sha256
             .as_deref()
-            .filter(|h| !h.is_empty())
+            .map(str::trim)
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
             .context("Missing verified SHA-256 checksum for Windows Inno Setup installer")?;
         let raw_filename = asset
             .installer_filename
@@ -728,75 +921,97 @@ impl UpdateManager {
         let safe_filename = Path::new(&raw_filename)
             .file_name()
             .and_then(|n| n.to_str())
-            .filter(|n| !n.is_empty())
+            .filter(|n| !n.is_empty() && *n != "." && *n != "..")
             .context("Invalid installer filename")?;
 
-        let installer_path =
-            strip_windows_verbatim_prefix(&std::env::temp_dir().join(safe_filename));
+        let temp_subdir = create_unique_installer_temp_dir()?;
+        let installer_path = temp_subdir.join(safe_filename);
         info!(
             "Downloading Inno Setup installer from {} to {:?}",
             installer_url, installer_path
         );
 
-        let resp = self
-            .client
-            .get(installer_url)
-            .send()
-            .await
-            .context("Failed to download Inno Setup installer")?;
-        if !resp.status().is_success() {
-            bail!("Installer download failed with status: {}", resp.status());
-        }
-
-        let total_size = resp.content_length();
-        let mut downloaded: u64 = 0;
-        let mut hasher = Sha256::new();
-
-        let mut file = tokio::fs::File::create(&installer_path)
-            .await
-            .context("Failed to create temporary installer file")?;
-        let mut stream = resp.bytes_stream();
-
-        while let Some(chunk_res) = stream.next().await {
-            let chunk = chunk_res.context("Error reading installer stream chunk")?;
-            hasher.update(&chunk);
-            downloaded += chunk.len() as u64;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+        let download_res: Result<()> = async {
+            let resp = self
+                .client
+                .get(installer_url)
+                .send()
                 .await
-                .context("Failed to write installer file")?;
-            on_progress(downloaded, total_size);
+                .context("Failed to download Inno Setup installer")?;
+            if !resp.status().is_success() {
+                bail!("Installer download failed with status: {}", resp.status());
+            }
+
+            let total_size = resp.content_length();
+            let mut downloaded: u64 = 0;
+            let mut hasher = Sha256::new();
+
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&installer_path)
+                .await
+                .context("Failed to create temporary installer file")?;
+            let mut stream = resp.bytes_stream();
+
+            while let Some(chunk_res) = stream.next().await {
+                let chunk = chunk_res.context("Error reading installer stream chunk")?;
+                hasher.update(&chunk);
+                downloaded += chunk.len() as u64;
+                tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                    .await
+                    .context("Failed to write installer file")?;
+                on_progress(downloaded, total_size);
+            }
+
+            tokio::io::AsyncWriteExt::flush(&mut file).await?;
+            file.sync_all().await?;
+            drop(file);
+
+            let computed_hash = hex::encode(hasher.finalize());
+            if !computed_hash.eq_ignore_ascii_case(expected_sha256) {
+                bail!(
+                    "Inno Setup installer SHA-256 mismatch! Expected: {}, Computed: {}",
+                    expected_sha256,
+                    computed_hash
+                );
+            }
+            info!("Inno Setup installer SHA-256 verified: {}", computed_hash);
+            Ok(())
         }
+        .await;
 
-        tokio::io::AsyncWriteExt::flush(&mut file).await?;
-        file.sync_all().await?;
-        drop(file);
-
-        let computed_hash = hex::encode(hasher.finalize());
-        if !computed_hash.eq_ignore_ascii_case(expected_sha256) {
+        if let Err(err) = download_res {
             let _ = remove_file_with_retry(&installer_path);
-            bail!(
-                "Inno Setup installer SHA-256 mismatch! Expected: {}, Computed: {}",
-                expected_sha256,
-                computed_hash
-            );
+            let _ = remove_dir_all_with_retry(&temp_subdir);
+            return Err(err);
         }
-        info!("Inno Setup installer SHA-256 verified: {}", computed_hash);
 
-        spawn_command_with_av_retry(|| {
+        let relaunch = self.relaunch_on_inno_update;
+        if let Err(err) = spawn_command_with_av_retry(|| {
             let mut cmd = Command::new(&installer_path);
             cmd.args(inno_silent_args());
+            if relaunch {
+                cmd.arg("/RELAUNCH=1");
+            }
             cmd
         })
-        .context("Failed to launch Inno Setup installer")?;
+        .context("Failed to launch Inno Setup installer")
+        {
+            let _ = remove_file_with_retry(&installer_path);
+            let _ = remove_dir_all_with_retry(&temp_subdir);
+            return Err(err);
+        }
 
         std::process::exit(0);
     }
 
     /// Roll back to `<exe>.old` if available.
     pub fn rollback() -> Result<()> {
-        let current_exe = strip_windows_verbatim_prefix(
+        let raw_exe = strip_windows_verbatim_prefix(
             &std::env::current_exe().context("Failed to determine current exe")?,
         );
+        let current_exe = strip_old_backup_suffix(&raw_exe).unwrap_or(raw_exe);
         let primary_old = binary_sidecar_path(&current_exe, ".old");
         let legacy_old = current_exe.with_extension("old");
         let old_exe = if primary_old.exists() {
@@ -956,6 +1171,19 @@ pub fn execute_uninstall_with_roots(
 ) -> Result<UninstallOutcome> {
     let mut outcome = UninstallOutcome::default();
 
+    // Purge user data/config/cache BEFORE spawning Windows `unins000.exe`
+    // (because `unins000.exe` runs `taskkill /f /im mq.exe` during `InitializeUninstall`).
+    if purge_data {
+        for dir in [data_dir, config_dir, cache_dir] {
+            if dir.exists() && !outcome.removed_dirs.iter().any(|d| d == dir) {
+                if !dry_run {
+                    let _ = remove_dir_all_with_retry(dir);
+                }
+                outcome.removed_dirs.push(dir.to_path_buf());
+            }
+        }
+    }
+
     for path in collect_user_install_artifacts(home_dir, current_exe) {
         if path.exists() {
             if !dry_run {
@@ -968,6 +1196,17 @@ pub fn execute_uninstall_with_roots(
 
     #[cfg(target_os = "windows")]
     if !dry_run {
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            let start_menu = PathBuf::from(app_data).join("Microsoft/Windows/Start Menu/Programs");
+            for sc_name in ["MQ.lnk", "MQ Launcher.lnk"] {
+                let sc = start_menu.join(sc_name);
+                if sc.exists() {
+                    let _ = remove_file_with_retry(&sc);
+                    outcome.removed_files.push(sc);
+                }
+            }
+        }
+
         let mut unins_candidates: Vec<PathBuf> = Vec::new();
         if let Some(exe) = current_exe {
             let clean_exe = strip_windows_verbatim_prefix(exe);
@@ -985,25 +1224,15 @@ pub fn execute_uninstall_with_roots(
         }
         for unins_path in unins_candidates {
             if unins_path.is_file() {
-                if Command::new(&unins_path)
-                    .args(inno_silent_args())
-                    .spawn()
-                    .is_ok()
-                {
+                let mut cmd = Command::new(&unins_path);
+                cmd.args(inno_silent_args());
+                if purge_data {
+                    cmd.arg("/PURGE=1");
+                }
+                if cmd.spawn().is_ok() {
                     outcome.spawned_external_uninstaller = true;
                 }
                 break;
-            }
-        }
-
-        if let Some(app_data) = std::env::var_os("APPDATA") {
-            let start_menu = PathBuf::from(app_data).join("Microsoft/Windows/Start Menu/Programs");
-            for sc_name in ["MQ.lnk", "MQ Launcher.lnk"] {
-                let sc = start_menu.join(sc_name);
-                if sc.exists() {
-                    let _ = remove_file_with_retry(&sc);
-                    outcome.removed_files.push(sc);
-                }
             }
         }
 
@@ -1012,12 +1241,22 @@ pub fn execute_uninstall_with_roots(
                 let clean_exe = strip_windows_verbatim_prefix(exe);
                 if clean_exe.exists() && !is_dev_or_system_exe(&clean_exe) {
                     use std::os::windows::process::CommandExt;
-                    let exe_quoted = clean_exe.to_string_lossy().replace('"', "\"\"");
-                    let _ = Command::new("cmd.exe")
+                    let ps_script = "for ($i = 0; $i -lt 20; $i++) { \
+                        Start-Sleep -Milliseconds 250; \
+                        if (-not $env:MQ_SELF_DELETE_EXE -or -not (Test-Path -LiteralPath $env:MQ_SELF_DELETE_EXE)) { break }; \
+                        Remove-Item -LiteralPath $env:MQ_SELF_DELETE_EXE -Force -ErrorAction SilentlyContinue \
+                    }";
+                    let encoded = encode_powershell_utf16le_base64(ps_script);
+                    let _ = Command::new("powershell.exe")
                         .creation_flags(WINDOWS_CREATE_NO_WINDOW)
+                        .env("MQ_SELF_DELETE_EXE", &clean_exe)
                         .args([
-                            "/C",
-                            &format!("ping 127.0.0.1 -n 2 > nul & del /F /Q \"{exe_quoted}\""),
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-WindowStyle",
+                            "Hidden",
+                            "-EncodedCommand",
+                            &encoded,
                         ])
                         .spawn();
                 }
@@ -1025,32 +1264,105 @@ pub fn execute_uninstall_with_roots(
         }
     }
 
-    if purge_data {
-        for dir in [data_dir, config_dir, cache_dir] {
-            if dir.exists() && !outcome.removed_dirs.iter().any(|d| d == dir) {
-                if !dry_run {
-                    let _ = remove_dir_all_with_retry(dir);
-                }
-                outcome.removed_dirs.push(dir.to_path_buf());
-            }
-        }
-    }
-
     Ok(outcome)
 }
 
-/// Simple semver comparison helper (`a` newer than `b`?).
-pub fn is_version_newer(current: &str, candidate: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.trim_start_matches('v')
-            .split(&['.', '-'][..])
-            .filter_map(|p| p.parse::<u64>().ok())
-            .collect()
-    };
-    let cur = parse(current);
-    let cand = parse(candidate);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSemver<'a> {
+    core: Vec<u64>,
+    prerelease: Option<Vec<&'a str>>,
+}
 
-    for (c, n) in cand.iter().zip(cur.iter()) {
+fn parse_semver(raw: &str) -> Option<ParsedSemver<'_>> {
+    let trimmed = raw.trim();
+    let without_v = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    if without_v.is_empty() {
+        return None;
+    }
+
+    // SemVer 2.0 §10: build metadata (`+...`) MUST be ignored when determining version precedence.
+    let without_build = without_v.split('+').next().unwrap_or(without_v);
+    let (core_str, prerelease_str) = match without_build.split_once('-') {
+        Some((c, pre)) => (c, Some(pre)),
+        None => (without_build, None),
+    };
+
+    if core_str.is_empty() {
+        return None;
+    }
+    let mut core = Vec::with_capacity(3);
+    for seg in core_str.split('.') {
+        if seg.is_empty() || !seg.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        core.push(seg.parse::<u64>().ok()?);
+    }
+
+    let prerelease = match prerelease_str {
+        Some(pre) => {
+            if pre.is_empty() {
+                return None;
+            }
+            let ids: Vec<&str> = pre.split('.').collect();
+            if ids.iter().any(|id| id.is_empty()) {
+                return None;
+            }
+            Some(ids)
+        }
+        None => None,
+    };
+
+    Some(ParsedSemver { core, prerelease })
+}
+
+fn compare_prerelease_identifiers(cur_ids: &[&str], cand_ids: &[&str]) -> std::cmp::Ordering {
+    for (cur_id, cand_id) in cur_ids.iter().zip(cand_ids.iter()) {
+        if cur_id == cand_id {
+            continue;
+        }
+        let cur_num = if cur_id.bytes().all(|b| b.is_ascii_digit()) {
+            cur_id.parse::<u128>().ok()
+        } else {
+            None
+        };
+        let cand_num = if cand_id.bytes().all(|b| b.is_ascii_digit()) {
+            cand_id.parse::<u128>().ok()
+        } else {
+            None
+        };
+        let ord = match (cand_num, cur_num) {
+            // SemVer 2.0 §11.4.1: Identifiers consisting of only digits are compared numerically.
+            (Some(cn), Some(nn)) => cn.cmp(&nn),
+            // SemVer 2.0 §11.4.3: Numeric identifiers always have lower precedence than non-numeric.
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            // SemVer 2.0 §11.4.2: Alphanumeric identifiers are compared lexically in ASCII sort order.
+            (None, None) => cand_id.cmp(cur_id),
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    // SemVer 2.0 §11.4.4: Larger set of pre-release fields has higher precedence if prefix matches.
+    cand_ids.len().cmp(&cur_ids.len())
+}
+
+/// SemVer 2.0 comparison helper: returns `true` iff `candidate` has strictly higher precedence than `current`.
+pub fn is_version_newer(current: &str, candidate: &str) -> bool {
+    let Some(cand) = parse_semver(candidate) else {
+        return false;
+    };
+    let Some(cur) = parse_semver(current) else {
+        return true;
+    };
+
+    let max_core = cand.core.len().max(cur.core.len()).max(3);
+    for idx in 0..max_core {
+        let c = cand.core.get(idx).copied().unwrap_or(0);
+        let n = cur.core.get(idx).copied().unwrap_or(0);
         if c > n {
             return true;
         }
@@ -1058,7 +1370,17 @@ pub fn is_version_newer(current: &str, candidate: &str) -> bool {
             return false;
         }
     }
-    cand.len() > cur.len()
+
+    match (&cur.prerelease, &cand.prerelease) {
+        (None, None) => false,
+        // Pre-release has lower precedence than the associated normal version (`2.8.1-rc.1 -> 2.8.1` is true).
+        (Some(_), None) => true,
+        // Normal version must never downgrade to a pre-release of the same core (`2.8.1 -> 2.8.1-rc.1` is false).
+        (None, Some(_)) => false,
+        (Some(cur_pre), Some(cand_pre)) => {
+            compare_prerelease_identifiers(cur_pre, cand_pre) == std::cmp::Ordering::Greater
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1073,6 +1395,60 @@ mod tests {
         assert!(!is_version_newer("2.1.0", "2.0.0"));
         assert!(is_version_newer("1.20.1", "1.21.1"));
         assert!(!is_version_newer("2.2.0", "2.1.0"));
+
+        // SemVer 2.0 pre-release vs stable rules
+        assert!(is_version_newer("2.8.1-rc.1", "2.8.1"));
+        assert!(is_version_newer("2.8.1-beta.2", "2.8.1"));
+        assert!(!is_version_newer("2.8.1", "2.8.1-rc.1"));
+        assert!(!is_version_newer("2.8.1", "2.8.1-beta.2"));
+
+        // Pre-release identifier precedence
+        assert!(is_version_newer("2.8.1-alpha.1", "2.8.1-beta.1"));
+        assert!(is_version_newer("2.8.1-beta.2", "2.8.1-rc.1"));
+        assert!(!is_version_newer("2.8.1-rc.1", "2.8.1-beta.2"));
+        assert!(is_version_newer("2.8.1-rc.2", "2.8.1-rc.10"));
+        assert!(!is_version_newer("2.8.1-rc.10", "2.8.1-rc.2"));
+        assert!(is_version_newer("2.8.1-alpha", "2.8.1-alpha.1"));
+
+        // Build metadata (`+build`) ignored for precedence
+        assert!(!is_version_newer("2.8.1+build1", "2.8.0"));
+        assert!(!is_version_newer("2.8.1+build1", "2.8.1+build2"));
+        assert!(is_version_newer("2.8.0+build9", "2.8.1+build1"));
+        assert!(is_version_newer("v2.8.1-rc.1+sha.abc", "v2.8.1+sha.def"));
+    }
+
+    #[test]
+    fn test_validate_release_download_url_enforces_https_and_allowed_hosts() {
+        assert!(validate_release_download_url(
+            "https://github.com/MrQuster/mq/releases/download/v2.8.1/mq-linux-x86_64"
+        )
+        .is_ok());
+        assert!(validate_release_download_url(
+            "https://objects.githubusercontent.com/github-production-release-asset-2e65be/mq"
+        )
+        .is_ok());
+        assert!(validate_release_download_url(
+            "https://release-assets.githubusercontent.com/asset"
+        )
+        .is_ok());
+        assert!(validate_release_download_url("http://127.0.0.1:8080/mock/mq").is_ok());
+        assert!(validate_release_download_url("http://localhost:9000/mock/mq").is_ok());
+
+        // Reject plain HTTP on non-loopback hosts, non-GitHub hosts, credentials, and file://
+        assert!(validate_release_download_url(
+            "http://github.com/MrQuster/mq/releases/download/v2.8.1/mq"
+        )
+        .is_err());
+        assert!(validate_release_download_url("https://evil-github.com/mq").is_err());
+        assert!(validate_release_download_url("https://mrquster.github.io/mq").is_err());
+        assert!(validate_release_download_url("https://user:pass@github.com/mq").is_err());
+        assert!(validate_release_download_url("file:///tmp/mq").is_err());
+    }
+
+    #[test]
+    fn test_powershell_utf16le_base64_encoding() {
+        // "AB" in UTF-16LE is [0x41, 0x00, 0x42, 0x00] -> Base64 "QQBCAA=="
+        assert_eq!(encode_powershell_utf16le_base64("AB"), "QQBCAA==");
     }
 
     #[test]

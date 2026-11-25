@@ -14,13 +14,10 @@ use tokio::process::Command;
 
 use crate::command::BuiltLaunchCommand;
 
-#[cfg(target_os = "windows")]
 static ARGFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-#[cfg(target_os = "windows")]
 struct ArgfileGuard(Option<std::path::PathBuf>);
 
-#[cfg(target_os = "windows")]
 impl Drop for ArgfileGuard {
     fn drop(&mut self) {
         if let Some(ref path) = self.0 {
@@ -82,15 +79,47 @@ pub async fn spawn_and_stream_game_with_pid(
     };
 
     #[cfg(not(target_os = "windows"))]
-    let effective_args = &cmd.args;
+    let (effective_args, _argfile_guard) = {
+        let total_chars: usize = clean_program.to_string_lossy().len()
+            + cmd.args.iter().map(|a| a.len() + 1).sum::<usize>();
+        if total_chars > 100_000 {
+            use std::sync::atomic::Ordering;
+            let argfile_base = if !clean_working_dir.as_os_str().is_empty() {
+                clean_working_dir.clone()
+            } else {
+                std::env::temp_dir()
+            };
+            let seq = ARGFILE_SEQ.fetch_add(1, Ordering::Relaxed);
+            let argfile_path =
+                argfile_base.join(format!(".mq-args-{}-{seq}.argfile", std::process::id()));
+            let java_major =
+                crate::java::probe_java_binary(&clean_program).map(|rt| rt.major_version);
+            let (rewritten, created) = crate::command::rewrite_args_for_windows_limit(
+                &clean_program,
+                &cmd.args,
+                &clean_working_dir,
+                java_major.or(Some(21)),
+                &argfile_path,
+            )?;
+            (rewritten, ArgfileGuard(created))
+        } else {
+            (cmd.args.clone(), ArgfileGuard(None))
+        }
+    };
 
     let mut command = Command::new(&clean_program);
     command
-        .args(effective_args)
+        .args(&effective_args)
         .envs(&cmd.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    for env_var in ["_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS"] {
+        if !cmd.env.contains_key(env_var) {
+            command.env_remove(env_var);
+        }
+    }
 
     if !clean_working_dir.as_os_str().is_empty() {
         command.current_dir(&clean_working_dir);

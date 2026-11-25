@@ -189,6 +189,30 @@ pub enum UiWorkerResponse {
         instance_id: InstanceId,
         result: Result<Vec<std::path::PathBuf>, String>,
     },
+    MsaDeviceCodeReady {
+        verification_uri: String,
+        user_code: String,
+    },
+    MsaLoginFinished(Result<String, String>),
+    DiscordRpcConnected(mq_launch::DiscordRpcClient),
+    WorldBackedUp {
+        instance_id: InstanceId,
+        result: Result<std::path::PathBuf, String>,
+    },
+    WorldExported {
+        instance_id: InstanceId,
+        result: Result<std::path::PathBuf, String>,
+    },
+    WorldRestored {
+        instance_id: InstanceId,
+        file_name: String,
+        result: Result<std::path::PathBuf, String>,
+    },
+    InstanceZipImported(Box<Result<InstanceManifest, String>>),
+    WorldSizesReady {
+        instance_id: InstanceId,
+        sizes: HashMap<String, u64>,
+    },
 }
 
 /// Successful result of an install job.
@@ -366,6 +390,26 @@ pub enum UiWorkerCommand {
     AutoBackupWorlds {
         instance_id: InstanceId,
     },
+    BackupWorld {
+        instance_id: InstanceId,
+        folder_name: String,
+    },
+    ExportWorld {
+        instance_id: InstanceId,
+        folder_name: String,
+        export_path: std::path::PathBuf,
+    },
+    RestoreWorld {
+        instance_id: InstanceId,
+        file_name: String,
+    },
+    ImportInstanceZip {
+        path: std::path::PathBuf,
+        custom_name: Option<String>,
+    },
+    ComputeWorldSizes {
+        instance_id: InstanceId,
+    },
 }
 
 /// Central state model consumed by `eframe::App` in `mq-ui`.
@@ -476,6 +520,8 @@ pub struct UiState {
     pub pending_update_check: Option<Result<Option<mq_update::ReleaseAssetInfo>, String>>,
     pub pending_update_error: Option<String>,
     pub ely_login_done: Option<Result<String, String>>,
+    pub msa_device_code: Option<(String, String)>,
+    pub msa_login_done: Option<Result<String, String>>,
 
     // Cached per-instance install readiness to avoid per-frame disk I/O on the UI thread
     install_status_cache: RefCell<HashMap<InstanceId, (bool, Instant)>>,
@@ -514,6 +560,12 @@ pub struct UiState {
     pub game_session_starts: std::collections::HashMap<mq_core::InstanceId, std::time::Instant>,
     pub running_pids:
         std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<mq_core::InstanceId, u32>>>,
+    pub pending_game_started: Vec<InstanceId>,
+    pub pending_game_exited: Vec<(InstanceId, i32)>,
+    pub pending_discord_rpc: Option<mq_launch::DiscordRpcClient>,
+    pub worlds_cache_gen: u64,
+    pub world_sizes: HashMap<(InstanceId, String), u64>,
+    pub computing_world_sizes: HashSet<InstanceId>,
 }
 
 impl UiState {
@@ -540,8 +592,8 @@ impl UiState {
             Some(event_bus.clone()),
         )?);
 
-        let (cmd_sender, cmd_receiver) = flume::bounded(128);
-        let (resp_sender, resp_receiver) = flume::bounded(128);
+        let (cmd_sender, cmd_receiver) = flume::unbounded();
+        let (resp_sender, resp_receiver) = flume::bounded(1024);
 
         Ok(Self {
             paths,
@@ -630,6 +682,8 @@ impl UiState {
             pending_update_check: None,
             pending_update_error: None,
             ely_login_done: None,
+            msa_device_code: None,
+            msa_login_done: None,
             install_status_cache: RefCell::new(HashMap::new()),
             favorite_instances: HashSet::new(),
             show_import_dialog: false,
@@ -654,6 +708,12 @@ impl UiState {
             is_checking_modpack_update: false,
             game_session_starts: HashMap::new(),
             running_pids: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            pending_game_started: Vec::new(),
+            pending_game_exited: Vec::new(),
+            pending_discord_rpc: None,
+            worlds_cache_gen: 0,
+            world_sizes: HashMap::new(),
+            computing_world_sizes: HashSet::new(),
         })
     }
 
@@ -1075,6 +1135,7 @@ impl UiState {
                     self.game_running = true;
                     self.running_instances.entry(id.clone()).or_insert(None);
                     self.running_instance = Some(id.clone());
+                    self.pending_game_started.push(id.clone());
                     if self.crash_analysis_instance.as_ref() == Some(&id) {
                         self.crash_analysis = None;
                         self.crash_analysis_instance = None;
@@ -1091,6 +1152,8 @@ impl UiState {
                     instance_id,
                     exit_code,
                 } => {
+                    self.pending_game_exited
+                        .push((instance_id.clone(), exit_code));
                     self.running_instances.remove(&instance_id);
                     self.running_pids.lock().remove(&instance_id);
                     if let Some(start_time) = self.game_session_starts.remove(&instance_id) {
@@ -1327,6 +1390,88 @@ impl UiState {
                         self.status_message = Some((format!("Ошибка автобэкапа миров: {e}"), true));
                     }
                 },
+                UiWorkerResponse::MsaDeviceCodeReady {
+                    verification_uri,
+                    user_code,
+                } => {
+                    self.msa_device_code = Some((verification_uri, user_code));
+                }
+                UiWorkerResponse::MsaLoginFinished(result) => {
+                    match &result {
+                        Ok(name) => {
+                            let _ = self.cmd_sender.send(UiWorkerCommand::RefreshAccounts);
+                            self.status_message =
+                                Some((format!("Вход Microsoft выполнен: {name}"), false));
+                        }
+                        Err(e) => {
+                            self.status_message =
+                                Some((format!("Ошибка входа Microsoft: {e}"), true));
+                        }
+                    }
+                    self.msa_login_done = Some(result);
+                }
+                UiWorkerResponse::DiscordRpcConnected(rpc) => {
+                    self.pending_discord_rpc = Some(rpc);
+                }
+                UiWorkerResponse::WorldBackedUp {
+                    instance_id: _,
+                    result,
+                } => match result {
+                    Ok(p) => {
+                        self.status_message =
+                            Some((format!("Создан бэкап: {}", p.display()), false));
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Ошибка создания бэкапа: {e}"), true));
+                    }
+                },
+                UiWorkerResponse::WorldExported {
+                    instance_id: _,
+                    result,
+                } => match result {
+                    Ok(p) => {
+                        self.status_message =
+                            Some((format!("Мир экспортирован: {}", p.display()), false));
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Ошибка экспорта мира: {e}"), true));
+                    }
+                },
+                UiWorkerResponse::WorldRestored {
+                    instance_id: _,
+                    file_name,
+                    result,
+                } => match result {
+                    Ok(p) => {
+                        self.worlds_cache_gen = self.worlds_cache_gen.wrapping_add(1);
+                        self.status_message = Some((
+                            format!("Мир восстановлен из {file_name}: {}", p.display()),
+                            false,
+                        ));
+                    }
+                    Err(e) => {
+                        self.status_message =
+                            Some((format!("Ошибка восстановления мира: {e}"), true));
+                    }
+                },
+                UiWorkerResponse::InstanceZipImported(res) => match *res {
+                    Ok(manifest) => {
+                        self.instances.push(manifest.clone());
+                        self.selected_instance_id = Some(manifest.id);
+                        self.status_message =
+                            Some(("Инстанс успешно импортирован из архива".to_string(), false));
+                        let _ = self.cmd_sender.send(UiWorkerCommand::RefreshInstances);
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Ошибка импорта архива: {e}"), true));
+                    }
+                },
+                UiWorkerResponse::WorldSizesReady { instance_id, sizes } => {
+                    self.computing_world_sizes.remove(&instance_id);
+                    for (folder, sz) in sizes {
+                        self.world_sizes.insert((instance_id.clone(), folder), sz);
+                    }
+                }
             }
         }
 

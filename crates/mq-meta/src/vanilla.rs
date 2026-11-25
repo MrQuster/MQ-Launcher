@@ -101,11 +101,12 @@ pub fn infer_java_version(mc_version: &str) -> JavaVersionSpec {
     let trimmed = mc_version.trim();
 
     // Old alpha, beta, classic, indev, infdev, or custom prefixes run on Java 8
-    if trimmed.starts_with('c')
+    if trimmed.starts_with("c0.")
         || trimmed.starts_with("inf-")
         || trimmed.starts_with("rd-")
-        || trimmed.starts_with('a')
-        || trimmed.starts_with('b')
+        || trimmed.starts_with("a1.")
+        || trimmed.starts_with("b1.")
+        || trimmed.starts_with("in-")
     {
         return JavaVersionSpec {
             component: "jre-legacy".to_string(),
@@ -158,7 +159,7 @@ pub fn infer_java_version(mc_version: &str) -> JavaVersionSpec {
         [1, minor] if *minor > 20 => (21, "java-runtime-delta"),
         // 1.18 .. 1.20.4 -> Java 17
         [1, minor, ..] if *minor >= 18 => (17, "java-runtime-gamma"),
-        [1, 17, ..] => (17, "java-runtime-gamma"),
+        [1, 17, ..] => (16, "java-runtime-alpha"),
         // Older versions (1.16.5 and below, or 0.x) -> Java 8
         _ => (8, "jre-legacy"),
     };
@@ -453,7 +454,46 @@ fn resolve_library(
         return Ok(None);
     }
 
-    let native_linux = resolve_native_classifier(raw_lib, ctx)?;
+    let is_standalone_native = if raw_lib.natives.is_none() {
+        let clean = raw_lib.name.split('@').next().unwrap_or(&raw_lib.name);
+        let parts: Vec<&str> = clean.split(':').collect();
+        if parts.len() >= 4 && parts[3].starts_with("natives-") {
+            let clf = parts[3];
+            let target_os = normalize_os_name(&ctx.os_name);
+            let candidates: Vec<String> = match target_os {
+                "windows" => {
+                    expand_native_classifier_candidates("natives-windows-${arch}", &ctx.os_arch)
+                        .into_iter()
+                        .chain(std::iter::once("natives-windows".to_string()))
+                        .collect()
+                }
+                "osx" => expand_native_classifier_candidates("natives-macos-${arch}", &ctx.os_arch)
+                    .into_iter()
+                    .chain(std::iter::once("natives-macos".to_string()))
+                    .chain(expand_native_classifier_candidates(
+                        "natives-osx-${arch}",
+                        &ctx.os_arch,
+                    ))
+                    .chain(std::iter::once("natives-osx".to_string()))
+                    .collect(),
+                _ => expand_native_classifier_candidates("natives-linux-${arch}", &ctx.os_arch)
+                    .into_iter()
+                    .chain(std::iter::once("natives-linux".to_string()))
+                    .collect(),
+            };
+            if !candidates.iter().any(|c| c == clf) {
+                // Standalone native library for a different OS or arch; skip!
+                return Ok(None);
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let mut native_linux = resolve_native_classifier(raw_lib, ctx)?;
 
     let artifact = if let Some(ref downloads) = raw_lib.downloads {
         if let Some(ref raw_art) = downloads.artifact {
@@ -483,6 +523,10 @@ fn resolve_library(
         None
     };
 
+    if is_standalone_native && native_linux.is_none() {
+        native_linux = artifact.clone();
+    }
+
     if artifact.is_none() && native_linux.is_none() {
         return Ok(None);
     }
@@ -493,7 +537,7 @@ fn resolve_library(
         .map(|e| e.exclude.clone())
         .unwrap_or_default();
 
-    let include_in_classpath = artifact.is_some();
+    let include_in_classpath = artifact.is_some() && raw_lib.extract.is_none();
 
     Ok(Some(ResolvedLibrary {
         name: raw_lib.name.clone(),
@@ -568,6 +612,16 @@ pub fn parse_vanilla_version(json: &str, ctx: &RuleContext) -> MqResult<Resolved
         },
     };
 
+    if asset_index.id.contains("..")
+        || asset_index.id.contains('/')
+        || asset_index.id.contains('\\')
+    {
+        return Err(MqError::Metadata(format!(
+            "invalid asset_index id '{}': path traversal or separators not allowed",
+            asset_index.id
+        )));
+    }
+
     let client_jar = match raw.downloads.and_then(|d| d.client) {
         Some(client) => ArtifactDownload {
             path: client
@@ -627,15 +681,16 @@ pub fn parse_vanilla_version(json: &str, ctx: &RuleContext) -> MqResult<Resolved
         }
     }
 
-    let logging = raw.logging.and_then(|log| {
-        log.client.map(|client| {
+    let logging = match raw.logging.and_then(|log| log.client) {
+        Some(client) => {
             let (file_id, sha1, size, url) = if let Some(f) = client.file {
-                (
-                    f.id.unwrap_or_default(),
-                    f.sha1,
-                    f.size.unwrap_or(0),
-                    f.url.unwrap_or_default(),
-                )
+                let fid = f.id.unwrap_or_default();
+                if fid.contains("..") || fid.contains('/') || fid.contains('\\') {
+                    return Err(MqError::Metadata(format!(
+                        "invalid logging file id '{fid}': path traversal or separators not allowed"
+                    )));
+                }
+                (fid, f.sha1, f.size.unwrap_or(0), f.url.unwrap_or_default())
             } else {
                 (String::new(), None, 0, String::new())
             };
@@ -646,7 +701,7 @@ pub fn parse_vanilla_version(json: &str, ctx: &RuleContext) -> MqResult<Resolved
                 String::new()
             };
 
-            crate::models::LoggingConfig {
+            Some(crate::models::LoggingConfig {
                 client: Some(crate::models::LoggingClientConfig {
                     argument: client.argument.unwrap_or_default(),
                     file: ArtifactDownload {
@@ -657,9 +712,10 @@ pub fn parse_vanilla_version(json: &str, ctx: &RuleContext) -> MqResult<Resolved
                     },
                     logging_type: client.logging_type.unwrap_or_default(),
                 }),
-            }
-        })
-    });
+            })
+        }
+        None => None,
+    };
 
     Ok(ResolvedVersion {
         id,
@@ -758,12 +814,52 @@ impl VanillaVersionSource for &VersionManifestEntry {
     }
 }
 
+fn validate_vanilla_version_url(url_str: &str) -> MqResult<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url_str)
+        .map_err(|err| MqError::Metadata(format!("invalid version URL '{url_str}': {err}")))?;
+    let scheme = parsed.scheme();
+    let host = parsed.host_str().unwrap_or("");
+    let is_loopback = host == "127.0.0.1" || host == "localhost" || host == "::1";
+    if scheme == "https" || (scheme == "http" && is_loopback) {
+        Ok(parsed)
+    } else {
+        Err(MqError::Metadata(format!(
+            "disallowed version URL '{url_str}': must use https or loopback http"
+        )))
+    }
+}
+
 fn fetch_vanilla_version_by_url<'a>(
     client: &'a reqwest::Client,
     url: String,
     ctx: &'a RuleContext,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MqResult<ResolvedVersion>> + Send + 'a>> {
     Box::pin(async move {
+        let mut visited = std::collections::HashSet::new();
+        fetch_vanilla_version_recursive(client, url, ctx, 0, &mut visited).await
+    })
+}
+
+fn fetch_vanilla_version_recursive<'a>(
+    client: &'a reqwest::Client,
+    url: String,
+    ctx: &'a RuleContext,
+    depth: usize,
+    visited: &'a mut std::collections::HashSet<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = MqResult<ResolvedVersion>> + Send + 'a>> {
+    Box::pin(async move {
+        if depth >= 8 {
+            return Err(MqError::Metadata(format!(
+                "version inheritance depth limit exceeded (max 8) while fetching '{url}'"
+            )));
+        }
+        validate_vanilla_version_url(&url)?;
+        if !visited.insert(url.clone()) {
+            return Err(MqError::Metadata(format!(
+                "detected inheritance cycle for version URL '{url}'"
+            )));
+        }
+
         let response = client.get(&url).send().await.map_err(|err| {
             MqError::Network(format!("failed to fetch vanilla version '{url}': {err}"))
         })?;
@@ -792,7 +888,9 @@ fn fetch_vanilla_version_by_url<'a>(
                         let entry = find_version_entry(&manifest, parent_id.as_str())?;
                         entry.url.clone()
                     };
-                let parent = fetch_vanilla_version_by_url(client, parent_url, ctx).await?;
+                let parent =
+                    fetch_vanilla_version_recursive(client, parent_url, ctx, depth + 1, visited)
+                        .await?;
                 return crate::merge::merge_resolved_versions(&parent, &parsed);
             }
         }
@@ -890,6 +988,9 @@ mod tests {
         assert_eq!(infer_java_version("1.7.10").major_version, 8);
         assert_eq!(infer_java_version("1.12.2").major_version, 8);
         assert_eq!(infer_java_version("1.16.5").major_version, 8);
+        assert_eq!(infer_java_version("1.17.1").major_version, 16);
+        assert_eq!(infer_java_version("1.17.1").component, "java-runtime-alpha");
+        assert_eq!(infer_java_version("1.17").major_version, 16);
         assert_eq!(infer_java_version("1.18").major_version, 17);
         assert_eq!(infer_java_version("1.20.4").major_version, 17);
         assert_eq!(infer_java_version("1.20.5").major_version, 21);

@@ -136,30 +136,32 @@ pub fn collect_instance_verify_targets(
     let lib_base = paths.libraries_dir();
     for lib in &version.libraries {
         if let Some(artifact) = &lib.artifact {
-            let p = lib_base.join(&artifact.path);
-            targets.push(VerifyFileTarget {
-                path: p,
-                expected_sha1: artifact.sha1,
-                expected_sha512: None,
-                expected_size: if artifact.size > 0 {
-                    Some(artifact.size)
-                } else {
-                    None
-                },
-            });
+            if let Ok(p) = mq_core::resolve_safe_path(&lib_base, &artifact.path) {
+                targets.push(VerifyFileTarget {
+                    path: p,
+                    expected_sha1: artifact.sha1,
+                    expected_sha512: None,
+                    expected_size: if artifact.size > 0 {
+                        Some(artifact.size)
+                    } else {
+                        None
+                    },
+                });
+            }
         }
         if let Some(native) = &lib.native_linux {
-            let p = lib_base.join(&native.path);
-            targets.push(VerifyFileTarget {
-                path: p,
-                expected_sha1: native.sha1,
-                expected_sha512: None,
-                expected_size: if native.size > 0 {
-                    Some(native.size)
-                } else {
-                    None
-                },
-            });
+            if let Ok(p) = mq_core::resolve_safe_path(&lib_base, &native.path) {
+                targets.push(VerifyFileTarget {
+                    path: p,
+                    expected_sha1: native.sha1,
+                    expected_sha512: None,
+                    expected_size: if native.size > 0 {
+                        Some(native.size)
+                    } else {
+                        None
+                    },
+                });
+            }
         }
     }
 

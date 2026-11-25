@@ -5,7 +5,7 @@
 #  Advanced:
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Portable
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Uninstall
-#    & ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Version 2.8.1 -Silent
+#    & ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Version 2.8.2 -Silent
 # ==============================================================================
 
 function Invoke-MqInstaller {
@@ -68,7 +68,7 @@ Usage:
   install.ps1 [-Version <tag>] [-Portable] [-Silent] [-Uninstall] [-Purge] [-InstallDir <path>] [-BaseUrl <url>] [-NoDesktopShortcut] [-Force]
 
 Parameters:
-  -Version <tag>       Specify version to install (e.g. '2.8.1' or 'latest'). Default: latest
+  -Version <tag>       Specify version to install (e.g. '2.8.2' or 'latest'). Default: latest
   -Portable            Install standalone portable package into %LOCALAPPDATA%\MQ-Portable
   -Silent              Run unattended installation (/VERYSILENT /SUPPRESSMSGBOXES /NORESTART)
   -Uninstall           Silently uninstall MQ Launcher (preserves %LOCALAPPDATA%\MQ user data)
@@ -171,6 +171,21 @@ Parameters:
         return $trimmed.Trim('"')
     }
 
+    function Broadcast-SettingChange {
+        try {
+            $HWND_BROADCAST = [IntPtr]0xffff
+            $WM_SETTINGCHANGE = 0x001A
+            $outResult = [UIntPtr]::Zero
+            if (-not ([System.Management.Automation.PSTypeName]'Win32.NativeMethods').Type) {
+                Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+"@ -ErrorAction SilentlyContinue
+            }
+            [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, [uint32]$WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$outResult) | Out-Null
+        } catch {}
+    }
+
     function Add-UserPathEntry {
         param([Parameter(Mandatory = $true)][string]$DirPath)
         $cleanDir = $DirPath.Trim().TrimEnd('\')
@@ -202,8 +217,9 @@ Parameters:
                         if ($newUserPath -like '*%*') {
                             $envKey.SetValue("Path", $newUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
                         } else {
-                            [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+                            $envKey.SetValue("Path", $newUserPath, [Microsoft.Win32.RegistryValueKind]::String)
                         }
+                        Broadcast-SettingChange
                     }
                 } finally {
                     $envKey.Close()
@@ -262,8 +278,9 @@ Parameters:
                             if ($newUserPath -like '*%*') {
                                 $envKey.SetValue("Path", $newUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
                             } else {
-                                [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+                                $envKey.SetValue("Path", $newUserPath, [Microsoft.Win32.RegistryValueKind]::String)
                             }
+                            Broadcast-SettingChange
                         }
                     }
                 } finally {
@@ -472,11 +489,29 @@ Parameters:
         }
         foreach ($dirPath in $installCandidates) {
             if ($dirPath -and (Test-Path -LiteralPath $dirPath)) {
+                # If custom -InstallDir was passed, verify mq.exe exists before deleting
+                if ($InstallDir -and ($dirPath -eq $InstallDir) -and (-not (Test-Path -LiteralPath (Join-Path $dirPath "mq.exe")))) {
+                    if (-not $Silent) {
+                        Write-Host "Skipping removal of $dirPath: mq.exe not found in custom directory" -ForegroundColor Yellow
+                    }
+                    continue
+                }
+
                 if (-not $Silent) {
                     Write-Host "Removing installation directory $dirPath..." -ForegroundColor Yellow
                 }
-                Remove-Item -LiteralPath $dirPath -Recurse -Force -ErrorAction SilentlyContinue
-                $uninstalled = $true
+
+                $portableData = Join-Path $dirPath "data"
+                if (-not $Purge -and (Test-Path -LiteralPath $portableData)) {
+                    # Preserve MQ-Portable\data directory unless -Purge is explicitly passed
+                    Get-ChildItem -LiteralPath $dirPath -Force | Where-Object { $_.Name -ine "data" } | ForEach-Object {
+                        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                    $uninstalled = $true
+                } else {
+                    Remove-Item -LiteralPath $dirPath -Recurse -Force -ErrorAction SilentlyContinue
+                    $uninstalled = $true
+                }
             }
         }
 
@@ -693,6 +728,8 @@ Parameters:
             if (-not (Test-Path -LiteralPath $installedExe)) {
                 throw "Portable package did not contain mq.exe after extraction to $targetDir"
             }
+
+            Add-UserPathEntry -DirPath $targetDir
 
             if (-not $Silent) {
                 Write-Host "`n================================================================================" -ForegroundColor Green

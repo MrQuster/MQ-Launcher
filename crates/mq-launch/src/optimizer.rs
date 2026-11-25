@@ -47,12 +47,17 @@ pub fn recommend_jvm_tuning(
         (4096, max_mb)
     };
 
+    let memory_max_mb = memory_max_mb.min(total_ram_mb.saturating_sub(1536).max(1024) as u32);
+    let memory_min_mb = memory_min_mb.min(memory_max_mb);
+
     if java_major >= 21 && memory_max_mb >= 6144 {
-        let jvm_args = vec![
+        let mut jvm_args = vec![
             "-XX:+UnlockExperimentalVMOptions".to_string(),
             "-XX:+UseZGC".to_string(),
-            "-XX:+ZGenerational".to_string(),
         ];
+        if (21..24).contains(&java_major) {
+            jvm_args.push("-XX:+ZGenerational".to_string());
+        }
         let summary_ru = format!(
             "Generational ZGC (Java {java_major}) - RAM: {memory_min_mb}-{memory_max_mb} MB (ПК: {total_ram_mb} MB, модов: {mod_count})"
         );
@@ -63,14 +68,16 @@ pub fn recommend_jvm_tuning(
             summary_ru,
         }
     } else {
-        let jvm_args = vec![
+        let mut jvm_args = vec![
             "-XX:+UnlockExperimentalVMOptions".to_string(),
             "-XX:+UseG1GC".to_string(),
             "-XX:G1NewSizePercent=20".to_string(),
             "-XX:G1ReservePercent=20".to_string(),
             "-XX:MaxGCPauseMillis=50".to_string(),
-            "-XX:G1HeapRegionSize=32M".to_string(),
         ];
+        if memory_max_mb >= 4096 {
+            jvm_args.push("-XX:G1HeapRegionSize=32M".to_string());
+        }
         let summary_ru = format!(
             "Tuned G1GC (Java {java_major}) - RAM: {memory_min_mb}-{memory_max_mb} MB (ПК: {total_ram_mb} MB, модов: {mod_count})"
         );
@@ -97,11 +104,29 @@ mod tests {
     }
 
     #[test]
+    fn test_recommend_jvm_tuning_zgc_on_java_25_drops_zgenerational() {
+        let rec = recommend_jvm_tuning(16384, 25, 80);
+        assert_eq!(rec.memory_min_mb, 3072);
+        assert_eq!(rec.memory_max_mb, 6144);
+        assert!(rec.jvm_args.contains(&"-XX:+UseZGC".to_string()));
+        assert!(!rec.jvm_args.contains(&"-XX:+ZGenerational".to_string()));
+    }
+
+    #[test]
     fn test_recommend_jvm_tuning_g1gc_on_java_17() {
         let rec = recommend_jvm_tuning(16384, 17, 80);
         assert_eq!(rec.memory_min_mb, 3072);
         assert_eq!(rec.memory_max_mb, 6144);
         assert!(rec.jvm_args.contains(&"-XX:+UseG1GC".to_string()));
         assert!(!rec.jvm_args.contains(&"-XX:+UseZGC".to_string()));
+    }
+
+    #[test]
+    fn test_recommend_jvm_tuning_g1gc_avoids_large_region_on_small_heap() {
+        let rec = recommend_jvm_tuning(4096, 17, 10);
+        assert!(rec.memory_max_mb < 4096);
+        assert!(!rec
+            .jvm_args
+            .contains(&"-XX:G1HeapRegionSize=32M".to_string()));
     }
 }

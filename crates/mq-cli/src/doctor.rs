@@ -566,8 +566,8 @@ fn redact_key_value_pairs(s: &str) -> String {
                     }
                 }
 
-                out.push_str(after_key);
-                rest = "";
+                out.push_str(&after_key[..sep_len]);
+                rest = trimmed;
             }
             out.push_str(rest);
             result = out;
@@ -786,12 +786,51 @@ pub fn export_diagnostic_report_sanitized(
     sanitize_diagnostics(&out, known_secrets)
 }
 
+/// Collects all active and stored account tokens and API keys to guarantee complete redaction.
+pub fn collect_diagnostic_secrets(paths: &MqPaths) -> Vec<String> {
+    let mut secrets = Vec::new();
+    if let Ok(store) = mq_auth::AccountStore::load_or_default(paths) {
+        for s in store.collect_secret_strings() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() && !secrets.iter().any(|existing| existing == trimmed) {
+                secrets.push(trimmed.to_string());
+            }
+        }
+    }
+    if let Ok(config) = mq_core::AppConfig::load_or_default(paths) {
+        if let Some(cf_key) = config.curseforge_api_key.as_ref() {
+            let s = cf_key.expose_secret().trim();
+            if !s.is_empty() && !secrets.iter().any(|existing| existing == s) {
+                secrets.push(s.to_string());
+            }
+        }
+    }
+    secrets
+}
+
 /// Exports complete diagnostic report serialized to JSON with all sensitive fields sanitized.
 pub fn export_diagnostic_json_sanitized(
     report: &InstallationDiagnosticReport,
     known_secrets: &[&str],
 ) -> String {
-    let raw_json = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
+    let mut sanitized_report = report.clone();
+    for log in &mut sanitized_report.logs {
+        log.message = sanitize_diagnostics(&log.message, known_secrets);
+        if let Some(ref mut d) = log.details {
+            *d = sanitize_diagnostics(d, known_secrets);
+        }
+    }
+    for step in &mut sanitized_report.steps {
+        step.summary = sanitize_diagnostics(&step.summary, known_secrets);
+        if let Some(ref mut err) = step.error_reason {
+            *err = sanitize_diagnostics(err, known_secrets);
+        }
+        for d in &mut step.details {
+            *d = sanitize_diagnostics(d, known_secrets);
+        }
+    }
+    let raw_json =
+        serde_json::to_string_pretty(&sanitized_report).unwrap_or_else(|_| "{}".to_string());
     sanitize_diagnostics(&raw_json, known_secrets)
 }
 
@@ -1787,7 +1826,7 @@ pub async fn run_install_doctor(
 }
 
 /// CLI runner for `mq doctor --install <version>`.
-pub async fn cmd_doctor_install(version: &str, args: &DoctorArgs, _paths: &MqPaths) -> Result<()> {
+pub async fn cmd_doctor_install(version: &str, args: &DoctorArgs, paths: &MqPaths) -> Result<()> {
     println!("================================================================================");
     println!(
         "          MQ LAUNCHER v{} — ДИАГНОСТИКА УСТАНОВКИ (DOCTOR INSTALL)",
@@ -1862,12 +1901,21 @@ pub async fn cmd_doctor_install(version: &str, args: &DoctorArgs, _paths: &MqPat
     }
     println!("================================================================================");
 
+    let secret_strings = collect_diagnostic_secrets(paths);
+    let known_secrets: Vec<&str> = secret_strings.iter().map(|s| s.as_str()).collect();
+
     if args.json {
         println!("\n--- [JSON ЭКСПОРТ ДИАГНОСТИКИ (САНИТИЗИРОВАН)] ---");
-        println!("{}", export_diagnostic_json_sanitized(&report, &[]));
+        println!(
+            "{}",
+            export_diagnostic_json_sanitized(&report, &known_secrets)
+        );
     } else if args.export {
         println!("\n--- [ЭКСПОРТ ДИАГНОСТИКИ ДЛЯ БАГ-РЕПОРТА (САНИТИЗИРОВАН)] ---");
-        println!("{}", export_diagnostic_report_sanitized(&report, &[]));
+        println!(
+            "{}",
+            export_diagnostic_report_sanitized(&report, &known_secrets)
+        );
     }
 
     if report.overall_status == StepStatus::Fail {
@@ -1994,6 +2042,14 @@ mod tests {
         assert!(scrubbed.contains("\"password\": \"[REDACTED]\""));
         // SHA-1 checksum MUST be preserved!
         assert!(scrubbed.contains("34f8a912b74044cd93c289adfae10113289abc12"));
+    }
+
+    #[test]
+    fn test_secret_sanitization_advances_after_non_assignment_key() {
+        let text = "This is a secret note about something. Later, password=\"real_secret_value_12345\" appears.";
+        let scrubbed = sanitize_diagnostics(text, &[]);
+        assert!(!scrubbed.contains("real_secret_value_12345"));
+        assert!(scrubbed.contains("password=\"[REDACTED]\""));
     }
 
     #[test]

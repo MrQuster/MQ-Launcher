@@ -767,16 +767,23 @@ pub fn parse_loader_profile_for_context(
                 })
         });
 
-    let client_jar = raw.downloads.and_then(|d| d.client).map(|art| {
+    let client_jar = if let Some(art) = raw.downloads.and_then(|d| d.client) {
         let path = art.path.unwrap_or_else(|| "client.jar".to_string());
+        if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+            return Err(MqError::Metadata(format!(
+                "invalid client jar path '{path}': path traversal not allowed"
+            )));
+        }
         let url = art.url.unwrap_or_default();
-        ArtifactDownload {
+        Some(ArtifactDownload {
             path,
             url,
             sha1: art.sha1,
             size: art.size.unwrap_or(0),
-        }
-    });
+        })
+    } else {
+        None
+    };
 
     let logging = raw.logging.and_then(|l| l.client);
 
@@ -1370,27 +1377,47 @@ pub fn neoforge_installer_url(base_url: Option<&str>, neoforge_version: &str) ->
             "NeoForge version must not be empty".to_string(),
         ));
     }
+    if ver.contains("..") || ver.contains('/') || ver.contains('\\') {
+        return Err(MqError::Metadata(format!(
+            "invalid NeoForge version '{ver}': path traversal characters not allowed"
+        )));
+    }
     let base = base_url
         .map(|u| u.trim().trim_end_matches('/'))
         .filter(|u| !u.is_empty())
         .unwrap_or(NEOFORGE_MAVEN_URL);
-    Ok(format!(
-        "{base}/net/neoforged/neoforge/{ver}/neoforge-{ver}-installer.jar"
-    ))
+
+    if ver.starts_with("1.20.1-") {
+        Ok(format!(
+            "{base}/net/neoforged/forge/{ver}/forge-{ver}-installer.jar"
+        ))
+    } else {
+        Ok(format!(
+            "{base}/net/neoforged/neoforge/{ver}/neoforge-{ver}-installer.jar"
+        ))
+    }
 }
 
 /// Extracts NeoForge versions for `mc_version` from Maven `maven-metadata.xml` content,
 /// ordered newest-first (with stable releases prioritized over `-beta`/`-alpha`).
 pub fn parse_neoforge_maven_metadata_versions(xml: &str, mc_version: &str) -> Vec<String> {
     let mc = mc_version.trim();
-    let prefix = if let Some(rest) = mc.strip_prefix("1.") {
+    let is_1_20_1 = mc == "1.20.1";
+    let prefix = if is_1_20_1 {
+        "1.20.1-".to_string()
+    } else if let Some(rest) = mc.strip_prefix("1.") {
         if rest.contains('.') {
             format!("{rest}.")
         } else {
             format!("{rest}.0.")
         }
     } else {
-        format!("{mc}.")
+        let parts: Vec<&str> = mc.split('.').collect();
+        if parts.len() == 2 {
+            format!("{mc}.0.")
+        } else {
+            format!("{mc}.")
+        }
     };
 
     let mut stable = Vec::new();
@@ -1423,6 +1450,26 @@ pub async fn fetch_neoforge_loader_versions(
     base_url: Option<&str>,
     mc_version: &str,
 ) -> MqResult<Vec<String>> {
+    let mc = mc_version.trim();
+    if mc == "1.20.1" {
+        let url_str = match base_url {
+            Some(base) => format!(
+                "{}/net/neoforged/forge/maven-metadata.xml",
+                base.trim().trim_end_matches('/')
+            ),
+            None => "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml"
+                .to_owned(),
+        };
+        if let Ok(url) = Url::parse(&url_str) {
+            if let Ok(body) = get_text_checked(client, url).await {
+                let versions = parse_neoforge_maven_metadata_versions(&body, mc);
+                if !versions.is_empty() {
+                    return Ok(versions);
+                }
+            }
+        }
+    }
+
     let url_str = match base_url {
         Some(base) => format!(
             "{}/net/neoforged/neoforge/maven-metadata.xml",
@@ -1434,7 +1481,23 @@ pub async fn fetch_neoforge_loader_versions(
         MqError::Metadata(format!("invalid NeoForge metadata URL '{url_str}': {err}"))
     })?;
     let body = get_text_checked(client, url).await?;
-    Ok(parse_neoforge_maven_metadata_versions(&body, mc_version))
+    let mut versions = parse_neoforge_maven_metadata_versions(&body, mc_version);
+    if versions.is_empty() && mc == "1.20.1" {
+        let url_str = match base_url {
+            Some(base) => format!(
+                "{}/net/neoforged/forge/maven-metadata.xml",
+                base.trim().trim_end_matches('/')
+            ),
+            None => "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml"
+                .to_owned(),
+        };
+        if let Ok(url) = Url::parse(&url_str) {
+            if let Ok(body) = get_text_checked(client, url).await {
+                versions = parse_neoforge_maven_metadata_versions(&body, mc);
+            }
+        }
+    }
+    Ok(versions)
 }
 
 #[cfg(test)]
@@ -1959,5 +2022,23 @@ mod tests {
             url,
             "https://maven.neoforged.net/releases/net/neoforged/neoforge/26.3.0.103/neoforge-26.3.0.103-installer.jar"
         );
+
+        let xml2 = r#"
+<metadata><versioning><versions>
+  <version>26.1.0.100</version>
+  <version>26.1.1.20</version>
+  <version>1.20.1-47.1.106</version>
+</versions></versioning></metadata>"#;
+        let v26_1 = parse_neoforge_maven_metadata_versions(xml2, "26.1");
+        assert_eq!(v26_1, vec!["26.1.0.100"]);
+        let v1201 = parse_neoforge_maven_metadata_versions(xml2, "1.20.1");
+        assert_eq!(v1201, vec!["1.20.1-47.1.106"]);
+        let url_1201 =
+            neoforge_installer_url(None, "1.20.1-47.1.106").expect("neoforge 1.20.1 url");
+        assert_eq!(
+            url_1201,
+            "https://maven.neoforged.net/releases/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-installer.jar"
+        );
+        assert!(neoforge_installer_url(None, "../bad").is_err());
     }
 }

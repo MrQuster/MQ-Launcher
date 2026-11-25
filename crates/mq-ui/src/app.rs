@@ -496,21 +496,21 @@ impl MqApp {
                 .insert(instance_id.clone(), std::time::Instant::now());
 
             if self.state.config.discord_rpc_enabled {
-                if self.discord_rpc.is_none() {
-                    self.discord_rpc = mq_launch::DiscordRpcClient::connect_default();
-                }
-                if let Some(ref mut rpc) = self.discord_rpc {
-                    rpc.set_playing_activity(
-                        &inst.name,
-                        &format!("Minecraft {}", inst.mc_version),
-                        chrono::Utc::now().timestamp() as u64,
-                    );
-                }
+                let inst_name = inst.name.clone();
+                let inst_mc = inst.mc_version.clone();
+                let rpc_resp_tx = self.state.resp_sender.clone();
+                std::thread::spawn(move || {
+                    if let Some(mut rpc) = mq_launch::DiscordRpcClient::connect_default() {
+                        rpc.set_playing_activity(
+                            &inst_name,
+                            &format!("Minecraft {inst_mc}"),
+                            chrono::Utc::now().timestamp() as u64,
+                        );
+                        let _ = rpc_resp_tx.send(UiWorkerResponse::DiscordRpcConnected(rpc));
+                    }
+                });
             }
 
-            if self.state.config.hide_on_launch {
-                self.window_hidden_for_game = true;
-            }
             if self.state.config.mini_overlay_on_launch {
                 self.state.mini_overlay_active = true;
             }
@@ -521,6 +521,13 @@ impl MqApp {
                 .active_account()
                 .cloned()
                 .unwrap_or_else(|| mq_auth::create_offline_account("Player").unwrap());
+            let account_secrets: Vec<String> = self
+                .state
+                .accounts
+                .collect_secret_strings()
+                .into_iter()
+                .map(String::from)
+                .collect();
 
             spawn_monitored_task(
                 "launch_instance",
@@ -686,6 +693,14 @@ impl MqApp {
                         }
                     };
 
+                    let mut all_secrets: Vec<String> = launch_ctx.collect_secrets();
+                    for s in account_secrets {
+                        if !s.is_empty() && !all_secrets.contains(&s) {
+                            all_secrets.push(s);
+                        }
+                    }
+                    let secret_refs: Vec<&str> = all_secrets.iter().map(String::as_str).collect();
+
                     if dry_run {
                         bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
                             instance: instance_id.to_string(),
@@ -693,7 +708,7 @@ impl MqApp {
                             level: mq_core::GameLogLevel::Info,
                             line: format!(
                                 "DRY RUN COMMAND:\n{}",
-                                built_cmd.to_shell_command_line()
+                                built_cmd.to_redacted_command_line(&secret_refs)
                             ),
                         }));
                     } else {
@@ -740,7 +755,7 @@ impl MqApp {
                         let exit_code = match mq_launch::spawn_and_stream_game_with_pid(
                             &built_cmd,
                             instance_id.as_str(),
-                            Vec::new(),
+                            all_secrets,
                             Some(bus.clone()),
                             Some(pid_tx),
                         )
@@ -1764,6 +1779,137 @@ impl MqApp {
                         }
                     });
                 }
+                UiWorkerCommand::BackupWorld {
+                    instance_id,
+                    folder_name,
+                } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let backups_root = self.state.paths.backups_dir();
+                    let resp_tx = self.state.resp_sender.clone();
+                    let inst_id_str = instance_id.as_str().to_string();
+                    tokio::spawn(async move {
+                        let res = tokio::task::spawn_blocking(move || {
+                            mq_instances::backup_world(
+                                &inst_dir,
+                                &backups_root,
+                                &inst_id_str,
+                                &folder_name,
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("Внутренняя ошибка бэкапа: {e}")));
+                        let _ = resp_tx
+                            .send_async(UiWorkerResponse::WorldBackedUp {
+                                instance_id,
+                                result: res,
+                            })
+                            .await;
+                    });
+                }
+                UiWorkerCommand::ExportWorld {
+                    instance_id,
+                    folder_name,
+                    export_path,
+                } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let resp_tx = self.state.resp_sender.clone();
+                    let export_target = export_path.clone();
+                    tokio::spawn(async move {
+                        let res = tokio::task::spawn_blocking(move || {
+                            mq_instances::export_world_to_zip(
+                                &inst_dir,
+                                &folder_name,
+                                &export_target,
+                            )
+                            .map(|()| export_target)
+                            .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("Внутренняя ошибка экспорта: {e}")));
+                        let _ = resp_tx
+                            .send_async(UiWorkerResponse::WorldExported {
+                                instance_id,
+                                result: res,
+                            })
+                            .await;
+                    });
+                }
+                UiWorkerCommand::RestoreWorld {
+                    instance_id,
+                    file_name,
+                } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let backups_root = self.state.paths.backups_dir();
+                    let resp_tx = self.state.resp_sender.clone();
+                    let inst_id_str = instance_id.as_str().to_string();
+                    let fname = file_name.clone();
+                    tokio::spawn(async move {
+                        let res = tokio::task::spawn_blocking(move || {
+                            mq_instances::restore_world(
+                                &backups_root,
+                                &inst_id_str,
+                                &fname,
+                                &inst_dir,
+                                None,
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("Внутренняя ошибка восстановления: {e}")));
+                        let _ = resp_tx
+                            .send_async(UiWorkerResponse::WorldRestored {
+                                instance_id,
+                                file_name,
+                                result: res,
+                            })
+                            .await;
+                    });
+                }
+                UiWorkerCommand::ImportInstanceZip { path, custom_name } => {
+                    let instances_dir = self.state.paths.instances_dir();
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let res = tokio::task::spawn_blocking(move || {
+                            mq_instances::import_instance_from_zip(
+                                &path,
+                                &instances_dir,
+                                custom_name.as_deref(),
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("Внутренняя ошибка импорта: {e}")));
+                        let _ = resp_tx
+                            .send_async(UiWorkerResponse::InstanceZipImported(Box::new(res)))
+                            .await;
+                    });
+                }
+                UiWorkerCommand::ComputeWorldSizes { instance_id } => {
+                    let inst_dir = self.state.paths.instance_dir(instance_id.as_str());
+                    let resp_tx = self.state.resp_sender.clone();
+                    tokio::spawn(async move {
+                        let sizes = tokio::task::spawn_blocking(move || {
+                            let saves_dir = inst_dir.join("saves");
+                            let mut map = std::collections::HashMap::new();
+                            if let Ok(entries) = std::fs::read_dir(saves_dir) {
+                                for entry in entries.flatten() {
+                                    if entry.path().is_dir() {
+                                        let name = entry.file_name().to_string_lossy().to_string();
+                                        let sz = mq_instances::compute_dir_size(&entry.path());
+                                        map.insert(name, sz);
+                                    }
+                                }
+                            }
+                            map
+                        })
+                        .await
+                        .unwrap_or_default();
+                        let _ = resp_tx
+                            .send_async(UiWorkerResponse::WorldSizesReady { instance_id, sizes })
+                            .await;
+                    });
+                }
                 _ => {}
             }
         }
@@ -2433,8 +2579,12 @@ impl MqApp {
     /// Runs even when the window is minimized (`0x0` viewport on Windows) so downloads,
     /// launches, and external `.mrpack` open requests never stall while minimized.
     fn drain_background_and_ipc(&mut self, ctx: &egui::Context) {
+        let had_events = !self.state.resp_receiver.is_empty() || !self.state.event_bus.is_empty();
         self.state.drain_events();
         self.handle_worker_commands();
+        if had_events {
+            ctx.request_repaint();
+        }
 
         if let Some(rx) = self.state.mrpack_ipc_receiver.clone() {
             let mut received = Vec::new();
@@ -2453,20 +2603,27 @@ impl MqApp {
             }
         }
 
-        if self.window_hidden_for_game {
-            if self.state.game_running {
+        if let Some(rpc) = self.state.pending_discord_rpc.take() {
+            self.discord_rpc = Some(rpc);
+        }
+
+        for _inst_id in self.state.pending_game_started.drain(..) {
+            if self.state.config.hide_on_launch {
+                self.window_hidden_for_game = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            } else {
+            }
+        }
+
+        for (_inst_id, _code) in self.state.pending_game_exited.drain(..) {
+            if self.window_hidden_for_game {
                 self.window_hidden_for_game = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                if let Some(ref mut rpc) = self.discord_rpc {
+            }
+            if !self.state.game_running {
+                if let Some(mut rpc) = self.discord_rpc.take() {
                     rpc.clear_activity();
                 }
-            }
-        } else if !self.state.game_running {
-            if let Some(ref mut rpc) = self.discord_rpc {
-                rpc.clear_activity();
             }
         }
     }

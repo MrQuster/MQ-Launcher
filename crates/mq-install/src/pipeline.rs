@@ -368,6 +368,8 @@ async fn install_game_transactional(
 
     let client = reqwest::Client::builder()
         .user_agent(mq_net::USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| (current_stage, MqError::Network(e.to_string())))?;
 
@@ -403,6 +405,22 @@ async fn install_game_transactional(
         .text()
         .await
         .map_err(|e| (current_stage, MqError::Network(e.to_string())))?;
+
+    if let Some(ref expected_sha1) = entry.sha1 {
+        use sha1::Digest as _;
+        let actual_sha1 = hex::encode(sha1::Sha1::digest(raw_version_json.as_bytes()));
+        if !actual_sha1.eq_ignore_ascii_case(expected_sha1) {
+            return Err((
+                current_stage,
+                MqError::HashMismatch {
+                    target: entry.url.clone(),
+                    algo: "SHA-1",
+                    expected: expected_sha1.clone(),
+                    actual: actual_sha1,
+                },
+            ));
+        }
+    }
 
     let mut resolved_ver =
         resolve_version_inherits_from_async(&raw_version_json, &rule_ctx, |parent_id| {
@@ -687,10 +705,27 @@ async fn install_game_transactional(
             .map_err(|e| (current_stage, e))?
     };
 
+    if let Some(expected_sha1) = resolved_ver.asset_index.sha1 {
+        use sha1::Digest as _;
+        let actual_sha1 =
+            mq_core::Sha1Digest::from_bytes(sha1::Sha1::digest(raw_index_json.as_bytes()).into());
+        if actual_sha1 != expected_sha1 {
+            return Err((
+                current_stage,
+                MqError::HashMismatch {
+                    target: asset_index_path.to_string_lossy().into_owned(),
+                    algo: "SHA-1",
+                    expected: expected_sha1.to_hex(),
+                    actual: actual_sha1.to_hex(),
+                },
+            ));
+        }
+    }
+
     if let Some(p) = asset_index_path.parent() {
         fs::create_dir_all(p).map_err(|e| (current_stage, MqError::Io(e)))?;
     }
-    fs::write(&asset_index_path, raw_index_json.as_bytes())
+    mq_core::platform::atomic_write(&asset_index_path, raw_index_json.as_bytes())
         .map_err(|e| (current_stage, MqError::Io(e)))?;
 
     // 5. Pre-check disk space using statvfs
@@ -809,7 +844,8 @@ async fn install_game_transactional(
 
     for lib in all_libs {
         if let Some(art) = &lib.artifact {
-            let target = lib_base.join(&art.path);
+            let target =
+                mq_core::resolve_safe_path(&lib_base, &art.path).map_err(|e| (current_stage, e))?;
             let url_empty = art.url.trim().is_empty();
             let blob_dest = if let Some(sha1) = art.sha1 {
                 cas.blob_path(&sha1)
@@ -859,7 +895,8 @@ async fn install_game_transactional(
         }
 
         if let Some(nat) = &lib.native_linux {
-            let target = lib_base.join(&nat.path);
+            let target =
+                mq_core::resolve_safe_path(&lib_base, &nat.path).map_err(|e| (current_stage, e))?;
             let url_empty = nat.url.trim().is_empty();
             let blob_dest = if let Some(sha1) = nat.sha1 {
                 cas.blob_path(&sha1)
@@ -886,6 +923,40 @@ async fn install_game_transactional(
 
             if blob_dest != target && (!url_empty || in_cas) {
                 hardlink_targets.push((blob_dest, target));
+            }
+        }
+    }
+
+    // 6b.1 Logging configuration file
+    if let Some(ref logging) = resolved_ver.logging {
+        if let Some(ref client_log) = logging.client {
+            let art = &client_log.file;
+            if !art.url.trim().is_empty() && !art.path.trim().is_empty() {
+                if let Ok(dest) = mq_core::resolve_safe_path(&paths.assets_dir(), &art.path) {
+                    let need_download = match art.sha1 {
+                        Some(expected) => {
+                            if dest.is_file() {
+                                crate::cas::compute_file_sha1_streaming(&dest)
+                                    .map_or(true, |act| act != expected)
+                            } else {
+                                true
+                            }
+                        }
+                        None => !dest.is_file(),
+                    };
+                    if need_download && queued_dest_paths.insert(dest.clone()) {
+                        let mut spec = DownloadSpec {
+                            id: format!("logging_{}", art.path),
+                            urls: vec![art.url.clone()],
+                            dest_path: dest,
+                            expected_sha1: art.sha1,
+                            expected_sha512: None,
+                            expected_size: if art.size > 0 { Some(art.size) } else { None },
+                        };
+                        add_mojang_mirror_if_hashed(&mut spec);
+                        download_specs.push(spec);
+                    }
+                }
             }
         }
     }
@@ -968,7 +1039,7 @@ async fn install_game_transactional(
         if fs::hard_link(&src, &dst).is_ok() {
             hardlinks_created += 1;
         } else {
-            let _ = crate::cas::copy_chunked_atomic(&src, &dst);
+            crate::cas::copy_chunked_atomic(&src, &dst).map_err(|e| (current_stage, e))?;
         }
     }
 
@@ -984,7 +1055,7 @@ async fn install_game_transactional(
                 let _ = fs::create_dir_all(p);
             }
             if src.is_file() && !dst.exists() && fs::hard_link(&src, &dst).is_err() {
-                let _ = crate::cas::copy_chunked_atomic(&src, &dst);
+                crate::cas::copy_chunked_atomic(&src, &dst).map_err(|e| (current_stage, e))?;
             }
         }
     }
@@ -1000,7 +1071,7 @@ async fn install_game_transactional(
                 let _ = fs::create_dir_all(p);
             }
             if src.is_file() && !dst.exists() && fs::hard_link(&src, &dst).is_err() {
-                let _ = crate::cas::copy_chunked_atomic(&src, &dst);
+                crate::cas::copy_chunked_atomic(&src, &dst).map_err(|e| (current_stage, e))?;
             }
         }
     }
@@ -1186,11 +1257,18 @@ async fn install_game_transactional(
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
+    let total_libraries_count = resolved_ver.libraries.len()
+        + prepared_forge
+            .as_ref()
+            .map(|f| f.installer_libraries.len())
+            .unwrap_or(0);
+    let total_assets_count = asset_index.objects.len();
+
     Ok(InstallSummary {
         resolved_version: Arc::new(resolved_ver),
         asset_index: Arc::new(asset_index),
-        libraries_installed: outcomes.len().min(100),
-        assets_installed: outcomes.len().saturating_sub(100),
+        libraries_installed: total_libraries_count,
+        assets_installed: total_assets_count,
         natives_extracted: extracted_natives,
         hardlinks_created,
         bytes_downloaded: total_bytes,

@@ -10,7 +10,7 @@ use egui::{
 use mq_auth::{AccountKind, AccountProfile};
 
 use crate::components::registry::{icon_tech_name, register_widget, ElementKind, ElementMeta};
-use crate::i18n::{tr, Language};
+use crate::i18n::tr;
 use crate::theme::{solid_sidebar_frame, Tokens, RADIUS_BUTTON};
 use crate::widgets::{paint_animated_chevron, paint_vector_icon, VectorIcon};
 
@@ -155,17 +155,8 @@ impl NavTab {
     pub fn label_for(&self, lang: &str) -> &'static str {
         match self {
             Self::Instances => tr("tab_instances", lang),
-            Self::Catalog => match Language::from_code(lang) {
-                Language::Russian => "Каталог",
-                Language::Ukrainian => "Каталог",
-                Language::English => "Catalog",
-                _ => tr("tab_catalog", lang),
-            },
-            Self::Downloads => match Language::from_code(lang) {
-                Language::Ukrainian => "Завантаження",
-                Language::English => "Downloads",
-                _ => "Загрузки",
-            },
+            Self::Catalog => tr("tab_catalog", lang),
+            Self::Downloads => tr("tab_downloads", lang),
             Self::Performance => tr("tab_performance", lang),
             Self::Accounts => tr("tab_accounts", lang),
             Self::Settings => tr("tab_settings", lang),
@@ -462,8 +453,11 @@ fn truncate_text_to_width(
     max_width: f32,
     color: Color32,
 ) -> std::sync::Arc<egui::Galley> {
+    if max_width <= 8.0 {
+        return painter.layout_no_wrap(String::new(), font_id.clone(), color);
+    }
     let full = painter.layout_no_wrap(text.to_owned(), font_id.clone(), color);
-    if full.size().x <= max_width || max_width <= 8.0 {
+    if full.size().x <= max_width {
         return full;
     }
     let chars: Vec<char> = text.chars().collect();
@@ -496,9 +490,7 @@ fn render_nav_row(
     lang_code: &str,
     tokens: &Tokens,
 ) -> (bool, Rect) {
-    let available_w = ui
-        .available_width()
-        .max(if is_compact { 40.0 } else { 140.0 });
+    let available_w = ui.available_width().max(32.0);
     let id = nav_item_id(tab);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(available_w, NAV_ROW_HEIGHT), Sense::hover());
     let response = ui.interact(rect, id, Sense::click());
@@ -589,7 +581,7 @@ fn render_nav_row(
             };
             let text_left = icon_left + NAV_ICON_SIZE + NAV_ICON_TEXT_GAP;
             let max_text_w =
-                (visual_rect.right() - NAV_ROW_PADDING_X - badge_reserve - text_left).max(20.0);
+                (visual_rect.right() - NAV_ROW_PADDING_X - badge_reserve - text_left).max(0.0);
             let font_id = FontId::proportional(13.0);
             let galley = truncate_text_to_width(
                 painter,
@@ -979,7 +971,7 @@ fn render_bottom_account_profile(
             );
 
             let text_left = avatar_rect.right() + 8.0;
-            let max_text_w = (chev_rect.left() - 4.0 - text_left).max(20.0);
+            let max_text_w = (chev_rect.left() - 4.0 - text_left).max(0.0);
 
             let name_font = FontId::proportional(12.5);
             let name_galley =
@@ -988,8 +980,13 @@ fn render_bottom_account_profile(
             painter.galley(name_pos, name_galley, tokens.text);
 
             let kind_font = FontId::proportional(11.0);
-            let kind_galley =
-                painter.layout_no_wrap(source_str.to_owned(), kind_font, tokens.text_muted);
+            let kind_galley = truncate_text_to_width(
+                painter,
+                source_str,
+                &kind_font,
+                max_text_w,
+                tokens.text_muted,
+            );
             let kind_pos = Pos2::new(text_left, visual_rect.top() + 23.0);
             painter.galley(kind_pos, kind_galley, tokens.text_muted);
         }
@@ -1483,5 +1480,17 @@ mod tests {
             });
         let _ = ctx.end_pass();
         assert_eq!(emitted, Some(SidebarAction::SelectTab(NavTab::Catalog)));
+    }
+
+    #[test]
+    fn nav_tab_labels_localize_all_11_languages_cleanly() {
+        for lang in crate::i18n::Language::ALL {
+            let code = lang.code();
+            for tab in NavTab::ALL {
+                let lbl = tab.label_for(code);
+                assert!(!lbl.is_empty());
+                assert!(!lbl.starts_with("tab_"));
+            }
+        }
     }
 }

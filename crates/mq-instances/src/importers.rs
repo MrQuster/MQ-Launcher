@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use mq_core::{ModLoaderKind, MqPaths, MqResult};
 
 use crate::manager::InstanceManager;
-use crate::manifest::{InstanceManifest, ModpackSourceMeta};
+use crate::manifest::InstanceManifest;
 
 /// Recognized external launcher origins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,12 +65,19 @@ pub fn discover_external_instances() -> Vec<DiscoveredExternalInstance> {
                 ExternalLauncherKind::MultiMc,
                 &mut discovered,
             );
+            scan_instances_dir(
+                &home_p
+                    .join(".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances"),
+                ExternalLauncherKind::Prism,
+                &mut discovered,
+            );
 
             let config_dir = home_p.join(".config");
             scan_modrinth_profiles_dir(
                 &config_dir.join("com.modrinth.theseus/profiles"),
                 &mut discovered,
             );
+            scan_modrinth_profiles_dir(&local_share.join("ModrinthApp/profiles"), &mut discovered);
         }
     }
 
@@ -194,11 +201,7 @@ fn scan_instances_dir(
             }
         }
 
-        let mc_dir = if path.join(".minecraft").is_dir() {
-            path.join(".minecraft")
-        } else {
-            path.clone()
-        };
+        let mc_dir = resolve_external_game_dir(&path);
 
         let mod_count = count_files(&mc_dir.join("mods"), "jar");
         let world_count = count_subdirs(&mc_dir.join("saves"));
@@ -315,6 +318,16 @@ fn count_subdirs(dir: &Path) -> usize {
     entries.flatten().filter(|e| e.path().is_dir()).count()
 }
 
+fn resolve_external_game_dir(path: &Path) -> PathBuf {
+    if path.join(".minecraft").is_dir() {
+        path.join(".minecraft")
+    } else if path.join("minecraft").is_dir() {
+        path.join("minecraft")
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Imports a discovered external instance into the launcher.
 pub fn import_external_instance(
     manager: &InstanceManager,
@@ -329,18 +342,13 @@ pub fn import_external_instance(
     )?;
 
     let target_instance_dir = manifest.instance_dir(manager.paths());
-
-    let source_game_dir = if item.path.join(".minecraft").is_dir() {
-        item.path.join(".minecraft")
-    } else {
-        item.path.clone()
-    };
+    let source_game_dir = resolve_external_game_dir(&item.path);
 
     for subdir in &["mods", "saves", "config", "resourcepacks", "shaderpacks"] {
         let src = source_game_dir.join(subdir);
         let dst = target_instance_dir.join(subdir);
         if src.is_dir() {
-            let _ = copy_dir_all(&src, &dst);
+            copy_dir_all(&src, &dst)?;
         }
     }
 
@@ -348,16 +356,11 @@ pub fn import_external_instance(
         let src = source_game_dir.join(file);
         let dst = target_instance_dir.join(file);
         if src.is_file() {
-            let _ = fs::copy(&src, &dst);
+            fs::copy(&src, &dst)?;
         }
     }
 
-    manifest.modpack_source = Some(ModpackSourceMeta {
-        source: format!("{:?}", item.launcher).to_ascii_lowercase(),
-        project_id: item.name.clone(),
-        version_id: String::new(),
-        version_name: item.name.clone(),
-    });
+    manifest.modpack_source = None;
 
     manager.save_instance(&manifest)?;
     Ok(manifest)
@@ -367,10 +370,20 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let entry_type = entry.file_type()?;
         let from = entry.path();
+        let meta = match fs::symlink_metadata(&from) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+
+        // Skip dangling symlinks safely
+        if meta.file_type().is_symlink() && !from.exists() {
+            continue;
+        }
+
         let to = dst.join(entry.file_name());
-        if entry_type.is_dir() {
+        if from.is_dir() {
             copy_dir_all(&from, &to)?;
         } else {
             fs::copy(&from, &to)?;

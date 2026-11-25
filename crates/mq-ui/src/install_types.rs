@@ -360,7 +360,7 @@ impl InstallError {
         ));
         out.push_str(&format!("Техническая причина:\n{}\n", self.raw_cause));
         out.push_str("======================================\n");
-        mq_core::redact_text(&out, &[])
+        mq_core::crash::sanitize_crash_text(&out)
     }
 }
 

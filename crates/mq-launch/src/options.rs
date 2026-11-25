@@ -213,8 +213,71 @@ pub struct MinecraftOptionsManager;
 impl MinecraftOptionsManager {
     /// Synchronizes language setting into `options.txt`.
     pub fn sync_lang(options_path: &Path, lang: &str, force: bool) -> MqResult<()> {
-        let parent = options_path.parent().unwrap_or(options_path);
-        patch_minecraft_options_lang(parent, lang, !force).map(|_| ())
+        let clean_lang = lang.trim();
+        if clean_lang.is_empty() {
+            return Ok(());
+        }
+
+        let instance_dir = if options_path
+            .file_name()
+            .is_some_and(|f| f == MINECRAFT_OPTIONS_FILE)
+            || options_path.extension().is_some_and(|e| e == "txt")
+        {
+            options_path.parent().unwrap_or(options_path)
+        } else {
+            options_path
+        };
+
+        if force {
+            sync_minecraft_options_lang(instance_dir, clean_lang)
+        } else {
+            let opts_file = instance_dir.join(MINECRAFT_OPTIONS_FILE);
+            if !opts_file.is_file() {
+                if !instance_dir.exists() {
+                    fs::create_dir_all(instance_dir)?;
+                }
+                let output = format!("lang:{clean_lang}\n");
+                return atomic_write_file(&opts_file, output.as_bytes());
+            }
+
+            let content = fs::read_to_string(&opts_file)?;
+            let mut updated_lines = Vec::new();
+            let mut found_lang = false;
+            let mut needs_write = false;
+
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("lang:") {
+                    found_lang = true;
+                    let val = trimmed
+                        .strip_prefix("lang:")
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase();
+                    if val == "en_us" || val.is_empty() {
+                        updated_lines.push(format!("lang:{clean_lang}"));
+                        needs_write = true;
+                    } else {
+                        updated_lines.push(line.to_string());
+                    }
+                } else {
+                    updated_lines.push(line.to_string());
+                }
+            }
+
+            if !found_lang {
+                updated_lines.push(format!("lang:{clean_lang}"));
+                needs_write = true;
+            }
+
+            if needs_write {
+                let mut output = updated_lines.join("\n");
+                output.push('\n');
+                atomic_write_file(&opts_file, output.as_bytes())?;
+            }
+
+            Ok(())
+        }
     }
 
     /// Reads resourcepacks array from `options.txt` (`resourcePacks:[...]`).
@@ -331,5 +394,32 @@ mod tests {
         let content = fs::read_to_string(tmp.path().join("options.txt")).expect("read");
         assert!(content.contains("lang:en_us"));
         assert!(!content.contains("lang:ru_ru"));
+    }
+
+    #[test]
+    fn sync_lang_force_and_unforced() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let opts = tmp.path().join("options.txt");
+
+        // 1. Missing options.txt with unforced -> creates with specified lang
+        MinecraftOptionsManager::sync_lang(&opts, "ru_ru", false).expect("sync");
+        assert_eq!(
+            read_minecraft_options_lang(tmp.path()),
+            Some("ru_ru".into())
+        );
+
+        // 2. Unforced with existing custom language -> preserves
+        MinecraftOptionsManager::sync_lang(&opts, "de_de", false).expect("sync");
+        assert_eq!(
+            read_minecraft_options_lang(tmp.path()),
+            Some("ru_ru".into())
+        );
+
+        // 3. Forced -> overwrites custom language
+        MinecraftOptionsManager::sync_lang(&opts, "de_de", true).expect("sync");
+        assert_eq!(
+            read_minecraft_options_lang(tmp.path()),
+            Some("de_de".into())
+        );
     }
 }

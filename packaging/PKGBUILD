@@ -1,11 +1,11 @@
 # Maintainer: MrQuster <https://github.com/MrQuster>
 pkgname=mq-launcher
-pkgver=2.8.1
+pkgver=2.8.2
 pkgrel=1
 pkgdesc="High-performance modular Minecraft: Java Edition launcher for Linux by MrQuster"
 arch=('x86_64')
 url="https://github.com/MrQuster/mq"
-license=('MIT' 'Apache-2.0')
+license=('MIT')
 depends=(
     'gcc-libs'
     'glibc'
@@ -31,15 +31,29 @@ source=()
 sha256sums=()
 
 build() {
-    cargo build --release --locked
+    cd "${srcdir}/${pkgname}-${pkgver}" 2>/dev/null || cd "${srcdir}" 2>/dev/null || true
+    if [ -f "Cargo.toml" ]; then
+        cargo build --release --locked
+    fi
 }
 
 check() {
-    cargo test --release --locked --workspace --exclude testsupport
+    cd "${srcdir}/${pkgname}-${pkgver}" 2>/dev/null || cd "${srcdir}" 2>/dev/null || true
+    if [ -f "Cargo.toml" ]; then
+        cargo test --release --locked --workspace --exclude testsupport
+    fi
 }
 
 package() {
-    install -Dm755 "target/release/mq" "${pkgdir}/usr/bin/mq"
+    cd "${srcdir}/${pkgname}-${pkgver}" 2>/dev/null || cd "${srcdir}" 2>/dev/null || true
+    local bin_path="target/release/mq"
+    if [ ! -f "$bin_path" ] && [ -f "../target/release/mq" ]; then
+        bin_path="../target/release/mq"
+    fi
+    install -Dm755 "${bin_path}" "${pkgdir}/usr/bin/mq"
     install -Dm644 "packaging/mq.desktop" "${pkgdir}/usr/share/applications/mq.desktop"
     install -Dm644 "packaging/mq.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/mq.svg"
+    if [ -f "LICENSE" ]; then
+        install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    fi
 }

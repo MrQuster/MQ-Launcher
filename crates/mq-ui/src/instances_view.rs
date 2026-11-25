@@ -8,8 +8,7 @@ use egui::{
 };
 use mq_core::{GameLogLevel, ModLoaderKind};
 use mq_instances::{
-    backup_world, delete_world, export_world_to_zip, import_instance_from_zip, list_backups,
-    list_screenshots, list_worlds, load_servers_dat, restore_world, save_servers_dat,
+    delete_world, list_backups, list_screenshots, list_worlds, load_servers_dat, save_servers_dat,
     InstanceManifest, ServerEntry,
 };
 
@@ -284,6 +283,7 @@ pub struct InstancesView {
     pub selected_mod_profile: Option<String>,
     pub datapack_input_path: String,
     pub expanded_datapack_world: Option<String>,
+    pub confirm_delete_world: Option<String>,
 }
 
 impl Default for InstancesView {
@@ -327,6 +327,7 @@ impl Default for InstancesView {
             selected_mod_profile: None,
             datapack_input_path: String::new(),
             expanded_datapack_world: None,
+            confirm_delete_world: None,
         }
     }
 }
@@ -731,27 +732,17 @@ impl InstancesView {
                                     self.import_error = None;
                                     state.import_local_pack_with_name(path.to_path_buf(), opt_name);
                                 } else {
-                                    match import_instance_from_zip(
-                                        path,
-                                        &state.paths.instances_dir(),
-                                        opt_name.as_deref(),
-                                    ) {
-                                        Ok(m) => {
-                                            state.instances.push(m.clone());
-                                            state.selected_instance_id = Some(m.id);
-                                            state.status_message = Some((
-                                                "Инстанс успешно импортирован".to_string(),
-                                                false,
-                                            ));
-                                            self.show_import_dialog = false;
-                                            self.import_error = None;
-                                        }
-                                        Err(e) => {
-                                            let msg = format!("Ошибка импорта: {e}");
-                                            self.import_error = Some(msg.clone());
-                                            state.status_message = Some((msg, true));
-                                        }
-                                    }
+                                    let _ =
+                                        state.cmd_sender.send(UiWorkerCommand::ImportInstanceZip {
+                                            path: path.to_path_buf(),
+                                            custom_name: opt_name,
+                                        });
+                                    state.status_message = Some((
+                                        "Импорт инстанса из архива запущен...".to_string(),
+                                        false,
+                                    ));
+                                    self.show_import_dialog = false;
+                                    self.import_error = None;
                                 }
                             }
                         }
@@ -2880,28 +2871,33 @@ impl InstancesView {
                                     manifest.java_path =
                                         Some(std::path::PathBuf::from(custom_java));
                                 }
-                                let _ = state.instance_mgr.save_instance(&manifest);
-                                let inst_id = manifest.id.clone();
-                                state.selected_instance_id = Some(inst_id.clone());
-                                state.instances.push(manifest.clone());
+                                if let Err(e) = state.instance_mgr.save_instance(&manifest) {
+                                    state.status_message =
+                                        Some((format!("Ошибка сохранения инстанса: {e}"), true));
+                                } else {
+                                    let inst_id = manifest.id.clone();
+                                    state.selected_instance_id = Some(inst_id.clone());
+                                    state.instances.push(manifest.clone());
 
-                                state.installing_instance = Some(inst_id.clone());
-                                state.install_error = None;
-                                state.detailed_install_error = None;
-                                state.current_install_stage =
-                                    crate::install_types::InstallStage::Manifest;
-                                state.install_retries_count = 0;
-                                state.install_eta_secs = None;
-                                state.status_message = Some((
-                                    format!(
-                                        "Инстанс '{}' создан. Запущена установка...",
-                                        manifest.name
-                                    ),
-                                    false,
-                                ));
-                                let _ = state.cmd_sender.send(UiWorkerCommand::InstallInstance {
-                                    instance_id: inst_id,
-                                });
+                                    state.installing_instance = Some(inst_id.clone());
+                                    state.install_error = None;
+                                    state.detailed_install_error = None;
+                                    state.current_install_stage =
+                                        crate::install_types::InstallStage::Manifest;
+                                    state.install_retries_count = 0;
+                                    state.install_eta_secs = None;
+                                    state.status_message = Some((
+                                        format!(
+                                            "Инстанс '{}' создан. Запущена установка...",
+                                            manifest.name
+                                        ),
+                                        false,
+                                    ));
+                                    let _ =
+                                        state.cmd_sender.send(UiWorkerCommand::InstallInstance {
+                                            instance_id: inst_id,
+                                        });
+                                }
                             }
                             Err(e) => {
                                 state.status_message =
@@ -3464,10 +3460,21 @@ impl InstancesView {
                                             state.instances.iter_mut().find(|i| i.id == *inst_id)
                                         {
                                             inst_mut.active_mod_profile = Some(selected.clone());
-                                            let _ = state.instance_mgr.save_instance(inst_mut);
+                                            if let Err(e) =
+                                                state.instance_mgr.save_instance(inst_mut)
+                                            {
+                                                state.status_message = Some((
+                                                    format!("Ошибка сохранения профиля: {e}"),
+                                                    true,
+                                                ));
+                                            }
                                         }
-                                        state.status_message =
-                                            Some((format!("Профиль «{selected}» применен"), false));
+                                        if state.status_message.is_none() {
+                                            state.status_message = Some((
+                                                format!("Профиль «{selected}» применен"),
+                                                false,
+                                            ));
+                                        }
                                         let _ = state.cmd_sender.send(
                                             UiWorkerCommand::ScanInstanceMods {
                                                 instance_id: inst_id.clone(),
@@ -3487,9 +3494,13 @@ impl InstancesView {
                                     if inst_mut.active_mod_profile.as_deref() == Some(&selected) {
                                         inst_mut.active_mod_profile = None;
                                     }
-                                    let _ = state.instance_mgr.save_instance(inst_mut);
-                                    state.status_message =
-                                        Some((format!("Профиль «{selected}» удален"), false));
+                                    if let Err(e) = state.instance_mgr.save_instance(inst_mut) {
+                                        state.status_message =
+                                            Some((format!("Ошибка сохранения профиля: {e}"), true));
+                                    } else {
+                                        state.status_message =
+                                            Some((format!("Профиль «{selected}» удален"), false));
+                                    }
                                 }
                                 self.selected_mod_profile = None;
                             }
@@ -3512,10 +3523,14 @@ impl InstancesView {
                                 inst_mut.mod_profiles.retain(|p| p.name != name);
                                 inst_mut.mod_profiles.push(profile);
                                 inst_mut.active_mod_profile = Some(name.clone());
-                                let _ = state.instance_mgr.save_instance(inst_mut);
+                                if let Err(e) = state.instance_mgr.save_instance(inst_mut) {
+                                    state.status_message =
+                                        Some((format!("Ошибка сохранения профиля: {e}"), true));
+                                } else {
+                                    state.status_message =
+                                        Some((format!("Профиль «{name}» сохранен"), false));
+                                }
                             }
-                            state.status_message =
-                                Some((format!("Профиль «{name}» сохранен"), false));
                             self.mod_profile_input.clear();
                             self.selected_mod_profile = Some(name);
                         }
@@ -4486,6 +4501,7 @@ impl InstancesView {
     #[allow(clippy::too_many_arguments)]
     fn render_pack_directory_tab(
         ui: &mut Ui,
+        state: &mut UiState,
         tokens: &Tokens,
         packs_dir: &std::path::Path,
         packs: Vec<(String, bool, u64)>,
@@ -4581,11 +4597,20 @@ impl InstancesView {
                                     if secondary_glass_button(ui, Some(VectorIcon::Trash), "")
                                         .clicked()
                                     {
-                                        delete_pack_file(packs_dir, &name);
-                                        invalidate_fs_cache::<Vec<(String, bool, u64)>>(
-                                            ui.ctx(),
-                                            ("mq_packs_dir_cache", packs_dir.to_path_buf()),
-                                        );
+                                        match delete_pack_file(packs_dir, &name) {
+                                            Ok(()) => {
+                                                invalidate_fs_cache::<Vec<(String, bool, u64)>>(
+                                                    ui.ctx(),
+                                                    ("mq_packs_dir_cache", packs_dir.to_path_buf()),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                state.status_message = Some((
+                                                    format!("Ошибка удаления файла: {e}"),
+                                                    true,
+                                                ));
+                                            }
+                                        }
                                     }
                                 },
                             );
@@ -4669,6 +4694,7 @@ impl InstancesView {
                 };
                 let open_catalog = Self::render_pack_directory_tab(
                     ui,
+                    state,
                     &tokens,
                     &dir,
                     packs,
@@ -4902,9 +4928,11 @@ impl InstancesView {
 
         ui.add_space(6.0);
 
-        let worlds = cached_fs_value(ui.ctx(), ("mq_worlds_cache", inst_dir.clone()), || {
-            list_worlds(&inst_dir).unwrap_or_default()
-        });
+        let worlds = cached_fs_value(
+            ui.ctx(),
+            ("mq_worlds_cache", inst_dir.clone(), state.worlds_cache_gen),
+            || list_worlds(&inst_dir).unwrap_or_default(),
+        );
         if worlds.is_empty() {
             ui.add_space(20.0);
             ui.label(
@@ -4932,7 +4960,18 @@ impl InstancesView {
                             .truncate(),
                         );
                         version_badge(ui, &w.game_mode, ACCENT_COBALT);
-                        let mib = (w.size_bytes as f64) / (1024.0 * 1024.0);
+                        let size_bytes = state
+                            .world_sizes
+                            .get(&(inst_id.clone(), w.folder_name.clone()))
+                            .copied()
+                            .unwrap_or(w.size_bytes);
+                        if size_bytes == 0 && !state.computing_world_sizes.contains(inst_id) {
+                            state.computing_world_sizes.insert(inst_id.clone());
+                            let _ = state.cmd_sender.send(UiWorkerCommand::ComputeWorldSizes {
+                                instance_id: inst_id.clone(),
+                            });
+                        }
+                        let mib = (size_bytes as f64) / (1024.0 * 1024.0);
                         ui.label(
                             RichText::new(format!("{mib:.1} МБ"))
                                 .color(TEXT_MUTED)
@@ -5083,53 +5122,66 @@ impl InstancesView {
                         }
                         if secondary_glass_button(ui, Some(VectorIcon::Download), "Бэкап").clicked()
                         {
-                            match backup_world(
-                                &inst_dir,
-                                &backups_root,
-                                inst_id.as_str(),
-                                &w.folder_name,
-                            ) {
-                                Ok(bp) => {
-                                    invalidate_fs_cache::<Vec<mq_instances::WorldBackupInfo>>(
-                                        ui.ctx(),
-                                        ("mq_backups_cache", inst_id.as_str().to_owned()),
-                                    );
-                                    state.status_message = Some((
-                                        format!(
-                                            "Бэкап создан: {}",
-                                            bp.file_name().unwrap_or_default().to_string_lossy()
-                                        ),
-                                        false,
-                                    ));
-                                }
-                                Err(e) => {
-                                    state.status_message =
-                                        Some((format!("Ошибка бэкапа: {e}"), true));
-                                }
-                            }
+                            let _ = state.cmd_sender.send(UiWorkerCommand::BackupWorld {
+                                instance_id: inst_id.clone(),
+                                folder_name: w.folder_name.clone(),
+                            });
+                            state.status_message =
+                                Some(("Создание бэкапа мира запущено...".to_string(), false));
                         }
                         if secondary_glass_button(ui, Some(VectorIcon::Download), "Экспорт")
                             .clicked()
                         {
                             let export_path = backups_root.join(format!("{}.zip", w.folder_name));
-                            if let Ok(()) =
-                                export_world_to_zip(&inst_dir, &w.folder_name, &export_path)
-                            {
-                                state.status_message = Some((
-                                    format!("Мир экспортирован в {}", export_path.display()),
-                                    false,
-                                ));
-                            }
-                        }
-                        if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить").clicked()
-                        {
-                            let _ = delete_world(&inst_dir, &w.folder_name);
-                            invalidate_fs_cache::<Vec<mq_instances::WorldInfo>>(
-                                ui.ctx(),
-                                ("mq_worlds_cache", inst_dir.clone()),
-                            );
+                            let _ = state.cmd_sender.send(UiWorkerCommand::ExportWorld {
+                                instance_id: inst_id.clone(),
+                                folder_name: w.folder_name.clone(),
+                                export_path,
+                            });
                             state.status_message =
-                                Some((format!("Мир '{}' удален", w.display_name), false));
+                                Some(("Экспорт мира запущен...".to_string(), false));
+                        }
+                        if self.confirm_delete_world.as_deref() == Some(&w.folder_name) {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Точно удалить мир?")
+                                        .color(STATUS_WARN)
+                                        .small(),
+                                );
+                                if primary_emerald_button(ui, None, "Подтвердить").clicked()
+                                {
+                                    match delete_world(&inst_dir, &w.folder_name) {
+                                        Ok(()) => {
+                                            state.worlds_cache_gen =
+                                                state.worlds_cache_gen.wrapping_add(1);
+                                            invalidate_fs_cache::<Vec<mq_instances::WorldInfo>>(
+                                                ui.ctx(),
+                                                (
+                                                    "mq_worlds_cache",
+                                                    inst_dir.clone(),
+                                                    state.worlds_cache_gen,
+                                                ),
+                                            );
+                                            state.status_message = Some((
+                                                format!("Мир '{}' удален", w.display_name),
+                                                false,
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            state.status_message =
+                                                Some((format!("Ошибка удаления мира: {e}"), true));
+                                        }
+                                    }
+                                    self.confirm_delete_world = None;
+                                }
+                                if secondary_glass_button(ui, None, "Отмена").clicked() {
+                                    self.confirm_delete_world = None;
+                                }
+                            });
+                        } else if secondary_glass_button(ui, Some(VectorIcon::Trash), "Удалить")
+                            .clicked()
+                        {
+                            self.confirm_delete_world = Some(w.folder_name.clone());
                         }
                     });
                 });
@@ -5168,28 +5220,12 @@ impl InstancesView {
                             .small(),
                     );
                     if ui.button("Восстановить").clicked() {
-                        match restore_world(
-                            &backups_root,
-                            inst_id.as_str(),
-                            &b.file_name,
-                            &inst_dir,
-                            None,
-                        ) {
-                            Ok(_) => {
-                                invalidate_fs_cache::<Vec<mq_instances::WorldInfo>>(
-                                    ui.ctx(),
-                                    ("mq_worlds_cache", inst_dir.clone()),
-                                );
-                                state.status_message = Some((
-                                    format!("Мир успешно восстановлен из {}", b.file_name),
-                                    false,
-                                ));
-                            }
-                            Err(e) => {
-                                state.status_message =
-                                    Some((format!("Ошибка восстановления: {e}"), true));
-                            }
-                        }
+                        let _ = state.cmd_sender.send(UiWorkerCommand::RestoreWorld {
+                            instance_id: inst_id.clone(),
+                            file_name: b.file_name.clone(),
+                        });
+                        state.status_message =
+                            Some(("Восстановление мира запущено...".to_string(), false));
                     }
                 });
             }
@@ -5372,7 +5408,10 @@ impl InstancesView {
 
             if let Some(del_idx) = server_to_delete {
                 servers.remove(del_idx);
-                let _ = save_servers_dat(&inst_dir, &servers);
+                if let Err(e) = save_servers_dat(&inst_dir, &servers) {
+                    state.status_message =
+                        Some((format!("Ошибка сохранения servers.dat: {e}"), true));
+                }
                 invalidate_fs_cache::<Vec<ServerEntry>>(
                     ui.ctx(),
                     ("mq_servers_cache", inst_dir.clone()),
@@ -5419,7 +5458,10 @@ impl InstancesView {
                                 icon: None,
                                 accept_textures: 1,
                             });
-                            let _ = save_servers_dat(&inst_dir, &servers);
+                            if let Err(e) = save_servers_dat(&inst_dir, &servers) {
+                                state.status_message =
+                                    Some((format!("Ошибка сохранения servers.dat: {e}"), true));
+                            }
                             invalidate_fs_cache::<Vec<ServerEntry>>(
                                 ui.ctx(),
                                 ("mq_servers_cache", inst_dir.clone()),
@@ -5582,8 +5624,12 @@ impl InstancesView {
                 inst.memory_min_mb = rec.memory_min_mb;
                 inst.memory_max_mb = rec.memory_max_mb;
                 inst.jvm_args = rec.jvm_args;
-                let _ = state.instance_mgr.save_instance(inst);
-                state.status_message = Some((rec.summary_ru, false));
+                if let Err(e) = state.instance_mgr.save_instance(inst) {
+                    state.status_message =
+                        Some((format!("Ошибка сохранения параметров: {e}"), true));
+                } else {
+                    state.status_message = Some((rec.summary_ru, false));
+                }
             }
 
             ui.add_space(8.0);
@@ -5716,8 +5762,16 @@ impl InstancesView {
             });
 
             if should_save {
-                let _ = state.instance_mgr.save_instance(inst);
-                state.status_message = Some(("Параметры инстанса сохранены".to_string(), false));
+                match state.instance_mgr.save_instance(inst) {
+                    Ok(()) => {
+                        state.status_message =
+                            Some(("Параметры инстанса сохранены".to_string(), false));
+                    }
+                    Err(e) => {
+                        state.status_message =
+                            Some((format!("Ошибка сохранения параметров: {e}"), true));
+                    }
+                }
             }
 
             if should_delete {
@@ -5809,12 +5863,13 @@ fn toggle_pack_file(dir: &std::path::Path, filename: &str) {
     }
 }
 
-fn delete_pack_file(dir: &std::path::Path, filename: &str) {
-    let target = dir.join(filename);
+fn delete_pack_file(dir: &std::path::Path, filename: &str) -> std::io::Result<()> {
+    let target = mq_core::resolve_safe_path(dir, filename)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
     if target.is_dir() {
-        let _ = std::fs::remove_dir_all(target);
+        std::fs::remove_dir_all(target)
     } else {
-        let _ = std::fs::remove_file(target);
+        std::fs::remove_file(target)
     }
 }
 

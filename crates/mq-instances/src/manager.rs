@@ -12,7 +12,9 @@ use mq_core::fs_util::{
     remove_dir_all_with_retry, remove_file_with_retry, rename_with_retry,
     validate_windows_safe_filename,
 };
-use mq_core::{AppConfig, InstanceId, ModLoaderKind, MqError, MqPaths, MqResult};
+use mq_core::{
+    resolve_safe_path, AppConfig, InstanceId, ModLoaderKind, MqError, MqPaths, MqResult,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -267,7 +269,16 @@ impl InstanceManager {
                 continue;
             }
 
-            let manifest = Self::read_manifest_file(&manifest_file, Some(dir_name))?;
+            let manifest = match Self::read_manifest_file(&manifest_file, Some(dir_name)) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed reading instance manifest at {}: {e}",
+                        manifest_file.display()
+                    );
+                    continue;
+                }
+            };
             instances.push(manifest);
         }
 
@@ -349,11 +360,14 @@ impl InstanceManager {
             }
             return Ok(());
         }
-        let fallback_dir = self.paths.instance_dir(id_or_name);
-        if fallback_dir.exists() && fallback_dir.is_dir() {
-            clear_readonly_recursive(&fallback_dir);
-            remove_dir_all_with_retry(&fallback_dir)?;
-            return Ok(());
+        if InstanceId::is_valid_slug(id_or_name) {
+            if let Ok(safe_dir) = resolve_safe_path(&self.paths.instances_dir(), id_or_name) {
+                if safe_dir.exists() && safe_dir.is_dir() {
+                    clear_readonly_recursive(&safe_dir);
+                    remove_dir_all_with_retry(&safe_dir)?;
+                    return Ok(());
+                }
+            }
         }
         Err(MqError::InstanceNotFound(id_or_name.to_owned()))
     }

@@ -3,16 +3,59 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use mq_core::fs_util::rename_with_retry;
+use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
+use mq_core::platform::atomic_write;
 use mq_core::{MqError, MqResult};
+use serde::{Deserialize, Serialize};
+
+/// State file persisted inside `<mods_dir>` during an active bisect session.
+const BISECT_STATE_FILE: &str = ".mq-bisect.json";
+
+/// Core API / library mods that are kept enabled alongside `active_half` while bisecting
+/// non-library suspects, and only bisected themselves if all non-library suspects pass.
+const CORE_API_LIBRARIES: &[&str] = &[
+    "fabric-api",
+    "fabric-language-kotlin",
+    "kotlinforforge",
+    "architectury",
+    "cloth-config",
+    "geckolib",
+    "curios",
+    "trinkets",
+    "balm",
+    "bookshelf",
+    "puzzleslib",
+    "moonlight",
+    "forgeconfigapiport",
+    "owo-lib",
+    "collective",
+];
+
+fn is_core_api_library(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    let base = lower
+        .strip_suffix(".jar.disabled")
+        .or_else(|| lower.strip_suffix(".jar"))
+        .unwrap_or(&lower);
+
+    CORE_API_LIBRARIES
+        .iter()
+        .any(|&lib| base.starts_with(lib) || base.contains(lib))
+}
 
 /// Active binary search bisect session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BisectSession {
     /// Initial snapshot of all mods and whether they were originally enabled.
     original_state: Vec<(String, bool)>,
+    /// Core library mods kept enabled while bisecting regular mods.
+    #[serde(default)]
+    core_libraries: Vec<String>,
+    /// Core library mods waiting to be bisected if non-library suspects all pass.
+    #[serde(default)]
+    library_suspects: Vec<String>,
     /// Current pool of suspects that might contain the crashing mod.
     suspects: Vec<String>,
     /// The active half currently left enabled for testing.
@@ -24,8 +67,39 @@ pub struct BisectSession {
 }
 
 impl BisectSession {
-    /// Starts a new bisect session by scanning `mods_dir` for all `.jar` mod files.
+    fn state_path(mods_dir: &Path) -> PathBuf {
+        mods_dir.join(BISECT_STATE_FILE)
+    }
+
+    fn save_state(&self, mods_dir: &Path) -> MqResult<()> {
+        let path = Self::state_path(mods_dir);
+        let data = serde_json::to_vec_pretty(self)
+            .map_err(|e| MqError::Internal(format!("failed serializing bisect state: {e}")))?;
+        atomic_write(&path, &data)?;
+        Ok(())
+    }
+
+    fn remove_state(mods_dir: &Path) {
+        let path = Self::state_path(mods_dir);
+        if path.is_file() {
+            let _ = remove_file_with_retry(&path);
+        }
+    }
+
+    /// Starts a new bisect session by scanning `mods_dir` for all `.jar` mod files,
+    /// or resumes an existing unfinished session from `<mods_dir>/.mq-bisect.json`.
     pub fn start(mods_dir: &Path) -> MqResult<Self> {
+        let state_path = Self::state_path(mods_dir);
+        if state_path.is_file() {
+            if let Ok(raw) = fs::read_to_string(&state_path) {
+                if let Ok(saved) = serde_json::from_str::<Self>(&raw) {
+                    if !saved.original_state.is_empty() {
+                        return Ok(saved);
+                    }
+                }
+            }
+        }
+
         let mut original_state = Vec::new();
         let mut enabled_mods = Vec::new();
 
@@ -57,15 +131,28 @@ impl BisectSession {
             ));
         }
 
+        let (libraries, non_libraries): (Vec<String>, Vec<String>) = enabled_mods
+            .into_iter()
+            .partition(|m| is_core_api_library(m));
+
+        let (suspects, core_libraries, library_suspects) = if !non_libraries.is_empty() {
+            (non_libraries, libraries.clone(), libraries)
+        } else {
+            (libraries, Vec::new(), Vec::new())
+        };
+
         let mut session = Self {
             original_state,
-            suspects: enabled_mods,
+            core_libraries,
+            library_suspects,
+            suspects,
             active_half: Vec::new(),
             round: 1,
             culprit: None,
         };
 
         session.partition_and_apply(mods_dir)?;
+        session.save_state(mods_dir)?;
         Ok(session)
     }
 
@@ -104,7 +191,10 @@ impl BisectSession {
     }
 
     fn apply_active_set(&self, mods_dir: &Path) -> MqResult<()> {
-        let active_set: HashSet<&str> = self.active_half.iter().map(String::as_str).collect();
+        let mut active_set: HashSet<&str> = self.active_half.iter().map(String::as_str).collect();
+        for lib in &self.core_libraries {
+            active_set.insert(lib.as_str());
+        }
 
         if mods_dir.is_dir() {
             for entry in fs::read_dir(mods_dir)?.flatten() {
@@ -141,11 +231,13 @@ impl BisectSession {
         if self.suspects.len() <= 1 {
             let culprit = self.suspects.first().cloned();
             self.culprit = culprit.clone();
+            self.save_state(mods_dir)?;
             return Ok(culprit);
         }
 
         self.round += 1;
         self.partition_and_apply(mods_dir)?;
+        self.save_state(mods_dir)?;
         Ok(self.culprit.clone())
     }
 
@@ -159,14 +251,31 @@ impl BisectSession {
         let active_set: HashSet<String> = self.active_half.drain(..).collect();
         self.suspects.retain(|s| !active_set.contains(s));
 
+        if self.suspects.is_empty() {
+            if !self.library_suspects.is_empty() {
+                // All non-library mods passed; now bisect libraries themselves.
+                self.suspects = std::mem::take(&mut self.library_suspects);
+                self.core_libraries.clear();
+                self.round += 1;
+                self.partition_and_apply(mods_dir)?;
+                self.save_state(mods_dir)?;
+                return Ok(self.culprit.clone());
+            }
+            self.culprit = None;
+            self.save_state(mods_dir)?;
+            return Ok(None);
+        }
+
         if self.suspects.len() <= 1 {
             let culprit = self.suspects.first().cloned();
             self.culprit = culprit.clone();
+            self.save_state(mods_dir)?;
             return Ok(culprit);
         }
 
         self.round += 1;
         self.partition_and_apply(mods_dir)?;
+        self.save_state(mods_dir)?;
         Ok(self.culprit.clone())
     }
 
@@ -185,6 +294,7 @@ impl BisectSession {
             }
         }
         self.culprit = None;
+        Self::remove_state(mods_dir);
         Ok(())
     }
 }
@@ -228,5 +338,23 @@ mod tests {
             assert!(mods_dir.join(format!("mod{i}.jar")).is_file());
             assert!(!mods_dir.join(format!("mod{i}.jar.disabled")).exists());
         }
+        assert!(!mods_dir.join(BISECT_STATE_FILE).exists());
+    }
+
+    #[test]
+    fn test_bisect_keeps_core_libraries_enabled() {
+        let temp = tempdir().expect("tempdir");
+        let mods_dir = temp.path().join("mods");
+        fs::create_dir_all(&mods_dir).expect("create mods dir");
+
+        fs::write(mods_dir.join("fabric-api-0.90.0.jar"), b"api").unwrap();
+        fs::write(mods_dir.join("modA.jar"), b"a").unwrap();
+        fs::write(mods_dir.join("modB.jar"), b"b").unwrap();
+
+        let session = BisectSession::start(&mods_dir).expect("start");
+        // Suspects should only be non-libraries: modA and modB
+        assert_eq!(session.suspects_len(), 2);
+        // fabric-api must still be enabled (.jar, not .jar.disabled)
+        assert!(mods_dir.join("fabric-api-0.90.0.jar").is_file());
     }
 }

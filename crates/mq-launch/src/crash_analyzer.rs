@@ -53,13 +53,28 @@ pub fn analyze_crash(
         }
     }
 
+    let is_stale = latest_crash_file
+        .as_ref()
+        .and_then(|(_, mtime)| SystemTime::now().duration_since(*mtime).ok())
+        .map(|dur| dur.as_secs() > 120)
+        .unwrap_or(false);
+
     let mut crash_text = String::new();
     let mut report_path = None;
 
-    if let Some((path, _)) = latest_crash_file {
-        if let Ok(content) = fs::read_to_string(&path) {
-            crash_text = content;
-            report_path = Some(path);
+    // Do not let stale historical crash reports (>120s) override fresh non-empty console logs
+    let use_report = if is_stale && !log_lines.is_empty() {
+        false
+    } else {
+        latest_crash_file.is_some()
+    };
+
+    if use_report {
+        if let Some((path, _)) = latest_crash_file {
+            if let Ok(content) = fs::read_to_string(&path) {
+                crash_text = content;
+                report_path = Some(path);
+            }
         }
     }
 
@@ -321,4 +336,41 @@ pub async fn upload_to_mclogs(client: &reqwest::Client, log_content: &str) -> Mq
         .unwrap_or("unknown error from mclogs API");
 
     Err(MqError::Network(format!("mclogs upload error: {err_msg}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analyze_crash_picks_up_logs_when_no_recent_crash_report() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let fresh_logs = vec![
+            "[Render thread/ERROR]: Incompatible mod set!".to_string(),
+            "[Render thread/ERROR]: Mod 'foo' requires 'bar' 1.0+".to_string(),
+        ];
+
+        let result = analyze_crash(tmp.path(), Some(1), &fresh_logs);
+        assert!(result.crash_report_file.is_none());
+        assert!(!result.summary.is_empty());
+    }
+
+    #[test]
+    fn analyze_crash_picks_up_fresh_crash_report() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let crash_dir = tmp.path().join("crash-reports");
+        fs::create_dir_all(&crash_dir).expect("mkdir");
+
+        let fresh_report = crash_dir.join("crash-fresh.txt");
+        fs::write(&fresh_report, "OutOfMemoryError: Java heap space").expect("write");
+
+        let logs = vec!["some normal log".to_string()];
+        let result = analyze_crash(tmp.path(), Some(1), &logs);
+        assert_eq!(
+            result.summary,
+            "Нехватка оперативной памяти (OutOfMemoryError)"
+        );
+        assert_eq!(result.crash_report_file, Some(fresh_report));
+    }
 }

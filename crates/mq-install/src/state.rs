@@ -388,7 +388,7 @@ static IN_PROCESS_LOCKS: LazyLock<DashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>
 /// RAII lock preventing concurrent installations of the same instance across threads and processes.
 #[derive(Debug)]
 pub struct InstanceInstallLock {
-    lock_file_path: PathBuf,
+    _lock_file_path: PathBuf,
     file: Option<File>,
     _permit: tokio::sync::OwnedMutexGuard<()>,
 }
@@ -450,7 +450,7 @@ impl InstanceInstallLock {
         }
 
         Ok(Self {
-            lock_file_path,
+            _lock_file_path: lock_file_path,
             file: Some(file),
             _permit: permit,
         })
@@ -466,6 +466,7 @@ impl Drop for InstanceInstallLock {
             let _ = rustix::fs::flock(&file, rustix::fs::FlockOperation::Unlock);
             drop(file);
         }
+        #[cfg(not(unix))]
         let _ = remove_file_with_retry(&self.lock_file_path);
     }
 }

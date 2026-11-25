@@ -23,7 +23,7 @@ pub const WINDOWS_ARGFILE_THRESHOLD_CHARS: usize = 24_000;
 pub const LAUNCHER_NAME: &str = "mq";
 
 /// Canonical launcher version string injected into `${launcher_version}`.
-pub const LAUNCHER_VERSION: &str = "1.1.0";
+pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Complete input context required to construct a deterministic Minecraft launch command.
 #[derive(Debug, Clone)]
@@ -77,17 +77,46 @@ pub enum QuickPlayTarget {
     Multiplayer(String),
 }
 
-fn parse_mc_version_ge_1_20(version: &str) -> bool {
-    let mut parts = version.split('.');
-    let major = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(1);
-    let minor = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-    major > 1 || (major == 1 && minor >= 20)
+fn is_mc_version_ge_1_20(ver_str: &str) -> bool {
+    let trimmed = ver_str.trim();
+    if let Some(w_pos) = trimmed.find('w') {
+        if let Ok(year) = trimmed[..w_pos].parse::<u32>() {
+            return year >= 23;
+        }
+    }
+    let core = trimmed.split(['-', '+', ' ']).next().unwrap_or(trimmed);
+    let nums: Vec<u32> = core.split('.').filter_map(|s| s.parse().ok()).collect();
+    match nums.as_slice() {
+        [major, ..] if *major >= 20 => true,
+        [1, minor, ..] if *minor >= 20 => true,
+        _ => false,
+    }
+}
+
+pub fn parse_host_port(addr: &str) -> (String, u16) {
+    let trimmed = addr.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some((h, after_bracket)) = rest.split_once(']') {
+            if let Some(port_str) = after_bracket.strip_prefix(':') {
+                let port = port_str.parse::<u16>().unwrap_or(25565);
+                return (h.to_string(), port);
+            } else {
+                return (h.to_string(), 25565);
+            }
+        }
+    }
+    if let Some((h, p)) = trimmed.rsplit_once(':') {
+        if h.contains(':') {
+            // Bare IPv6 without brackets
+            (trimmed.to_string(), 25565)
+        } else if let Ok(port) = p.parse::<u16>() {
+            (h.to_string(), port)
+        } else {
+            (trimmed.to_string(), 25565)
+        }
+    } else {
+        (trimmed.to_string(), 25565)
+    }
 }
 
 /// Builds launch command with optional Quick Play parameters.
@@ -97,7 +126,12 @@ pub fn build_launch_command_with_quick_play(
 ) -> MqResult<LaunchCommand> {
     let mut cmd = build_launch_command(ctx)?;
     if let Some(target) = quick_play {
-        let is_modern = parse_mc_version_ge_1_20(&ctx.version.id);
+        let mc_ver = if !ctx.version.mc_version.trim().is_empty() {
+            &ctx.version.mc_version
+        } else {
+            &ctx.instance.mc_version
+        };
+        let is_modern = is_mc_version_ge_1_20(mc_ver);
         match target {
             QuickPlayTarget::Singleplayer(world) => {
                 cmd.args.push("--quickPlaySingleplayer".to_string());
@@ -108,13 +142,9 @@ pub fn build_launch_command_with_quick_play(
                     cmd.args.push("--quickPlayMultiplayer".to_string());
                     cmd.args.push(addr.clone());
                 } else {
-                    let (host, port) = if let Some((h, p)) = addr.split_once(':') {
-                        (h, p.parse::<u16>().unwrap_or(25565))
-                    } else {
-                        (addr.as_str(), 25565)
-                    };
+                    let (host, port) = parse_host_port(addr);
                     cmd.args.push("--server".to_string());
-                    cmd.args.push(host.to_string());
+                    cmd.args.push(host);
                     cmd.args.push("--port".to_string());
                     cmd.args.push(port.to_string());
                 }
@@ -291,7 +321,11 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         if expanded.starts_with("-Djava.library.path=") {
             has_library_path = true;
         }
-        if expanded == "-cp" || expanded == "-classpath" {
+        if expanded == "-cp"
+            || expanded == "-classpath"
+            || expanded == "--class-path"
+            || expanded.starts_with("--class-path=")
+        {
             has_classpath = true;
         }
         if expanded.starts_with("-Dlog4j.configurationFile=") {
@@ -313,7 +347,11 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         if expanded.starts_with("-Djava.library.path=") {
             has_library_path = true;
         }
-        if expanded == "-cp" || expanded == "-classpath" {
+        if expanded == "-cp"
+            || expanded == "-classpath"
+            || expanded == "--class-path"
+            || expanded.starts_with("--class-path=")
+        {
             has_classpath = true;
         }
         if expanded.starts_with("-Dlog4j.configurationFile=") {
@@ -440,17 +478,20 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         raw_wrapper
     };
 
+    let mut wrapper_env = BTreeMap::new();
     let (program, args) = match wrapper_effective {
         Some(wrapper_raw) => {
-            let mut wrapper_tokens = wrapper_raw.split_whitespace();
-            let first_bin = wrapper_tokens.next().expect("non-empty wrapper");
-            let mut full_args = Vec::with_capacity(2 + jvm_flags.len());
-            for extra_tok in wrapper_tokens {
-                full_args.push(extra_tok.to_owned());
+            let (w_env, prog_opt, w_args) = parse_wrapper_cmd(wrapper_raw);
+            wrapper_env = w_env;
+            if let Some(first_bin) = prog_opt {
+                let mut full_args = Vec::with_capacity(w_args.len() + 1 + jvm_flags.len());
+                full_args.extend(w_args);
+                full_args.push(clean_java_bin.to_string_lossy().into_owned());
+                full_args.extend(jvm_flags);
+                (PathBuf::from(first_bin), full_args)
+            } else {
+                (clean_java_bin, jvm_flags)
             }
-            full_args.push(clean_java_bin.to_string_lossy().into_owned());
-            full_args.extend(jvm_flags);
-            (PathBuf::from(first_bin), full_args)
         }
         None => (clean_java_bin, jvm_flags),
     };
@@ -471,8 +512,71 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         program,
         args: sanitized_args,
         working_dir: instance_dir,
-        env: BTreeMap::new(),
+        env: wrapper_env,
     })
+}
+
+/// Parses a wrapper command line string, respecting single/double quotes and extracting
+/// leading `KEY=VALUE` environment variable assignments (as well as `env KEY=VALUE...`).
+pub fn parse_wrapper_cmd(
+    wrapper_raw: &str,
+) -> (BTreeMap<String, String>, Option<String>, Vec<String>) {
+    let mut env = BTreeMap::new();
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut chars = wrapper_raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' | '"' => {
+                if in_quote == Some(ch) {
+                    in_quote = None;
+                } else if in_quote.is_none() {
+                    in_quote = Some(ch);
+                } else {
+                    cur.push(ch);
+                }
+            }
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            c if c.is_whitespace() && in_quote.is_none() => {
+                if !cur.is_empty() {
+                    tokens.push(cur);
+                    cur = String::new();
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+
+    let mut token_iter = tokens.into_iter();
+    let mut first = token_iter.next();
+    if let Some(ref f) = first {
+        if f == "env" {
+            first = token_iter.next();
+        }
+    }
+
+    while let Some(tok) = first {
+        if let Some((k, v)) = tok.split_once('=') {
+            if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                env.insert(k.to_string(), v.to_string());
+                first = token_iter.next();
+                continue;
+            }
+        }
+        let program = tok;
+        let rest_args: Vec<String> = token_iter.collect();
+        return (env, Some(program), rest_args);
+    }
+
+    (env, None, Vec::new())
 }
 
 /// Ensures a Forge/NeoForge `-DignoreList=...` JVM property covers the actual resolved client JAR
@@ -571,10 +675,17 @@ fn sanitize_custom_jvm_args(
             }
             continue;
         }
-        if trimmed == "-XX:+ZGenerational" && (1..21).contains(&java_major) {
+        if trimmed.starts_with("-Xms") || trimmed.starts_with("-Xmx") {
+            tracing::info!(
+                flag = %trimmed,
+                "Stripping redundant/conflicting heap flag from custom JVM args; memory is managed via instance memory settings"
+            );
+            continue;
+        }
+        if trimmed == "-XX:+ZGenerational" && !(21..24).contains(&java_major) {
             tracing::warn!(
                 java_major,
-                "Ignoring -XX:+ZGenerational on Java < 21 to prevent JVM startup failure"
+                "Ignoring -XX:+ZGenerational on Java {java_major} (unsupported/obsolete) to prevent JVM startup failure"
             );
             continue;
         }
@@ -605,6 +716,10 @@ fn sanitize_custom_jvm_args(
             || arg.contains("G1HeapWastePercent")
             || arg.contains("UseShenandoahGC")
             || arg.contains("ZGenerational")
+            || arg.contains("AlwaysActAsServerClassMachine")
+            || arg.contains("UseFastUnorderedTimeStamps")
+            || arg.contains("UseCompactObjectHeaders")
+            || arg.contains("EnableJVMCI")
     };
 
     if let Some(first_exp_idx) = out.iter().position(|a| is_experimental_flag(a)) {
@@ -852,9 +967,10 @@ pub fn format_java_argfile_token(arg: &str) -> String {
     if arg.is_empty() {
         return "\"\"".to_owned();
     }
-    let needs_quoting = arg
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '#' | ';'));
+    let needs_quoting = arg.starts_with('@')
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '#' | ';'));
     if !needs_quoting {
         return arg.to_owned();
     }
@@ -987,6 +1103,9 @@ fn is_two_token_jvm_option(flag: &str) -> bool {
             | "--patch-module"
             | "-m"
             | "--module"
+            | "--enable-native-access"
+            | "--illegal-access"
+            | "--describe-module"
     )
 }
 
@@ -1039,20 +1158,38 @@ pub fn rewrite_args_for_windows_limit(
     java_major: Option<u32>,
     argfile_path: &Path,
 ) -> MqResult<(Vec<String>, Option<PathBuf>)> {
-    if !is_java_launcher_binary(program)
-        || estimate_windows_cmdline_len(program, args) <= WINDOWS_ARGFILE_THRESHOLD_CHARS
+    let (prefix, actual_args) = if is_java_launcher_binary(program) {
+        (&[][..], args)
+    } else if let Some(pos) = args
+        .iter()
+        .position(|a| is_java_launcher_binary(Path::new(a)))
     {
+        (&args[..=pos], &args[pos + 1..])
+    } else {
+        return Ok((args.to_vec(), None));
+    };
+
+    if estimate_windows_cmdline_len(program, args) <= WINDOWS_ARGFILE_THRESHOLD_CHARS {
         return Ok((args.to_vec(), None));
     }
 
-    let jvm_end = find_jvm_args_end(args);
-    let mut compacted = args.to_vec();
+    let jvm_end = find_jvm_args_end(actual_args);
+    let mut compacted = actual_args.to_vec();
 
     // Step 1: compact `-cp` / `-p` entries relative to working_dir.
     let mut i = 0;
     while i + 1 < jvm_end {
         if is_path_list_jvm_option(&compacted[i]) {
-            compacted[i + 1] = compact_classpath_relative_to(&compacted[i + 1], working_dir, ';');
+            let sep = if compacted[i + 1].contains(';') {
+                ';'
+            } else if compacted[i + 1].contains(':') {
+                ':'
+            } else if cfg!(windows) {
+                ';'
+            } else {
+                ':'
+            };
+            compacted[i + 1] = compact_classpath_relative_to(&compacted[i + 1], working_dir, sep);
             i += 2;
         } else if is_two_token_jvm_option(&compacted[i]) {
             i += 2;
@@ -1061,13 +1198,15 @@ pub fn rewrite_args_for_windows_limit(
         }
     }
 
-    if estimate_windows_cmdline_len(program, &compacted) <= WINDOWS_ARGFILE_THRESHOLD_CHARS {
-        return Ok((compacted, None));
+    let mut full_compacted = prefix.to_vec();
+    full_compacted.extend(compacted.clone());
+    if estimate_windows_cmdline_len(program, &full_compacted) <= WINDOWS_ARGFILE_THRESHOLD_CHARS {
+        return Ok((full_compacted, None));
     }
 
     // Step 2: Java 8 does not support `@argfile`; keep compacted args and warn if still huge.
     if java_major.is_some_and(|m| m < 9) {
-        let est = estimate_windows_cmdline_len(program, &compacted);
+        let est = estimate_windows_cmdline_len(program, &full_compacted);
         if est > 30_000 {
             tracing::warn!(
                 estimated_chars = est,
@@ -1075,7 +1214,7 @@ pub fn rewrite_args_for_windows_limit(
                  Java 8 does not support @argfile — consider using a shorter MQ data directory"
             );
         }
-        return Ok((compacted, None));
+        return Ok((full_compacted, None));
     }
 
     // Step 3: Java 9+ `@argfile` offloading (strictly JVM args before `main_class`).
@@ -1103,7 +1242,7 @@ pub fn rewrite_args_for_windows_limit(
 
     // If remaining args are still too long (e.g., giant Forge/NeoForge --add-opens list),
     // move non-javaagent JVM args before `main_class` into the argfile too.
-    let mut probe_args = Vec::with_capacity(kept_jvm.len() + 1 + (compacted.len() - jvm_end));
+    let mut probe_args = prefix.to_vec();
     probe_args.extend(kept_jvm.iter().cloned());
     probe_args.push(argfile_flag.clone());
     probe_args.extend_from_slice(&compacted[jvm_end..]);
@@ -1131,7 +1270,7 @@ pub fn rewrite_args_for_windows_limit(
     }
 
     if argfile_tokens.is_empty() {
-        return Ok((compacted, None));
+        return Ok((full_compacted, None));
     }
 
     if let Some(parent) = clean_argfile.parent() {
@@ -1147,7 +1286,7 @@ pub fn rewrite_args_for_windows_limit(
     }
     std::fs::write(&clean_argfile, content.as_bytes())?;
 
-    let mut final_args = Vec::with_capacity(kept_jvm.len() + 1 + (compacted.len() - jvm_end));
+    let mut final_args = prefix.to_vec();
     final_args.extend(kept_jvm);
     final_args.push(argfile_flag);
     final_args.extend_from_slice(&compacted[jvm_end..]);
@@ -1883,6 +2022,27 @@ mod tests {
         assert_eq!(
             sanitize_custom_jvm_args(&zgc_gen, 4096, 17, ModLoaderKind::Forge),
             vec!["-XX:+UseZGC".to_owned()]
+        );
+
+        // Java 25 drops `-XX:+ZGenerational` (obsoleted per JEP 490)
+        assert_eq!(
+            sanitize_custom_jvm_args(&zgc_gen, 4096, 25, ModLoaderKind::Vanilla),
+            vec!["-XX:+UseZGC".to_owned()]
+        );
+
+        // Strips conflicting -Xms and -Xmx
+        assert_eq!(
+            sanitize_custom_jvm_args(
+                &[
+                    "-Xms2G".to_owned(),
+                    "-Xmx4G".to_owned(),
+                    "-XX:+UseG1GC".to_owned()
+                ],
+                4096,
+                21,
+                ModLoaderKind::Vanilla
+            ),
+            vec!["-XX:+UseG1GC".to_owned()]
         );
 
         // Java 21 Generational ZGC preset downgrades safely to G1GC on Java 8

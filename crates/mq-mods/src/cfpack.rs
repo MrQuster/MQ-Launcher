@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
-use mq_core::{ModLoaderKind, MqError, MqPaths, MqResult, Sha1Digest};
+use mq_core::{ModLoaderKind, MqError, MqPaths, MqResult, Sha1Digest, Sha512Digest};
 
 static ATOMIC_MOVE_SEQ: AtomicU64 = AtomicU64::new(1);
 use mq_net::{DownloadSpec, NetEngine};
@@ -207,6 +207,7 @@ pub fn build_blocked_download_for_mod(
     })
 }
 
+#[allow(dead_code)]
 struct PlannedCfDownload {
     project_id: u64,
     file_id: u64,
@@ -262,20 +263,29 @@ pub fn build_cfpack_download_urls(
 /// Installs a CurseForge modpack `.zip` archive into `instance_dir`, returning full details
 /// including installed file paths, extracted overrides count, and any [`BlockedDownload`] entries
 /// whose `downloadUrl` is `null`.
+#[allow(clippy::type_complexity)]
 pub async fn install_curseforge_modpack(
     zip_path: &Path,
     instance_dir: &Path,
     paths: &MqPaths,
     net: &NetEngine,
     cf_client: Option<&CurseForgeClient>,
-    _compute_pool: &ComputePool,
+    compute_pool: &ComputePool,
     epoch_guard: &EpochGuard,
 ) -> MqResult<CurseForgeInstallOutcome> {
     epoch_guard
         .check()
         .map_err(|e| MqError::Cancelled { epoch: e.epoch })?;
 
-    let manifest = parse_curseforge_manifest_from_zip(zip_path)?;
+    let manifest = {
+        let zip_p = zip_path.to_path_buf();
+        compute_pool
+            .spawn_cpu_cancellable(epoch_guard, move || {
+                parse_curseforge_manifest_from_zip(&zip_p)
+            })
+            .await
+            .map_err(|e| MqError::Internal(e.to_string()))??
+    };
     fs::create_dir_all(instance_dir)?;
 
     let (loader, loader_version) = manifest.loader_and_version();
@@ -481,18 +491,46 @@ pub async fn install_curseforge_modpack(
             .await?;
     }
 
+    let overrides_prefix = manifest
+        .overrides
+        .clone()
+        .unwrap_or_else(|| "overrides".to_string());
+    let zip_path_buf = zip_path.to_path_buf();
+    let inst_dir_buf = instance_dir.to_path_buf();
+
+    let (verified_entries, overrides_extracted) = compute_pool
+        .spawn_cpu_cancellable(
+            epoch_guard,
+            move || -> MqResult<(Vec<(PlannedCfDownload, Sha1Digest, Sha512Digest)>, usize)> {
+                let mut verified = Vec::with_capacity(planned.len());
+                for item in planned {
+                    if item.cas_path != item.dest_path {
+                        link_or_copy_cas_blob(&item.cas_path, &item.dest_path)?;
+                    }
+
+                    let (actual_sha1, actual_sha512, _) = verify_file_sha1_and_sha512(
+                        &item.dest_path,
+                        &item.filename,
+                        item.expected_sha1,
+                        None,
+                    )?;
+
+                    verified.push((item, actual_sha1, actual_sha512));
+                }
+
+                let overrides_extracted =
+                    extract_zip_prefix_safely(&zip_path_buf, &overrides_prefix, &inst_dir_buf)?;
+
+                Ok((verified, overrides_extracted))
+            },
+        )
+        .await
+        .map_err(|e| MqError::Internal(e.to_string()))??;
+
     let mut lockfile = ModLockFile::load_for_instance(instance_dir);
-    let mut installed_files = Vec::with_capacity(planned.len());
+    let mut installed_files = Vec::with_capacity(verified_entries.len());
 
-    for item in planned {
-        let _ = (&item.url, item.expected_size);
-        if item.cas_path != item.dest_path {
-            link_or_copy_cas_blob(&item.cas_path, &item.dest_path)?;
-        }
-
-        let (actual_sha1, actual_sha512, _) =
-            verify_file_sha1_and_sha512(&item.dest_path, &item.filename, item.expected_sha1, None)?;
-
+    for (item, actual_sha1, actual_sha512) in verified_entries {
         lockfile.record_install(
             item.project_id.to_string(),
             ModLockEntry {
@@ -513,10 +551,6 @@ pub async fn install_curseforge_modpack(
     }
 
     let _ = lockfile.save_for_instance(instance_dir);
-
-    // Safely extract overrides
-    let overrides_prefix = manifest.overrides.as_deref().unwrap_or("overrides");
-    let overrides_extracted = extract_zip_prefix_safely(zip_path, overrides_prefix, instance_dir)?;
 
     let mc_version = manifest.minecraft.version.clone();
     Ok(CurseForgeInstallOutcome {

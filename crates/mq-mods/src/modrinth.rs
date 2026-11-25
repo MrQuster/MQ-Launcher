@@ -476,7 +476,9 @@ pub struct ModrinthClient {
 
 impl Default for ModrinthClient {
     fn default() -> Self {
-        Self::new().expect("default reqwest::Client for ModrinthClient should initialize")
+        Self::new().unwrap_or_else(|_| {
+            Self::with_http_client(reqwest::Client::new(), DEFAULT_MODRINTH_API_URL)
+        })
     }
 }
 

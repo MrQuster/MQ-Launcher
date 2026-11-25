@@ -43,7 +43,7 @@ log_step() {
 }
 
 log_success() {
-    printf "${GREEN}[✓]${RESET} %s\n" "$1"
+    printf "${GREEN}[OK]${RESET} %s\n" "$1"
 }
 
 log_warn() {
@@ -51,7 +51,7 @@ log_warn() {
 }
 
 log_error() {
-    printf "${RED}[✗] Ошибка:${RESET} %s\n" "$1" >&2
+    printf "${RED}[X] Ошибка:${RESET} %s\n" "$1" >&2
 }
 
 show_help() {
@@ -211,7 +211,7 @@ verify_checksum() {
     sums_file="$2"
     file_name="$(basename "${file_path}")"
 
-    expected_hash="$(grep -E "(^|[[:space:]])${file_name}\$" "${sums_file}" | head -n1 | awk '{print $1}')"
+    expected_hash="$(tr -d '\r' < "${sums_file}" | awk -v f="${file_name}" '{sub(/^\*/, "", $2); if ($2 == f) {print $1; exit}}')"
     if [ -z "${expected_hash}" ]; then
         log_error "Файл ${file_name} отсутствует в контрольном списке ${sums_file}."
         return 1
@@ -353,7 +353,8 @@ main() {
     fi
     dry_run=0
     skip_deps=0
-    minisign_pubkey="${MQ_MINISIGN_PUBKEY:-}"
+    MQ_RELEASE_PUBLIC_KEY="RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"
+    minisign_pubkey="${MQ_MINISIGN_PUBKEY:-${MQ_RELEASE_PUBLIC_KEY}}"
     repo_user="${MQ_REPO_USER:-MrQuster}"
     repo_name="${MQ_REPO_NAME:-mq}"
     custom_install_dir="${MQ_INSTALL_DIR:-}"
@@ -495,13 +496,15 @@ main() {
         log_info "Файл SHA256SUMS.minisig не найден в релизе; используется проверка SHA-256."
     fi
 
-    # Select payload: prefer mq-portable-linux-x86_64.tar.gz, fallback to mq-linux-x86_64
+    # Select payload: prefer mq-portable-linux-x86_64.tar.gz, mq-linux-x86_64.tar.gz, fallback to mq-linux-x86_64
     payload_name=""
     if grep -q "mq-portable-linux-x86_64.tar.gz" "${sums_file}"; then
         payload_name="mq-portable-linux-x86_64.tar.gz"
+    elif grep -q "mq-linux-x86_64.tar.gz" "${sums_file}"; then
+        payload_name="mq-linux-x86_64.tar.gz"
     elif grep -q "mq-linux-x86_64" "${sums_file}"; then
         payload_name="mq-linux-x86_64"
-    elif grep -E "(^|[[:space:]])mq\$" "${sums_file}"; then
+    elif grep -q -E "(^|[[:space:]])\*?mq\$" "${sums_file}"; then
         payload_name="mq"
     else
         log_error "Подходящий исполняемый файл для Linux x86_64 не найден в SHA256SUMS."
@@ -602,9 +605,11 @@ main() {
     # Install desktop shortcut
     if [ -f "${staged_desktop}" ]; then
         # Ensure desktop file points directly to the installed binary
-        sed -e "s|^Exec=.*|Exec=${target_bin_path} %u|" \
-            -e "s|^TryExec=.*|TryExec=${target_bin_path}|" \
-            "${staged_desktop}" > "${tmp_dir}/mq.desktop.processed"
+        awk -v bin="${target_bin_path} %f" -v trybin="${target_bin_path}" '
+            /^Exec=/ { print "Exec=" bin; next }
+            /^TryExec=/ { print "TryExec=" trybin; next }
+            { print }
+        ' "${staged_desktop}" > "${tmp_dir}/mq.desktop.processed"
         install -m 644 "${tmp_dir}/mq.desktop.processed" "${target_desktop_path}"
         log_success "Ярлык меню приложений установлен в ${target_desktop_path}"
     fi

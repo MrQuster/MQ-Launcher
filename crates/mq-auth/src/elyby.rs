@@ -348,29 +348,83 @@ impl ElyByClient {
         let sidecar_primary = sha256_sidecar_path(&jar_path);
         let sidecar_alt = jar_path.with_extension("sha256");
 
-        if let Ok(existing_bytes) = fs::read(&jar_path) {
-            if !existing_bytes.is_empty() {
-                let recorded_sha = fs::read_to_string(&sidecar_primary)
-                    .or_else(|_| fs::read_to_string(&sidecar_alt))
-                    .ok()
-                    .map(|s| s.trim().to_ascii_lowercase())
-                    .filter(|s| !s.is_empty());
+        // Fast path: check cached jar if valid sidecar exists (run sync fs via spawn_blocking)
+        let jar_p = jar_path.clone();
+        let s_prim = sidecar_primary.clone();
+        let s_alt = sidecar_alt.clone();
+        let cached = tokio::task::spawn_blocking(move || -> Option<PathBuf> {
+            if let Ok(existing_bytes) = fs::read(&jar_p) {
+                if !existing_bytes.is_empty() {
+                    let recorded_sha = fs::read_to_string(&s_prim)
+                        .or_else(|_| fs::read_to_string(&s_alt))
+                        .ok()
+                        .map(|s| s.trim().to_ascii_lowercase())
+                        .filter(|s| !s.is_empty());
 
-                match recorded_sha {
-                    Some(expected_hex) => {
+                    if let Some(expected_hex) = recorded_sha {
                         let actual_hex = compute_sha256_hex(&existing_bytes);
                         if actual_hex == expected_hex {
-                            return Ok(jar_path);
+                            return Some(jar_p);
                         }
-                    }
-                    None => {
-                        return Ok(jar_path);
                     }
                 }
             }
+            None
+        })
+        .await
+        .map_err(|e| MqError::Internal(format!("spawn_blocking failed: {e}")))?;
+
+        if let Some(path) = cached {
+            return Ok(path);
         }
 
         let info = self.fetch_authlib_injector_info().await?;
+        let expected_sha256 = info.sha256.trim().to_ascii_lowercase();
+
+        // If sidecar was missing, re-verify existing file against fetched expected_sha256
+        let jar_p = jar_path.clone();
+        let exp_sha = expected_sha256.clone();
+        let s_prim = sidecar_primary.clone();
+        let s_alt = sidecar_alt.clone();
+        let reverified = tokio::task::spawn_blocking(move || -> bool {
+            if let Ok(existing_bytes) = fs::read(&jar_p) {
+                if !existing_bytes.is_empty() {
+                    let actual_hex = compute_sha256_hex(&existing_bytes);
+                    if actual_hex == exp_sha {
+                        let sha_payload = format!("{exp_sha}\n");
+                        let _ = atomic_write(&s_prim, sha_payload.as_bytes());
+                        let _ = atomic_write(&s_alt, sha_payload.as_bytes());
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .map_err(|e| MqError::Internal(format!("spawn_blocking failed: {e}")))?;
+
+        if reverified {
+            return Ok(jar_path);
+        }
+
+        // Validate download URL: HTTPS (or loopback for mock tests)
+        let parsed_url = url::Url::parse(&info.download_url)
+            .map_err(|e| MqError::Network(format!("invalid authlib-injector download URL: {e}")))?;
+        let host = parsed_url
+            .host_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+        let is_mock = host_unbracketed == "127.0.0.1"
+            || host_unbracketed == "localhost"
+            || host_unbracketed == "::1";
+        if parsed_url.scheme() != "https" && !is_mock {
+            return Err(MqError::Network(format!(
+                "insecure non-HTTPS authlib-injector download URL: {}",
+                info.download_url
+            )));
+        }
+
         let dl_resp = self
             .http
             .get(&info.download_url)
@@ -393,6 +447,16 @@ impl ElyByClient {
             });
         }
 
+        const MAX_AUTHLIB_INJECTOR_BYTES: usize = 32 * 1024 * 1024;
+        if dl_resp
+            .content_length()
+            .is_some_and(|l| l > MAX_AUTHLIB_INJECTOR_BYTES as u64)
+        {
+            return Err(MqError::Network(
+                "authlib-injector.jar exceeds 32 MiB size limit".to_string(),
+            ));
+        }
+
         let jar_bytes = dl_resp.bytes().await.map_err(|err| {
             MqError::Network(format!(
                 "failed reading authlib-injector.jar body from {}: {err}",
@@ -400,8 +464,14 @@ impl ElyByClient {
             ))
         })?;
 
+        if jar_bytes.len() > MAX_AUTHLIB_INJECTOR_BYTES {
+            return Err(MqError::Network(format!(
+                "authlib-injector.jar exceeds 32 MiB size limit: len={}",
+                jar_bytes.len()
+            )));
+        }
+
         let actual_sha256 = compute_sha256_hex(&jar_bytes);
-        let expected_sha256 = info.sha256.trim().to_ascii_lowercase();
         if actual_sha256 != expected_sha256 {
             return Err(MqError::HashMismatch {
                 target: "authlib-injector.jar".to_owned(),
@@ -411,32 +481,41 @@ impl ElyByClient {
             });
         }
 
-        if let Some(parent) = jar_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let jar_p = jar_path.clone();
+        let exp_sha = expected_sha256.clone();
+        let s_prim = sidecar_primary.clone();
+        let s_alt = sidecar_alt.clone();
+        tokio::task::spawn_blocking(move || -> MqResult<()> {
+            if let Some(parent) = jar_p.parent() {
+                fs::create_dir_all(parent)?;
+            }
 
-        let tmp_name = format!(".authlib-injector.jar.part.{}", Uuid::new_v4().simple());
-        let tmp_path = jar_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(tmp_name);
+            let tmp_name = format!(".authlib-injector.jar.part.{}", Uuid::new_v4().simple());
+            let tmp_path = jar_p
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(tmp_name);
 
-        let write_res = (|| -> std::io::Result<()> {
-            let mut file = fs::File::create(&tmp_path)?;
-            file.write_all(&jar_bytes)?;
-            file.sync_all()?;
-            drop(file);
-            rename_with_retry(&tmp_path, &jar_path)
-        })();
+            let write_res = (|| -> std::io::Result<()> {
+                let mut file = fs::File::create(&tmp_path)?;
+                file.write_all(&jar_bytes)?;
+                file.sync_all()?;
+                drop(file);
+                rename_with_retry(&tmp_path, &jar_p)
+            })();
 
-        if let Err(err) = write_res {
-            let _ = remove_file_with_retry(&tmp_path);
-            return Err(MqError::Io(err));
-        }
+            if let Err(err) = write_res {
+                let _ = remove_file_with_retry(&tmp_path);
+                return Err(MqError::Io(err));
+            }
 
-        let sha_payload = format!("{expected_sha256}\n");
-        let _ = atomic_write(&sidecar_primary, sha_payload.as_bytes());
-        let _ = atomic_write(&sidecar_alt, sha_payload.as_bytes());
+            let sha_payload = format!("{exp_sha}\n");
+            let _ = atomic_write(&s_prim, sha_payload.as_bytes());
+            let _ = atomic_write(&s_alt, sha_payload.as_bytes());
+            Ok(())
+        })
+        .await
+        .map_err(|e| MqError::Internal(format!("spawn_blocking failed: {e}")))??;
 
         Ok(jar_path)
     }
@@ -841,7 +920,17 @@ impl ElyByOAuthFlow {
             .map_err(|e| MqError::Network(format!("Ошибка запроса токена Ely.by: {e}")))?;
 
         if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let mut secrets = vec![code];
+            if let Some(v) = code_verifier {
+                secrets.push(v);
+            }
+            if let Some(s) = client_secret {
+                if !s.is_empty() {
+                    secrets.push(s);
+                }
+            }
+            let raw_text = resp.text().await.unwrap_or_default();
+            let text = mq_core::redact_text(&raw_text, &secrets);
             return Err(MqError::Auth(format!("Ely.by отклонил обмен кода: {text}")));
         }
 
@@ -871,7 +960,9 @@ impl ElyByOAuthFlow {
             .map_err(|e| MqError::Network(format!("Ошибка обновления токена Ely.by: {e}")))?;
 
         if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let secrets = [refresh_token];
+            let raw_text = resp.text().await.unwrap_or_default();
+            let text = mq_core::redact_text(&raw_text, &secrets);
             return Err(MqError::Auth(format!(
                 "Ely.by отклонил обновление токена: {text}"
             )));

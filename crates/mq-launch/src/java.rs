@@ -527,7 +527,8 @@ pub fn parse_java_version_str(raw: &str) -> Option<(u32, String)> {
 /// - `25` for Minecraft `>= 26.x`
 /// - `21` for Minecraft `>= 1.20.5`
 /// - `17` for Minecraft `1.18..=1.20.4`
-/// - `8` for Minecraft `<= 1.17.x`
+/// - `16` for Minecraft `1.17..=1.17.x`
+/// - `8` for Minecraft `<= 1.16.x`
 pub fn required_java_major_for_mc(mc_version: &str, spec_hint: Option<u32>) -> u32 {
     if let Some(hint) = spec_hint {
         return hint;
@@ -555,6 +556,8 @@ pub fn infer_java_major_from_mc_version(mc_version: &str) -> u32 {
                 21
             } else if *minor >= 18 {
                 17
+            } else if *minor == 17 {
+                16
             } else {
                 8
             }
@@ -564,6 +567,8 @@ pub fn infer_java_major_from_mc_version(mc_version: &str) -> u32 {
                 21
             } else if *minor >= 18 {
                 17
+            } else if *minor == 17 {
+                16
             } else {
                 8
             }
@@ -958,6 +963,118 @@ pub async fn ensure_java_runtime(
     })
 }
 
+fn safe_extract_zip(archive_bytes: &[u8], dest_dir: &Path) -> MqResult<()> {
+    let cursor = std::io::Cursor::new(archive_bytes);
+    let mut zip_archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| MqError::Internal(format!("failed to parse zip: {e}")))?;
+
+    for i in 0..zip_archive.len() {
+        let mut entry = zip_archive
+            .by_index(i)
+            .map_err(|e| MqError::Internal(format!("failed to read zip entry: {e}")))?;
+
+        let raw_name = entry.name().to_string();
+        if entry.is_dir() || raw_name.ends_with('/') || raw_name.ends_with('\\') {
+            continue;
+        }
+
+        if entry.is_symlink() {
+            return Err(MqError::Internal(format!(
+                "symlink entry prohibited in zip: {raw_name}"
+            )));
+        }
+        if let Some(mode) = entry.unix_mode() {
+            if (mode & 0o170000) == 0o120000 {
+                return Err(MqError::Internal(format!(
+                    "symlink entry prohibited in zip: {raw_name}"
+                )));
+            }
+        }
+
+        let enclosed = entry.enclosed_name().ok_or_else(|| {
+            MqError::Internal(format!("zip slip detected in archive: {raw_name}"))
+        })?;
+
+        let outpath = dest_dir.join(enclosed);
+        if let Some(parent) = outpath.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut outfile = fs::File::create(&outpath)?;
+        std::io::copy(&mut entry, &mut outfile)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = entry.unix_mode() {
+                let _ = fs::set_permissions(&outpath, fs::Permissions::from_mode(mode));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn safe_extract_tar_gz(archive_bytes: &[u8], dest_dir: &Path) -> MqResult<()> {
+    let gz_decoder = flate2::read::GzDecoder::new(archive_bytes);
+    let mut archive = tar::Archive::new(gz_decoder);
+
+    for entry_res in archive
+        .entries()
+        .map_err(|e| MqError::Internal(format!("failed to read tar entries: {e}")))?
+    {
+        let mut entry =
+            entry_res.map_err(|e| MqError::Internal(format!("failed to read tar entry: {e}")))?;
+
+        let path = entry
+            .path()
+            .map_err(|e| MqError::Internal(format!("invalid path in tar entry: {e}")))?
+            .to_path_buf();
+
+        if path.is_absolute()
+            || path.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(MqError::Internal(format!(
+                "tar entry escapes destination: {}",
+                path.display()
+            )));
+        }
+
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            if let Ok(Some(link_target)) = entry.link_name() {
+                if link_target.is_absolute()
+                    || link_target.components().any(|c| {
+                        matches!(
+                            c,
+                            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(MqError::Internal(format!(
+                        "tar link target escapes destination: {}",
+                        link_target.display()
+                    )));
+                }
+            } else {
+                return Err(MqError::Internal(format!(
+                    "invalid symlink in tar: {}",
+                    path.display()
+                )));
+            }
+        }
+
+        entry
+            .unpack_in(dest_dir)
+            .map_err(|e| MqError::Internal(format!("failed to unpack tar entry: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Downloads and installs an Eclipse Temurin JRE binary from the Adoptium API v3.
 /// Supported feature versions: 8, 11, 16, 17, 21, 25.
 /// Target directory: `<target_parent_dir>/temurin-<version>-<arch>`
@@ -1053,16 +1170,19 @@ pub async fn download_adoptium_java(
         .await
         .map_err(|e| MqError::Network(format!("failed to download Adoptium archive: {e}")))?;
 
-    // 3. Verify SHA-256 if expected checksum is found
-    if let Some(ref expected) = expected_checksum {
-        let mut hasher = Sha256::new();
-        hasher.update(&archive_bytes);
-        let actual = hex::encode(hasher.finalize()).to_lowercase();
-        if actual != *expected {
-            return Err(MqError::Internal(format!(
-                "Adoptium Java {feature_version} SHA-256 mismatch: expected {expected}, got {actual}"
-            )));
-        }
+    // 3. Verify SHA-256 (mandatory for Adoptium)
+    let expected = expected_checksum.ok_or_else(|| {
+        MqError::Internal(format!(
+            "Adoptium Java {feature_version} checksum not available from API"
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&archive_bytes);
+    let actual = hex::encode(hasher.finalize()).to_lowercase();
+    if actual != expected {
+        return Err(MqError::Internal(format!(
+            "Adoptium Java {feature_version} SHA-256 mismatch: expected {expected}, got {actual}"
+        )));
     }
 
     // 4. Safely extract archive
@@ -1076,21 +1196,12 @@ pub async fn download_adoptium_java(
     fs::create_dir_all(&temp_extract)?;
 
     if target_os == "windows" {
-        let cursor = std::io::Cursor::new(&archive_bytes[..]);
-        let mut zip_archive = zip::ZipArchive::new(cursor).map_err(|e| {
+        safe_extract_zip(&archive_bytes, &temp_extract).inspect_err(|_| {
             let _ = remove_dir_all_with_retry(&temp_extract);
-            MqError::Internal(format!("failed to parse Adoptium zip: {e}"))
-        })?;
-        zip_archive.extract(&temp_extract).map_err(|e| {
-            let _ = remove_dir_all_with_retry(&temp_extract);
-            MqError::Internal(format!("failed to unpack Adoptium zip archive: {e}"))
         })?;
     } else {
-        let gz_decoder = flate2::read::GzDecoder::new(&archive_bytes[..]);
-        let mut archive = tar::Archive::new(gz_decoder);
-        archive.unpack(&temp_extract).map_err(|e| {
+        safe_extract_tar_gz(&archive_bytes, &temp_extract).inspect_err(|_| {
             let _ = remove_dir_all_with_retry(&temp_extract);
-            MqError::Internal(format!("failed to unpack Adoptium archive: {e}"))
         })?;
     }
 
@@ -1196,16 +1307,26 @@ pub async fn download_zulu_java(
         .await
         .map_err(|e| MqError::Network(format!("failed to parse Zulu JSON response: {e}")))?;
 
-    let download_url = val
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|item| item.get("download_url"))
+    let first_item = val.as_array().and_then(|arr| arr.first()).ok_or_else(|| {
+        MqError::Network(format!(
+            "no package items found in Zulu API response for Java {feature_version}"
+        ))
+    })?;
+
+    let download_url = first_item
+        .get("download_url")
         .and_then(|u| u.as_str())
         .ok_or_else(|| {
             MqError::Network(format!(
                 "no download URL found in Zulu API response for Java {feature_version}"
             ))
         })?;
+
+    let expected_zulu_checksum = first_item
+        .get("sha256_hash")
+        .or_else(|| first_item.get("checksum"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase());
 
     let dl_resp = client
         .get(download_url)
@@ -1225,6 +1346,17 @@ pub async fn download_zulu_java(
         .await
         .map_err(|e| MqError::Network(format!("failed to read Zulu archive bytes: {e}")))?;
 
+    if let Some(ref expected) = expected_zulu_checksum {
+        let mut hasher = Sha256::new();
+        hasher.update(&archive_bytes);
+        let actual = hex::encode(hasher.finalize()).to_lowercase();
+        if actual != *expected {
+            return Err(MqError::Internal(format!(
+                "Zulu Java {feature_version} SHA-256 mismatch: expected {expected}, got {actual}"
+            )));
+        }
+    }
+
     fs::create_dir_all(target_parent_dir)?;
     let temp_extract = target_parent_dir.join(format!(
         ".tmp_extract_zulu_{feature_version}_{}",
@@ -1236,21 +1368,12 @@ pub async fn download_zulu_java(
     fs::create_dir_all(&temp_extract)?;
 
     if target_os == "windows" {
-        let cursor = std::io::Cursor::new(&archive_bytes[..]);
-        let mut zip_archive = zip::ZipArchive::new(cursor).map_err(|e| {
+        safe_extract_zip(&archive_bytes, &temp_extract).inspect_err(|_| {
             let _ = remove_dir_all_with_retry(&temp_extract);
-            MqError::Internal(format!("failed to parse Zulu zip: {e}"))
-        })?;
-        zip_archive.extract(&temp_extract).map_err(|e| {
-            let _ = remove_dir_all_with_retry(&temp_extract);
-            MqError::Internal(format!("failed to unpack Zulu zip archive: {e}"))
         })?;
     } else {
-        let gz_decoder = flate2::read::GzDecoder::new(&archive_bytes[..]);
-        let mut archive = tar::Archive::new(gz_decoder);
-        archive.unpack(&temp_extract).map_err(|e| {
+        safe_extract_tar_gz(&archive_bytes, &temp_extract).inspect_err(|_| {
             let _ = remove_dir_all_with_retry(&temp_extract);
-            MqError::Internal(format!("failed to unpack Zulu archive: {e}"))
         })?;
     }
 
@@ -1286,4 +1409,22 @@ pub async fn download_zulu_java(
             ))
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_infer_java_major_from_mc_version() {
+        assert_eq!(infer_java_major_from_mc_version("1.17"), 16);
+        assert_eq!(infer_java_major_from_mc_version("1.17.1"), 16);
+        assert_eq!(infer_java_major_from_mc_version("1.16.5"), 8);
+        assert_eq!(infer_java_major_from_mc_version("1.12.2"), 8);
+        assert_eq!(infer_java_major_from_mc_version("1.18"), 17);
+        assert_eq!(infer_java_major_from_mc_version("1.20.4"), 17);
+        assert_eq!(infer_java_major_from_mc_version("1.20.5"), 21);
+        assert_eq!(infer_java_major_from_mc_version("1.21.1"), 21);
+        assert_eq!(infer_java_major_from_mc_version("26.1"), 25);
+    }
 }

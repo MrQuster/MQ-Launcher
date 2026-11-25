@@ -110,12 +110,43 @@ impl NetEngine {
         event_bus: Option<EventBus>,
     ) -> MqResult<Self> {
         let max_conn = config.max_connections.max(1);
+        let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many HTTP redirects");
+            }
+            if attempt
+                .previous()
+                .iter()
+                .any(|prev| prev.scheme() == "https")
+                && attempt.url().scheme() != "https"
+            {
+                return attempt.error("blocked HTTPS to HTTP scheme downgrade redirect");
+            }
+
+            let prev_was_external = attempt.previous().iter().any(|prev| {
+                prev.host_str()
+                    .is_some_and(|h| !is_local_or_private_host(&h.to_ascii_lowercase()))
+            });
+            let next_is_local = attempt
+                .url()
+                .host_str()
+                .is_some_and(|h| is_local_or_private_host(&h.to_ascii_lowercase()));
+
+            if prev_was_external && next_is_local {
+                return attempt
+                    .error("blocked redirect from external host to private or loopback IP");
+            }
+
+            attempt.follow()
+        });
+
         let client = reqwest::Client::builder()
             .user_agent(&config.user_agent)
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.read_timeout)
             .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
             .pool_max_idle_per_host(max_conn)
+            .redirect(redirect_policy)
             .gzip(true)
             .build()
             .map_err(|err| MqError::Network(format!("failed to build HTTP client: {err}")))?;
@@ -1350,6 +1381,32 @@ fn compute_dedup_key(spec: &DownloadSpec) -> String {
     }
 }
 
+fn is_local_or_private_host(host_str: &str) -> bool {
+    let host = host_str
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                ipv4.is_loopback() // 127.0.0.0/8
+                    || ipv4.is_private() // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                    || ipv4.is_link_local() // 169.254.0.0/16
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                ipv6.is_loopback() // ::1
+                    || ((ipv6.segments()[0] & 0xfe00) == 0xfc00) // fc00::/7 unique local
+                    || ((ipv6.segments()[0] & 0xffc0) == 0xfe80) // fe80::/10 link local
+            }
+        }
+    } else {
+        false
+    }
+}
+
 fn make_part_path(dest_path: &Path, epoch: Option<u64>) -> PathBuf {
     let mut os = OsString::from(dest_path.as_os_str());
     match epoch {
@@ -1495,5 +1552,23 @@ mod tests {
 
         let unix = normalize_path_for_dedup(Path::new("/home/User/MQ/Mod.jar"), false);
         assert_eq!(unix, "/home/User/MQ/Mod.jar");
+    }
+
+    #[test]
+    fn test_is_local_or_private_host() {
+        assert!(is_local_or_private_host("127.0.0.1"));
+        assert!(is_local_or_private_host("127.0.1.5"));
+        assert!(is_local_or_private_host("localhost"));
+        assert!(is_local_or_private_host("::1"));
+        assert!(is_local_or_private_host("[::1]"));
+        assert!(is_local_or_private_host("10.0.0.1"));
+        assert!(is_local_or_private_host("192.168.1.100"));
+        assert!(is_local_or_private_host("172.16.5.1"));
+        assert!(is_local_or_private_host("169.254.1.1"));
+
+        assert!(!is_local_or_private_host("example.com"));
+        assert!(!is_local_or_private_host("cdn.modrinth.com"));
+        assert!(!is_local_or_private_host("8.8.8.8"));
+        assert!(!is_local_or_private_host("1.1.1.1"));
     }
 }

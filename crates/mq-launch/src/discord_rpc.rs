@@ -15,6 +15,61 @@ use std::fs::{File, OpenOptions};
 
 const DISCORD_APP_ID: &str = "1342500000000000000";
 
+fn get_discord_app_id() -> String {
+    std::env::var("MQ_DISCORD_APP_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DISCORD_APP_ID.to_string())
+}
+
+#[cfg(windows)]
+fn wait_for_named_pipe_data(
+    file: &std::fs::File,
+    required_bytes: usize,
+    timeout: std::time::Duration,
+) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    type Handle = *mut std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn PeekNamedPipe(
+            hNamedPipe: Handle,
+            lpBuffer: *mut std::ffi::c_void,
+            nBufferSize: u32,
+            lpBytesRead: *mut u32,
+            lpTotalBytesAvail: *mut u32,
+            lpBytesLeftThisMessage: *mut u32,
+        ) -> i32;
+    }
+
+    let raw_handle = file.as_raw_handle() as Handle;
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(10);
+
+    while start.elapsed() <= timeout {
+        let mut total_bytes_avail: u32 = 0;
+        let res = unsafe {
+            PeekNamedPipe(
+                raw_handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut total_bytes_avail,
+                std::ptr::null_mut(),
+            )
+        };
+        if res == 0 {
+            return false;
+        }
+        if (total_bytes_avail as usize) >= required_bytes {
+            return true;
+        }
+        std::thread::sleep(poll_interval);
+    }
+    false
+}
+
 enum StreamKind {
     #[cfg(unix)]
     Unix(UnixStream),
@@ -41,12 +96,27 @@ impl StreamKind {
         }
     }
 
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read_exact_with_timeout(
+        &mut self,
+        buf: &mut [u8],
+        timeout: std::time::Duration,
+    ) -> std::io::Result<()> {
         match self {
             #[cfg(unix)]
-            Self::Unix(s) => s.read(buf),
+            Self::Unix(s) => {
+                s.set_read_timeout(Some(timeout))?;
+                s.read_exact(buf)
+            }
             #[cfg(windows)]
-            Self::Windows(f) => f.read(buf),
+            Self::Windows(f) => {
+                if !wait_for_named_pipe_data(f, buf.len(), timeout) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "named pipe read timed out",
+                    ));
+                }
+                f.read_exact(buf)
+            }
         }
     }
 }
@@ -121,15 +191,48 @@ impl DiscordRpcClient {
     }
 
     fn send_handshake(&mut self) -> bool {
-        let handshake = format!(r#"{{"v":1,"client_id":"{DISCORD_APP_ID}"}}"#);
+        let app_id = get_discord_app_id();
+        let handshake_val = serde_json::json!({
+            "v": 1,
+            "client_id": app_id,
+        });
+        let handshake = handshake_val.to_string();
         if !self.send_frame(0, &handshake) {
             return false;
         }
+
         let mut header = [0u8; 8];
-        let Ok(n) = self.stream.read(&mut header) else {
+        let timeout = std::time::Duration::from_millis(200);
+        if self
+            .stream
+            .read_exact_with_timeout(&mut header, timeout)
+            .is_err()
+        {
             return false;
-        };
-        n >= 8
+        }
+
+        let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
+        // In Discord IPC protocol, response opcode must be FRAME (1)
+        if opcode != 1 {
+            return false;
+        }
+
+        let body_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        // Cap payload read at 64 KiB
+        if body_len > 64 * 1024 {
+            return false;
+        }
+
+        let mut body = vec![0u8; body_len];
+        if self
+            .stream
+            .read_exact_with_timeout(&mut body, timeout)
+            .is_err()
+        {
+            return false;
+        }
+
+        true
     }
 
     /// Sets playing activity status in Discord.
@@ -140,20 +243,40 @@ impl DiscordRpcClient {
         start_unix_secs: u64,
     ) {
         let pid = std::process::id();
-        let safe_name = instance_name.replace('"', "\\\"");
-        let safe_details = details_line.replace('"', "\\\"");
-        let payload = format!(
-            r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{pid},"activity":{{"state":"{safe_name}","details":"{safe_details}","timestamps":{{"start":{start_unix_secs}}},"assets":{{"large_image":"mq","large_text":"MQ Launcher"}}}}}},"nonce":"{start_unix_secs}"}}"#
-        );
+        let payload_val = serde_json::json!({
+            "cmd": "SET_ACTIVITY",
+            "args": {
+                "pid": pid,
+                "activity": {
+                    "state": instance_name,
+                    "details": details_line,
+                    "timestamps": {
+                        "start": start_unix_secs,
+                    },
+                    "assets": {
+                        "large_image": "mq",
+                        "large_text": "MQ Launcher",
+                    }
+                }
+            },
+            "nonce": start_unix_secs.to_string(),
+        });
+        let payload = payload_val.to_string();
         let _ = self.send_frame(1, &payload);
     }
 
     /// Clears any currently shown Discord activity.
     pub fn clear_activity(&mut self) {
         let pid = std::process::id();
-        let payload = format!(
-            r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{pid},"activity":null}},"nonce":"1"}}"#
-        );
+        let payload_val = serde_json::json!({
+            "cmd": "SET_ACTIVITY",
+            "args": {
+                "pid": pid,
+                "activity": serde_json::Value::Null,
+            },
+            "nonce": "1",
+        });
+        let payload = payload_val.to_string();
         let _ = self.send_frame(1, &payload);
     }
 }
@@ -176,5 +299,15 @@ mod tests {
             c.set_playing_activity("Test Instance", "Playing Minecraft", 1000);
             c.clear_activity();
         }
+    }
+
+    #[test]
+    fn test_discord_app_id_override() {
+        std::env::remove_var("MQ_DISCORD_APP_ID");
+        assert_eq!(get_discord_app_id(), DISCORD_APP_ID);
+
+        std::env::set_var("MQ_DISCORD_APP_ID", "999888777666555444");
+        assert_eq!(get_discord_app_id(), "999888777666555444");
+        std::env::remove_var("MQ_DISCORD_APP_ID");
     }
 }

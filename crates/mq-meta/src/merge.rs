@@ -249,7 +249,25 @@ fn merge_libraries_deterministically(
         HashSet::with_capacity(total_cap);
     let mut seen_fallback_coords: HashSet<String> = HashSet::new();
 
-    for lib in child_libs.iter().chain(parent_libs.iter()) {
+    let mut child_claimed_native_groups: HashSet<(String, String)> = HashSet::new();
+    for lib in child_libs {
+        let (group, artifact, classifier) = lib.module_key();
+        if !group.is_empty()
+            && !artifact.is_empty()
+            && (classifier.is_none()
+                || classifier
+                    .as_deref()
+                    .is_some_and(|c| c.starts_with("natives-")))
+        {
+            child_claimed_native_groups.insert((group, artifact));
+        }
+    }
+
+    for (is_parent, lib) in child_libs
+        .iter()
+        .map(|l| (false, l))
+        .chain(parent_libs.iter().map(|l| (true, l)))
+    {
         let key = lib.module_key();
         let has_valid_module_key = !key.0.is_empty() && !key.1.is_empty();
 
@@ -261,7 +279,13 @@ fn merge_libraries_deterministically(
         }
 
         let keep_artifact = lib.artifact.is_some() && seen_artifact_modules.insert(key.clone());
-        let keep_native = lib.native_linux.is_some() && seen_native_modules.insert(key);
+
+        let allow_native = !(is_parent
+            && key.2.is_none()
+            && child_claimed_native_groups.contains(&(key.0.clone(), key.1.clone())));
+
+        let keep_native =
+            allow_native && lib.native_linux.is_some() && seen_native_modules.insert(key);
 
         if !keep_artifact && !keep_native {
             continue;

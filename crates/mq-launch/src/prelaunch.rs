@@ -9,6 +9,7 @@ use std::path::Path;
 use mq_core::platform::{atomic_write, link_or_copy};
 use mq_core::{resolve_safe_path, MqPaths, MqResult};
 use mq_meta::{fetch_asset_index_raw, parse_asset_index, ResolvedVersion};
+use sha1::{Digest, Sha1};
 
 /// Verifies and guarantees that the asset index and language files exist on disk before JVM spawn.
 pub async fn ensure_prelaunch_assets(
@@ -81,7 +82,12 @@ pub async fn ensure_prelaunch_assets(
         if let Ok(resp) = client.get(&url).send().await {
             if resp.status().is_success() {
                 if let Ok(bytes) = resp.bytes().await {
-                    let _ = atomic_write(&target_file, &bytes);
+                    let mut hasher = Sha1::new();
+                    hasher.update(&bytes);
+                    let actual = hex::encode(hasher.finalize()).to_lowercase();
+                    if actual == hex.to_lowercase() {
+                        let _ = atomic_write(&target_file, &bytes);
+                    }
                 }
             }
         }

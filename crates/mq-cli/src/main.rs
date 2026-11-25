@@ -37,7 +37,7 @@ use mq_launch::{
     sync_minecraft_options_lang, LaunchContext,
 };
 use mq_mods::{
-    delete_mod, install_curseforge_zip, install_mrpack, resolve_dependency_plan,
+    delete_mod, install_curseforge_modpack, install_mrpack, resolve_dependency_plan,
     resolve_mod_with_dependencies, scan_mods_directory, toggle_mod, CatalogHit, CatalogSource,
     CatalogSourceFilter, ContentProvider, CurseForgeClient, DependencyResolutionPlan,
     InstalledModEntry, LockSource, ModConflict, ModrinthClient, ProjectKind, ProjectVersion,
@@ -758,18 +758,22 @@ async fn main() -> Result<()> {
         .context("Failed to create platform directories")?;
     mq_core::install_panic_hook(&paths);
 
+    let clamped_threads = cli.threads.map(|t| t.clamp(1, 256));
+
     match cli.command {
         None => {
             let pending_mrpack = match cli.open_pack {
                 Some(path) => {
-                    if !is_mrpack_arg(&path) {
+                    let decoded_path = decode_file_path_arg(&path);
+                    if !is_mrpack_arg(&decoded_path) {
                         anyhow::bail!(
                             "Неподдерживаемый файл: {}. Ожидается архив .mrpack",
-                            path.display()
+                            decoded_path.display()
                         );
                     }
-                    let resolved =
-                        strip_windows_verbatim_prefix(std::fs::canonicalize(&path).unwrap_or(path));
+                    let resolved = strip_windows_verbatim_prefix(
+                        std::fs::canonicalize(&decoded_path).unwrap_or(decoded_path),
+                    );
                     if try_forward_mrpack_to_running_instance(&paths, &resolved) {
                         return Ok(());
                     }
@@ -777,24 +781,26 @@ async fn main() -> Result<()> {
                 }
                 None => None,
             };
-            run_desktop_gui(cli.backend, cli.threads, paths, pending_mrpack)
+            run_desktop_gui(cli.backend, clamped_threads, paths, pending_mrpack)
         }
         Some(Commands::Launch(args)) => cmd_launch(args, paths).await,
-        Some(Commands::Install(args)) => cmd_install(args, paths, cli.threads).await,
+        Some(Commands::Install(args)) => cmd_install(args, paths, clamped_threads).await,
         Some(Commands::Search(args)) => cmd_search(args, paths).await,
         Some(Commands::Import(args)) => cmd_import(args, paths).await,
-        Some(Commands::InstallWorker(args)) => cmd_install_worker(args, paths, cli.threads).await,
-        Some(Commands::Verify(args)) => cmd_verify(args, paths, cli.threads).await,
+        Some(Commands::InstallWorker(args)) => {
+            cmd_install_worker(args, paths, clamped_threads).await
+        }
+        Some(Commands::Verify(args)) => cmd_verify(args, paths, clamped_threads).await,
         Some(Commands::Plan(args)) => cmd_plan(args, paths).await,
         Some(Commands::Auth(args)) => cmd_auth(args, paths).await,
         Some(Commands::Accounts(args)) => cmd_accounts(args, paths).await,
         Some(Commands::Instances(args)) => cmd_instances(args, paths).await,
         Some(Commands::Java(args)) => cmd_java(args, paths).await,
-        Some(Commands::Mods(args)) => cmd_mods(args, paths, cli.threads).await,
-        Some(Commands::Modpack(args)) => cmd_modpack(args, paths, cli.threads).await,
+        Some(Commands::Mods(args)) => cmd_mods(args, paths, clamped_threads).await,
+        Some(Commands::Modpack(args)) => cmd_modpack(args, paths, clamped_threads).await,
         Some(Commands::Worlds(args)) => cmd_worlds(args, paths).await,
         Some(Commands::Doctor(args)) => cmd_doctor(args, paths).await,
-        Some(Commands::UiSnapshot(args)) => cmd_ui_snapshot(args, paths, cli.threads).await,
+        Some(Commands::UiSnapshot(args)) => cmd_ui_snapshot(args, paths, clamped_threads).await,
         Some(Commands::Bench(args)) => cmd_bench(args).await,
         Some(Commands::About) => cmd_about().await,
         Some(Commands::SelfUpdate(args)) => cmd_self_update(args).await,
@@ -848,8 +854,7 @@ async fn cmd_self_update(args: SelfUpdateArgs) -> Result<()> {
                 })
                 .await?;
             println!("\nОбновление успешно установлено в {:?}", installed_path);
-            println!("Перезапуск лаунчера...");
-            let _ = mq_update::UpdateManager::restart_process(&[]);
+            println!("Для применения обновления перезапустите MQ Launcher.");
         }
         None => {
             println!("У вас установлена последняя версия v{}", cur_ver);
@@ -938,7 +943,7 @@ async fn cmd_uninstall(args: UninstallArgs, paths: MqPaths) -> Result<()> {
 
 fn default_cpu_threads() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(|n| n.get().clamp(1, 256))
         .unwrap_or(4)
 }
 
@@ -956,8 +961,64 @@ fn resolve_mojang_mock_base_url(paths: &MqPaths) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        } else if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+fn decode_file_path_arg(path: &std::path::Path) -> PathBuf {
+    let raw_str = path.to_string_lossy();
+    if raw_str.starts_with("file://") {
+        if let Ok(u) = url::Url::parse(&raw_str) {
+            if let Ok(p) = u.to_file_path() {
+                return p;
+            }
+        }
+        let stripped = raw_str.trim_start_matches("file://");
+        let decoded = percent_decode(stripped);
+        #[cfg(target_os = "windows")]
+        {
+            let trimmed = decoded.trim_start_matches('/');
+            PathBuf::from(trimmed)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if decoded.starts_with('/') {
+                PathBuf::from(decoded)
+            } else {
+                PathBuf::from(format!("/{}", decoded))
+            }
+        }
+    } else if raw_str.contains('%') {
+        PathBuf::from(percent_decode(&raw_str))
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn is_mrpack_arg(path: &std::path::Path) -> bool {
-    path.extension()
+    let decoded = decode_file_path_arg(path);
+    decoded
+        .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("mrpack"))
 }
@@ -988,7 +1049,7 @@ fn try_forward_mrpack_to_running_instance(paths: &MqPaths, pack_path: &std::path
 type MrpackIpcRx = Arc<std::sync::Mutex<std::sync::mpsc::Receiver<PathBuf>>>;
 
 fn start_mrpack_ipc_listener(paths: &MqPaths) -> Option<(MrpackIpcRx, PathBuf)> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
     let port = listener.local_addr().ok()?.port();
     let port_file = gui_ipc_port_file(paths);
@@ -996,12 +1057,13 @@ fn start_mrpack_ipc_listener(paths: &MqPaths) -> Option<(MrpackIpcRx, PathBuf)> 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for conn in listener.incoming().flatten() {
-            let mut reader = BufReader::new(conn);
+            let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let mut reader = BufReader::new(conn.take(8192));
             let mut line = String::new();
             if reader.read_line(&mut line).is_ok() {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    let p = PathBuf::from(trimmed);
+                    let p = decode_file_path_arg(std::path::Path::new(trimmed));
                     if is_mrpack_arg(&p) {
                         let _ = tx.send(p);
                     }
@@ -1118,7 +1180,7 @@ async fn cmd_launch(args: LaunchArgs, paths: MqPaths) -> Result<()> {
         account_store
             .list_accounts()
             .iter()
-            .find(|a| a.username == ely_nick)
+            .find(|a| a.username == ely_nick && a.kind == AccountKind::ElyBy)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Аккаунт Ely.by '{}' не найден в хранилище", ely_nick))?
     } else if let Some(active) = account_store.active_account() {
@@ -1145,6 +1207,20 @@ async fn cmd_launch(args: LaunchArgs, paths: MqPaths) -> Result<()> {
         None
     };
 
+    let mut extra_secrets = Vec::new();
+    for a in account_store.list_accounts() {
+        let tok = a.access_token.expose_secret().trim();
+        if !tok.is_empty() {
+            extra_secrets.push(tok.to_string());
+        }
+        if let Some(ref rt) = a.refresh_token {
+            let rtt = rt.expose_secret().trim();
+            if !rtt.is_empty() {
+                extra_secrets.push(rtt.to_string());
+            }
+        }
+    }
+
     let launch_ctx = LaunchContext {
         paths: paths.clone(),
         instance: inst.clone(),
@@ -1152,17 +1228,19 @@ async fn cmd_launch(args: LaunchArgs, paths: MqPaths) -> Result<()> {
         account,
         java_bin: selected_java.path,
         authlib_injector_jar: authlib_path,
-        extra_secrets_to_redact: Vec::new(),
+        extra_secrets_to_redact: extra_secrets,
     };
 
     let built_cmd = build_launch_command(&launch_ctx)?;
+    let launch_secrets = launch_ctx.collect_secrets();
+    let secret_refs: Vec<&str> = launch_secrets.iter().map(String::as_str).collect();
 
     if args.dry_run {
         println!(
             "--------------------------------------------------------------------------------"
         );
         println!("[MQ DRY RUN] Сформированная командная строка JVM:");
-        println!("{}", built_cmd.to_shell_command_line());
+        println!("{}", built_cmd.to_redacted_command_line(&secret_refs));
         println!(
             "--------------------------------------------------------------------------------"
         );
@@ -1192,9 +1270,17 @@ async fn cmd_launch(args: LaunchArgs, paths: MqPaths) -> Result<()> {
         }
     });
 
-    let exit_code =
-        spawn_and_stream_game(&built_cmd, inst.id.as_str(), Vec::new(), Some(event_bus)).await?;
-    println!("[MQ] Игра завершилась с кодом выхода: {}", exit_code);
+    let exit_status = spawn_and_stream_game(
+        &built_cmd,
+        inst.id.as_str(),
+        launch_secrets,
+        Some(event_bus),
+    )
+    .await?;
+    println!("[MQ] Игра завершилась с кодом выхода: {}", exit_status);
+    if !exit_status.success() {
+        bail!("Процесс игры завершился с ошибкой ({})", exit_status);
+    }
     Ok(())
 }
 
@@ -1202,13 +1288,7 @@ async fn cmd_install(args: InstallArgs, paths: MqPaths, threads: Option<usize>) 
     if let Some((source, project)) = parse_catalog_spec(&args.version, args.source.as_deref())? {
         return cmd_catalog_install(args, source, project, paths, threads).await;
     }
-    let loader = match args.loader.to_lowercase().as_str() {
-        "fabric" => ModLoaderKind::Fabric,
-        "quilt" => ModLoaderKind::Quilt,
-        "forge" => ModLoaderKind::Forge,
-        "neoforge" => ModLoaderKind::NeoForge,
-        _ => ModLoaderKind::Vanilla,
-    };
+    let loader = parse_loader(&args.loader)?;
 
     let mgr = InstanceManager::new(paths.clone());
     let inst_name = args
@@ -1919,7 +1999,7 @@ async fn cmd_auth(args: AuthArgs, paths: MqPaths) -> Result<()> {
                     acc.username
                 );
             } else {
-                println!("Укажите метод авторизации: --offline <nick>, --ely, или --microsoft");
+                bail!("Укажите метод авторизации: --offline <nick>, --ely, или --microsoft");
             }
         }
         AuthSubcommand::Select { id } => {
@@ -1928,7 +2008,9 @@ async fn cmd_auth(args: AuthArgs, paths: MqPaths) -> Result<()> {
             println!("[MQ] Активный аккаунт переключен на: {}", id);
         }
         AuthSubcommand::Remove { id } => {
-            store.remove_account(&id);
+            if !store.remove_account(&id) {
+                bail!("Аккаунт '{}' не найден", id);
+            }
             store.save(&paths)?;
             println!("[MQ] Аккаунт '{}' удалён.", id);
         }
@@ -1943,7 +2025,9 @@ async fn cmd_mods(args: ModsArgs, paths: MqPaths, threads: Option<usize>) -> Res
 
     match args.action {
         ModsSubcommand::Scan { instance } => {
-            let mods_dir = paths.instance_dir(&instance).join("mods");
+            let mgr = InstanceManager::new(paths.clone());
+            let inst = mgr.load_instance(&instance)?;
+            let mods_dir = paths.instance_dir(inst.id.as_str()).join("mods");
             if !mods_dir.exists() {
                 bail!("Директория модов не существует: {}", mods_dir.display());
             }
@@ -2050,16 +2134,15 @@ async fn cmd_mods(args: ModsArgs, paths: MqPaths, threads: Option<usize>) -> Res
             loader,
             version,
         } => {
-            let inst_dir = paths.instance_dir(&instance);
-            let mc_ver = version.unwrap_or_else(|| "1.21.1".to_string());
-            let mod_loader = loader
-                .map(|l| match l.to_lowercase().as_str() {
-                    "quilt" => ModLoaderKind::Quilt,
-                    "forge" => ModLoaderKind::Forge,
-                    "neoforge" => ModLoaderKind::NeoForge,
-                    _ => ModLoaderKind::Fabric,
-                })
-                .unwrap_or(ModLoaderKind::Fabric);
+            let mgr = InstanceManager::new(paths.clone());
+            let inst = mgr.load_instance(&instance)?;
+            let inst_dir = paths.instance_dir(inst.id.as_str());
+            let mc_ver = version.unwrap_or_else(|| inst.mc_version.clone());
+            let mod_loader = if let Some(l) = loader {
+                parse_loader(&l)?
+            } else {
+                inst.loader
+            };
 
             println!(
                 "[MQ] Авто-разрешение зависимостей и установка мода '{}'...",
@@ -2103,12 +2186,16 @@ async fn cmd_mods(args: ModsArgs, paths: MqPaths, threads: Option<usize>) -> Res
             );
         }
         ModsSubcommand::Toggle { instance, file } => {
-            let mods_dir = paths.instance_dir(&instance).join("mods");
+            let mgr = InstanceManager::new(paths.clone());
+            let inst = mgr.load_instance(&instance)?;
+            let mods_dir = paths.instance_dir(inst.id.as_str()).join("mods");
             let new_name = toggle_mod(&mods_dir, &file)?;
             println!("[MQ] Мод переключен: {} -> {}", file, new_name.display());
         }
         ModsSubcommand::Delete { instance, file } => {
-            let mods_dir = paths.instance_dir(&instance).join("mods");
+            let mgr = InstanceManager::new(paths.clone());
+            let inst = mgr.load_instance(&instance)?;
+            let mods_dir = paths.instance_dir(inst.id.as_str()).join("mods");
             delete_mod(&mods_dir, &file)?;
             println!("[MQ] Мод '{}' удален.", file);
         }
@@ -2247,9 +2334,46 @@ async fn cmd_mods(args: ModsArgs, paths: MqPaths, threads: Option<usize>) -> Res
                         );
                         if all {
                             println!("    Загрузка {}...", file_info.filename);
-                            let new_path = mods_dir.join(&file_info.filename);
-                            let bytes = reqwest::get(&file_info.url).await?.bytes().await?;
-                            std::fs::write(&new_path, bytes)?;
+                            let new_path =
+                                mq_core::resolve_safe_path(&mods_dir, &file_info.filename)?;
+                            let validated_url =
+                                mq_mods::zip_safe::validate_download_url(&file_info.url)?;
+                            let resp = reqwest::get(validated_url.as_str())
+                                .await?
+                                .error_for_status()?;
+                            let bytes = resp.bytes().await?;
+
+                            if let Some(ref exp_sha1) = file_info.sha1 {
+                                use sha1::{Digest, Sha1};
+                                let mut hasher = Sha1::new();
+                                hasher.update(&bytes);
+                                let actual_sha1 = hex::encode(hasher.finalize());
+                                if !actual_sha1.eq_ignore_ascii_case(&exp_sha1.to_hex()) {
+                                    bail!(
+                                        "Несовпадение SHA-1 для {}: ожидалось {}, получено {}",
+                                        file_info.filename,
+                                        exp_sha1,
+                                        actual_sha1
+                                    );
+                                }
+                            }
+                            if let Some(ref exp_sha512) = file_info.sha512 {
+                                use sha2::{Digest, Sha512};
+                                let mut hasher = Sha512::new();
+                                hasher.update(&bytes);
+                                let actual_sha512 = hex::encode(hasher.finalize());
+                                if !actual_sha512.eq_ignore_ascii_case(&exp_sha512.to_hex()) {
+                                    bail!(
+                                        "Несовпадение SHA-512 для {}: ожидалось {}, получено {}",
+                                        file_info.filename,
+                                        exp_sha512,
+                                        actual_sha512
+                                    );
+                                }
+                            }
+
+                            mq_core::platform::atomic_write(&new_path, &bytes)?;
+
                             let same_file = {
                                 #[cfg(target_os = "windows")]
                                 {
@@ -2389,19 +2513,29 @@ async fn cmd_modpack(args: ModpackArgs, paths: MqPaths, threads: Option<usize>) 
                 path
             };
 
-            let inst_name = name.unwrap_or_else(|| {
+            let raw_name = name.unwrap_or_else(|| {
                 pack_path
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("Modpack")
                     .to_string()
             });
-            let inst_dir = paths.instance_dir(&inst_name);
+            let trimmed_name = raw_name.trim();
+            if trimmed_name.is_empty() {
+                bail!("Имя инстанса не может быть пустым");
+            }
+            let slug = InstanceId::sanitize_slug(trimmed_name);
+            if slug.as_str().is_empty() {
+                bail!("Некорректное имя инстанса '{}'", raw_name);
+            }
+            let inst_dir = paths.instance_dir(slug.as_str());
 
-            println!("[MQ] Установка сборки модпака '{}'...", inst_name);
+            println!("[MQ] Установка сборки модпака '{}'...", trimmed_name);
             let started = Instant::now();
 
-            if is_mrpack_arg(&pack_path) {
+            let cf_client = CurseForgeClient::from_config(&config).ok();
+
+            let (mc_ver, ldr, ldr_ver) = if is_mrpack_arg(&pack_path) {
                 let outcome = install_mrpack(
                     &pack_path,
                     &inst_dir,
@@ -2424,13 +2558,18 @@ async fn cmd_modpack(args: ModpackArgs, paths: MqPaths, threads: Option<usize>) 
                 println!("  Файлов загружено: {}", outcome.installed_files.len());
                 println!("  Распаковано overrides: {}", outcome.overrides_extracted);
                 println!("--------------------------------------------------------------------------------");
+                (
+                    outcome.minecraft_version,
+                    outcome.loader,
+                    outcome.loader_version,
+                )
             } else {
-                let outcome = install_curseforge_zip(
+                let outcome = install_curseforge_modpack(
                     &pack_path,
                     &inst_dir,
                     &paths,
                     &net,
-                    None,
+                    cf_client.as_ref(),
                     &pool,
                     &cancel.snapshot(),
                 )
@@ -2441,9 +2580,45 @@ async fn cmd_modpack(args: ModpackArgs, paths: MqPaths, threads: Option<usize>) 
                     "[MQ] Сборка CurseForge .zip успешно установлена за {:.2} с!",
                     started.elapsed().as_secs_f64()
                 );
-                println!("  Файлов установлено: {}", outcome);
+                println!(
+                    "  Файлов установлено: {}",
+                    outcome.installed_files.len() + outcome.overrides_extracted
+                );
                 println!("--------------------------------------------------------------------------------");
-            }
+                (
+                    outcome.minecraft_version,
+                    outcome.loader,
+                    outcome.loader_version,
+                )
+            };
+
+            let mut manifest = InstanceManifest::new(trimmed_name, &mc_ver, ldr, ldr_ver.clone());
+            manifest.id = slug;
+            manifest.memory_min_mb = config.default_memory_min_mb;
+            manifest.memory_max_mb = config.default_memory_max_mb;
+            manifest.jvm_args = config.default_jvm_args.clone();
+            manifest.wrapper_cmd = config.default_wrapper.clone();
+            manifest.save_to_dir(&inst_dir)?;
+
+            let cas = CasStore::new(paths.clone());
+            let req = InstallRequest {
+                mc_version: mc_ver.clone(),
+                loader: ldr,
+                loader_version: ldr_ver,
+                instance_dir: inst_dir.clone(),
+                mock_base_url: resolve_mojang_mock_base_url(&paths),
+            };
+            println!("[MQ] Установка Minecraft {} ({:?})...", mc_ver, ldr);
+            let _ = install_game(
+                &req,
+                &paths,
+                &net,
+                &cas,
+                &pool,
+                &cancel.snapshot(),
+                Some(&bus),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -2790,15 +2965,21 @@ async fn cmd_worlds(args: WorldsArgs, paths: MqPaths) -> Result<()> {
         WorldsSubcommand::Backup {
             instance,
             world,
-            out: _,
+            out,
         } => {
             let inst = mgr.load_instance(&instance)?;
-            let backup_path = mq_instances::backup_world(
-                &paths.instance_dir(inst.id.as_str()),
-                &paths.backups_dir(),
-                inst.id.as_str(),
-                &world,
-            )?;
+            let inst_dir = paths.instance_dir(inst.id.as_str());
+            let backup_path = if let Some(out_path) = out {
+                mq_instances::export_world_to_zip(&inst_dir, &world, &out_path)?;
+                out_path
+            } else {
+                mq_instances::backup_world(
+                    &inst_dir,
+                    &paths.backups_dir(),
+                    inst.id.as_str(),
+                    &world,
+                )?
+            };
             println!(
                 "[MQ] Резервная копия сохранена в: {}",
                 backup_path.display()
@@ -2806,17 +2987,40 @@ async fn cmd_worlds(args: WorldsArgs, paths: MqPaths) -> Result<()> {
         }
         WorldsSubcommand::Restore { instance, backup } => {
             let inst = mgr.load_instance(&instance)?;
-            let backup_file_name = backup
-                .file_name()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| anyhow::anyhow!("Неверный путь к файлу резервной копии"))?;
-            let restored = mq_instances::restore_world(
+            let inst_dir = paths.instance_dir(inst.id.as_str());
+            let inst_backup_dir = paths.backups_dir().join(inst.id.as_str());
+            std::fs::create_dir_all(&inst_backup_dir)?;
+
+            let (file_name, cleanup_file) = if backup.is_file() {
+                let name = backup
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("world_restore.zip");
+                let staged =
+                    inst_backup_dir.join(format!(".staged-{}-{}", uuid::Uuid::new_v4(), name));
+                std::fs::copy(&backup, &staged)?;
+                let staged_name = staged.file_name().unwrap().to_str().unwrap().to_string();
+                (staged_name, Some(staged))
+            } else {
+                let name = backup
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("Неверный путь к файлу резервной копии"))?
+                    .to_string();
+                (name, None)
+            };
+
+            let restore_res = mq_instances::restore_world(
                 &paths.backups_dir(),
                 inst.id.as_str(),
-                backup_file_name,
-                &paths.instance_dir(inst.id.as_str()),
+                &file_name,
+                &inst_dir,
                 None,
-            )?;
+            );
+            if let Some(to_clean) = cleanup_file {
+                let _ = std::fs::remove_file(to_clean);
+            }
+            let restored = restore_res?;
             println!("[MQ] Мир успешно восстановлен в: {}", restored.display());
         }
     }
@@ -2961,7 +3165,7 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
         })
         .await;
     match adapter {
-        Some(a) => {
+        Some(ref a) => {
             let info = a.get_info();
             println!(
                 "[ГРАФИКА]   Устройство: {} (Поставщик: 0x{:04x}, Бэкенд: {:?}, Драйвер: {})",
@@ -3002,11 +3206,22 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
         .ok()
         .and_then(|c| c.effective_cf_api_key());
 
+    let mojang_url = if let Some(ref mock) = args.mock_base_url {
+        format!(
+            "{}/mc/game/version_manifest_v2.json",
+            mock.trim_end_matches('/')
+        )
+    } else if let Some(ref mock) = resolve_mojang_mock_base_url(&paths) {
+        format!(
+            "{}/mc/game/version_manifest_v2.json",
+            mock.trim_end_matches('/')
+        )
+    } else {
+        "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json".to_string()
+    };
+
     let endpoints = [
-        (
-            "Mojang Manifest",
-            "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json",
-        ),
+        ("Mojang Manifest", mojang_url.as_str()),
         (
             "Modrinth API",
             "https://api.modrinth.com/v2/search?query=fabric-api",
@@ -3017,6 +3232,7 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
         ),
     ];
 
+    let mut net_results = Vec::new();
     for (name, url) in endpoints {
         let start = Instant::now();
         let mut req = client.get(url);
@@ -3029,10 +3245,16 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
             Ok(resp) => {
                 let status = resp.status();
                 let ms = start.elapsed().as_millis();
-                println!("            * {:<18} [{}] - {} мс", name, status, ms);
+                if !args.json {
+                    println!("            * {:<18} [{}] - {} мс", name, status, ms);
+                }
+                net_results.push((name.to_string(), status.as_u16(), ms, None));
             }
             Err(e) => {
-                println!("            * {:<18} [НЕДОСТУПЕН: {}]", name, e);
+                if !args.json {
+                    println!("            * {:<18} [НЕДОСТУПЕН: {}]", name, e);
+                }
+                net_results.push((name.to_string(), 0, 0, Some(e.to_string())));
             }
         }
     }
@@ -3040,6 +3262,44 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
     // 6. Storage & Disk Space
     let data_dir = &paths.data_dir;
     let free_space = detect_free_disk_bytes(data_dir);
+
+    if args.json {
+        let report = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "system": {
+                "os": os_name,
+                "arch": arch,
+            },
+            "cpu": {
+                "model": cpu_model,
+                "logical_cores": num_cpus,
+            },
+            "gpu": adapter.as_ref().map(|a| {
+                let info = a.get_info();
+                serde_json::json!({
+                    "name": info.name,
+                    "vendor": format!("0x{:04x}", info.vendor),
+                    "backend": format!("{:?}", info.backend),
+                    "driver": info.driver,
+                })
+            }),
+            "java_runtimes_count": runtimes.len(),
+            "network": net_results.into_iter().map(|(n, s, ms, err)| {
+                serde_json::json!({
+                    "endpoint": n,
+                    "status_code": s,
+                    "latency_ms": ms,
+                    "error": err,
+                })
+            }).collect::<Vec<_>>(),
+            "storage": {
+                "data_dir": data_dir.display().to_string(),
+                "free_bytes": free_space,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
 
     println!("[ДИСК]      Каталог данных: {}", data_dir.display());
     if let Some(free) = free_space {
@@ -3487,18 +3747,8 @@ async fn build_snapshot_app(
             UiState::new(paths.clone(), config, pool).context("Failed to initialize UI state")?;
 
         let mgr = InstanceManager::new(paths.clone());
-        if state.instances.is_empty() {
-            let _ = mgr.create_instance("1.21.1 Vanilla", "1.21.1", ModLoaderKind::Vanilla, None);
-            let _ = mgr.create_instance(
-                "Fabulously Optimized",
-                "1.21.1",
-                ModLoaderKind::Fabric,
-                Some("0.16.9".into()),
-            );
-            let _ = mgr.create_instance("NeoForge 1.21.1", "1.21.1", ModLoaderKind::NeoForge, None);
-            if let Ok(insts) = mgr.list_instances() {
-                state.instances = insts;
-            }
+        if let Ok(insts) = mgr.list_instances() {
+            state.instances = insts;
         }
 
         let tab = match screen {
@@ -3605,7 +3855,7 @@ async fn cmd_bench(args: BenchArgs) -> Result<()> {
 
     let num_cpus = default_cpu_threads();
     let thread_counts = match args.threads {
-        Some(t) => vec![t],
+        Some(t) => vec![t.clamp(1, 256)],
         None => thread_ladder(num_cpus),
     };
 

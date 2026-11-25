@@ -60,10 +60,15 @@ impl ScalingTable {
 /// Computes speedup `S(N) = T(1) / T(N)`.
 #[inline]
 pub fn compute_speedup(t1_ms: f64, tn_ms: f64) -> f64 {
-    if tn_ms <= 0.0 || t1_ms <= 0.0 {
+    if !t1_ms.is_finite() || !tn_ms.is_finite() || tn_ms <= 0.0 || t1_ms <= 0.0 {
         0.0
     } else {
-        t1_ms / tn_ms
+        let s = t1_ms / tn_ms;
+        if s.is_finite() {
+            s
+        } else {
+            0.0
+        }
     }
 }
 
@@ -72,7 +77,7 @@ pub fn compute_speedup(t1_ms: f64, tn_ms: f64) -> f64 {
 /// (`0.0` for `threads <= 1` or superlinear speedup `S(N) >= N`).
 #[inline]
 pub fn estimate_serial_fraction(speedup: f64, threads: usize) -> f64 {
-    if threads <= 1 {
+    if threads <= 1 || !speedup.is_finite() {
         return 0.0;
     }
     let n = threads as f64;
@@ -83,14 +88,23 @@ pub fn estimate_serial_fraction(speedup: f64, threads: usize) -> f64 {
         return 1.0;
     }
     let inv_n = 1.0 / n;
-    (((1.0 / speedup) - inv_n) / (1.0 - inv_n)).clamp(0.0, 1.0)
+    let res = ((1.0 / speedup) - inv_n) / (1.0 - inv_n);
+    if res.is_nan() {
+        0.0
+    } else {
+        res.clamp(0.0, 1.0)
+    }
 }
 
 /// Computes Amdahl's theoretical maximum speedup at infinite cores:
 /// `1.0 / serial_fraction.max(0.0001)`.
 #[inline]
 pub fn theoretical_max_speedup(serial_fraction: f64) -> f64 {
-    1.0 / serial_fraction.clamp(0.0, 1.0).max(0.0001)
+    if !serial_fraction.is_finite() || serial_fraction <= 0.0 {
+        10000.0
+    } else {
+        1.0 / serial_fraction.clamp(0.0, 1.0).max(0.0001)
+    }
 }
 
 /// Predicts speedup at `threads` given serial fraction `f` via Amdahl's law:
@@ -98,8 +112,17 @@ pub fn theoretical_max_speedup(serial_fraction: f64) -> f64 {
 #[inline]
 pub fn amdahl_predicted_speedup(serial_fraction: f64, threads: usize) -> f64 {
     let n = threads.max(1) as f64;
-    let f = serial_fraction.clamp(0.0, 1.0);
-    1.0 / (f + (1.0 - f) / n)
+    let f = if !serial_fraction.is_finite() {
+        0.0
+    } else {
+        serial_fraction.clamp(0.0, 1.0)
+    };
+    let denom = f + (1.0 - f) / n;
+    if denom <= 0.0 || !denom.is_finite() {
+        1.0
+    } else {
+        1.0 / denom
+    }
 }
 
 /// Converts raw `(threads, elapsed_ms, PhaseCpuReport)` measurements into [`BenchPhaseRow`]s.
@@ -123,7 +146,16 @@ pub fn compute_scaling_rows(measurements: &[(usize, f64, PhaseCpuReport)]) -> Ve
             } else {
                 compute_speedup(baseline_ms, *elapsed_ms)
             };
-            let efficiency_pct = (speedup / n as f64) * 100.0;
+            let efficiency_pct = if speedup > 0.0 && n > 0 {
+                let e = (speedup / n as f64) * 100.0;
+                if e.is_finite() {
+                    e
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
             let serial_fraction = estimate_serial_fraction(speedup, n);
 
             BenchPhaseRow {

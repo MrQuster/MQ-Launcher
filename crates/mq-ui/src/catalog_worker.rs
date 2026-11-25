@@ -20,6 +20,7 @@ use crate::catalog_state::{
 
 /// Max accepted icon payload (2 MiB) and decoded edge length.
 const MAX_ICON_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ICON_DIMENSION: u32 = 4096;
 pub const ICON_EDGE: u32 = 96;
 /// Decoded edge length for gallery images.
 pub const GALLERY_EDGE: u32 = 512;
@@ -244,9 +245,31 @@ fn icon_url_allowed(url: &str) -> bool {
     })
 }
 
-/// Decodes raw image bytes into a thumbnail `ColorImage`.
+/// Decodes raw image bytes into a thumbnail `ColorImage`, enforcing size (`<= 2 MiB`) and
+/// dimension (`<= 4096x4096`) limits to guard against decompression bombs.
 pub fn decode_icon(bytes: &[u8], edge: u32) -> Option<egui::ColorImage> {
-    let img = image::load_from_memory(bytes).ok()?;
+    if bytes.len() > MAX_ICON_BYTES {
+        return None;
+    }
+    let dim_reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (w, h) = dim_reader.into_dimensions().ok()?;
+    if w == 0 || h == 0 || w > MAX_ICON_DIMENSION || h > MAX_ICON_DIMENSION {
+        return None;
+    }
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_ICON_DIMENSION);
+    limits.max_image_height = Some(MAX_ICON_DIMENSION);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+
     // `thumbnail` also upscales, so only shrink oversized images.
     let thumb = if img.width() > edge || img.height() > edge {
         img.thumbnail(edge, edge).to_rgba8()
@@ -260,19 +283,30 @@ pub fn decode_icon(bytes: &[u8], edge: u32) -> Option<egui::ColorImage> {
     ))
 }
 
-/// Loads an icon from the disk cache or downloads it (HTTPS, allow-listed hosts, size-capped)
-/// and stores the original bytes in `cache_dir`.
+/// Loads an icon from the disk cache or downloads it (HTTPS, allow-listed hosts, streamed
+/// size-capped at 2 MiB) and stores the original bytes in `cache_dir`.
 pub async fn load_icon(cache_dir: &Path, url: &str, edge: u32) -> Option<egui::ColorImage> {
     if !icon_url_allowed(url) {
         return None;
     }
     let path = cache_dir.join(icon_cache_name(url));
-    if let Ok(bytes) = tokio::fs::read(&path).await {
-        if let Some(img) = decode_icon(&bytes, edge) {
-            return Some(img);
+    if let Ok(meta) = tokio::fs::metadata(&path).await {
+        if meta.len() <= MAX_ICON_BYTES as u64 {
+            if let Ok(cached_bytes) = tokio::fs::read(&path).await {
+                if cached_bytes.len() <= MAX_ICON_BYTES {
+                    if let Some(img) =
+                        tokio::task::spawn_blocking(move || decode_icon(&cached_bytes, edge))
+                            .await
+                            .ok()
+                            .flatten()
+                    {
+                        return Some(img);
+                    }
+                }
+            }
         }
     }
-    let resp = icon_http_client()
+    let mut resp = icon_http_client()
         .get(url)
         .send()
         .await
@@ -281,15 +315,29 @@ pub async fn load_icon(cache_dir: &Path, url: &str, edge: u32) -> Option<egui::C
         .ok()?;
     if resp
         .content_length()
-        .is_some_and(|n| n as usize > MAX_ICON_BYTES)
+        .is_some_and(|n| n > MAX_ICON_BYTES as u64)
     {
         return None;
     }
-    let bytes = resp.bytes().await.ok()?;
-    if bytes.len() > MAX_ICON_BYTES {
-        return None;
+    let initial_cap = resp
+        .content_length()
+        .map(|n| (n as usize).min(MAX_ICON_BYTES))
+        .unwrap_or(16 * 1024);
+    let mut bytes = Vec::with_capacity(initial_cap);
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_ICON_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    let img = decode_icon(&bytes, edge)?;
+
+    let (bytes, img) = tokio::task::spawn_blocking(move || {
+        let img = decode_icon(&bytes, edge)?;
+        Some((bytes, img))
+    })
+    .await
+    .ok()??;
+
     if tokio::fs::create_dir_all(cache_dir).await.is_ok() {
         static ICON_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
         let seq = ICON_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -385,6 +433,17 @@ mod tests {
             .unwrap();
         let out = decode_icon(&buf, ICON_EDGE).unwrap();
         assert_eq!(out.size, [8, 8]);
+
+        // Reject oversized PNG header (> 4096px) without allocating decoded frame
+        let mut huge_header = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, // PNG magic
+            0x00, 0x00, 0x00, 0x0D, // IHDR length = 13
+            b'I', b'H', b'D', b'R',
+        ];
+        huge_header.extend_from_slice(&5000u32.to_be_bytes());
+        huge_header.extend_from_slice(&5000u32.to_be_bytes());
+        huge_header.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(decode_icon(&huge_header, ICON_EDGE).is_none());
     }
 
     #[tokio::test]

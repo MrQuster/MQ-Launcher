@@ -51,6 +51,10 @@ pub struct AccountsView {
     pub ely_cancel_flag: Arc<AtomicBool>,
     // MSA form
     pub msa_device_code_prompt: Option<String>,
+    pub msa_waiting_login: bool,
+    pub msa_verification_uri: Option<String>,
+    pub msa_user_code: Option<String>,
+    pub msa_cancel_flag: Arc<AtomicBool>,
     // Skin Library state
     pub cached_skins: Option<Vec<SkinLibraryEntry>>,
     pub selected_skin_id: Option<String>,
@@ -69,6 +73,10 @@ impl Default for AccountsView {
             ely_waiting_browser: false,
             ely_cancel_flag: Arc::new(AtomicBool::new(false)),
             msa_device_code_prompt: None,
+            msa_waiting_login: false,
+            msa_verification_uri: None,
+            msa_user_code: None,
+            msa_cancel_flag: Arc::new(AtomicBool::new(false)),
             cached_skins: None,
             selected_skin_id: None,
             import_skin_path: String::new(),
@@ -1005,6 +1013,14 @@ impl AccountsView {
         );
         ui.add_space(6.0);
 
+        if let Some((uri, code)) = state.msa_device_code.take() {
+            self.msa_verification_uri = Some(uri);
+            self.msa_user_code = Some(code);
+        }
+        if state.msa_login_done.is_some() {
+            self.msa_waiting_login = false;
+        }
+
         if state.config.effective_ms_client_id().is_none() {
             ui.label(
                 RichText::new(tr_acc(
@@ -1018,8 +1034,94 @@ impl AccountsView {
             ui.add_space(6.0);
         }
 
-        if let Some(prompt) = &self.msa_device_code_prompt {
-            ui.label(RichText::new(prompt).color(ACCENT_COBALT).strong());
+        if self.msa_waiting_login {
+            ui.label(
+                RichText::new(tr_acc(
+                    is_en,
+                    "Ожидание авторизации Microsoft...",
+                    "Waiting for Microsoft authorization...",
+                ))
+                .color(ACCENT_COBALT)
+                .strong(),
+            );
+            ui.add_space(4.0);
+
+            if let Some(user_code) = self.msa_user_code.clone() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{}: {}", tr_acc(is_en, "Код", "Code"), user_code))
+                            .color(ACCENT_EMERALD)
+                            .heading()
+                            .strong(),
+                    );
+                });
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    if let Some(uri) = &self.msa_verification_uri {
+                        if primary_emerald_button(
+                            ui,
+                            Some(VectorIcon::Globe),
+                            tr_acc(is_en, "Открыть в браузере", "Open in browser"),
+                        )
+                        .clicked()
+                        {
+                            let _ = crate::opener::open_that(uri);
+                        }
+                    }
+                    if secondary_glass_button(
+                        ui,
+                        Some(VectorIcon::Refresh),
+                        tr_acc(is_en, "Скопировать код", "Copy code"),
+                    )
+                    .clicked()
+                    {
+                        ui.ctx().copy_text(user_code.clone());
+                        state.status_message = Some((
+                            tr_acc(
+                                is_en,
+                                "Код скопирован в буфер обмена",
+                                "Code copied to clipboard",
+                            )
+                            .to_string(),
+                            false,
+                        ));
+                    }
+                    if secondary_glass_button(ui, None, tr_acc(is_en, "Отмена", "Cancel")).clicked()
+                    {
+                        self.msa_cancel_flag.store(true, Ordering::SeqCst);
+                        self.msa_waiting_login = false;
+                        self.msa_user_code = None;
+                        self.msa_verification_uri = None;
+                        state.status_message = Some((
+                            tr_acc(
+                                is_en,
+                                "Вход Microsoft отменен",
+                                "Microsoft sign-in cancelled",
+                            )
+                            .to_string(),
+                            false,
+                        ));
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new(tr_acc(
+                            is_en,
+                            "Получение кода устройства...",
+                            "Requesting device code...",
+                        ))
+                        .color(TEXT_MUTED),
+                    );
+                    if secondary_glass_button(ui, None, tr_acc(is_en, "Отмена", "Cancel")).clicked()
+                    {
+                        self.msa_cancel_flag.store(true, Ordering::SeqCst);
+                        self.msa_waiting_login = false;
+                    }
+                });
+            }
         } else if primary_emerald_button(
             ui,
             Some(VectorIcon::User),
@@ -1027,14 +1129,95 @@ impl AccountsView {
         )
         .clicked()
         {
-            self.msa_device_code_prompt = Some(
-                tr_acc(
-                    is_en,
-                    "Откройте https://microsoft.com/link и введите код...",
-                    "Open https://microsoft.com/link and enter the code...",
-                )
-                .to_string(),
-            );
+            if let Some(client_id) = state.config.effective_ms_client_id() {
+                self.msa_waiting_login = true;
+                self.msa_user_code = None;
+                self.msa_verification_uri = None;
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                self.msa_cancel_flag = cancel_flag.clone();
+                let client_id_owned = client_id;
+                let paths_clone = state.paths.clone();
+                let resp_tx = state.resp_sender.clone();
+
+                let handle = tokio::runtime::Handle::current();
+                std::thread::spawn(move || {
+                    handle.block_on(async move {
+                        let client = match mq_auth::MsaClient::new() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ =
+                                    resp_tx.send(crate::state::UiWorkerResponse::MsaLoginFinished(
+                                        Err(format!("Ошибка инициализации MSA: {e}")),
+                                    ));
+                                return;
+                            }
+                        };
+                        let prompt = match client.start_device_code_flow(&client_id_owned).await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                let _ =
+                                    resp_tx.send(crate::state::UiWorkerResponse::MsaLoginFinished(
+                                        Err(format!("Ошибка Device Code: {e}")),
+                                    ));
+                                return;
+                            }
+                        };
+                        if cancel_flag.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let _ = resp_tx.send(crate::state::UiWorkerResponse::MsaDeviceCodeReady {
+                            verification_uri: prompt.verification_uri.clone(),
+                            user_code: prompt.user_code.clone(),
+                        });
+
+                        let outcome: Result<String, String> = match client
+                            .poll_and_complete_login(&client_id_owned, &prompt)
+                            .await
+                        {
+                            Ok(acc) => {
+                                if cancel_flag.load(Ordering::SeqCst) {
+                                    return;
+                                }
+                                let username = acc.username.clone();
+                                match mq_auth::AccountStore::load_or_default(&paths_clone) {
+                                    Ok(mut store) => {
+                                        store.upsert_account(acc, true);
+                                        match store.save(&paths_clone) {
+                                            Ok(()) => Ok(username),
+                                            Err(e) => {
+                                                Err(format!("Не удалось сохранить аккаунт: {e}"))
+                                            }
+                                        }
+                                    }
+                                    Err(e) => Err(format!(
+                                        "Не удалось загрузить хранилище аккаунтов: {e}"
+                                    )),
+                                }
+                            }
+                            Err(e) => {
+                                if cancel_flag.load(Ordering::SeqCst) {
+                                    return;
+                                }
+                                Err(format!("Ошибка авторизации Microsoft: {e}"))
+                            }
+                        };
+                        if !cancel_flag.load(Ordering::SeqCst) {
+                            let _ = resp_tx
+                                .send(crate::state::UiWorkerResponse::MsaLoginFinished(outcome));
+                        }
+                    });
+                });
+            } else {
+                state.status_message = Some((
+                    tr_acc(
+                        is_en,
+                        "Укажите Client ID в настройках или переменной MQ_MS_CLIENT_ID",
+                        "Configure Client ID in settings or MQ_MS_CLIENT_ID",
+                    )
+                    .to_string(),
+                    true,
+                ));
+            }
         }
     }
 }

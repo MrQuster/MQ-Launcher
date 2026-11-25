@@ -107,10 +107,14 @@ impl FlexibleVersionJson {
             .and_then(|j| {
                 j.major_version.map(|m| JavaVersionSpec {
                     major_version: m,
-                    component: j
-                        .component
-                        .clone()
-                        .unwrap_or_else(|| format!("java-runtime-{m}")),
+                    component: j.component.clone().unwrap_or_else(|| match m {
+                        8 => "jre-legacy".to_string(),
+                        16 => "java-runtime-alpha".to_string(),
+                        17 => "java-runtime-gamma".to_string(),
+                        21 => "java-runtime-delta".to_string(),
+                        25 => "java-runtime-epsilon".to_string(),
+                        _ => format!("java-runtime-{m}"),
+                    }),
                 })
             })
             .unwrap_or_else(|| infer_java_version(&mc_version));
@@ -472,7 +476,24 @@ fn resolve_flexible_library(lib: &FlexibleLibrary, ctx: &RuleContext) -> Option<
         fallback
     };
 
-    let native_linux = lib
+    let is_standalone_native = if lib.natives.is_none() {
+        let clean = name.split('@').next().unwrap_or(&name);
+        let parts: Vec<&str> = clean.split(':').collect();
+        if parts.len() >= 4 && parts[3].starts_with("natives-") {
+            let clf = parts[3];
+            if !native_classifier_candidates.iter().any(|c| c == clf) {
+                // Standalone native library for a different OS/arch; skip!
+                return None;
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let mut native_linux = lib
         .downloads
         .as_ref()
         .and_then(|d| d.classifiers.as_ref())
@@ -491,6 +512,10 @@ fn resolve_flexible_library(lib: &FlexibleLibrary, ctx: &RuleContext) -> Option<
             size: nat.size.unwrap_or(0),
         });
 
+    if is_standalone_native && native_linux.is_none() {
+        native_linux = artifact.clone();
+    }
+
     let extract_exclude = lib
         .extract
         .as_ref()
@@ -501,7 +526,7 @@ fn resolve_flexible_library(lib: &FlexibleLibrary, ctx: &RuleContext) -> Option<
         return None;
     }
 
-    let include_in_classpath = artifact.is_some();
+    let include_in_classpath = artifact.is_some() && lib.extract.is_none();
 
     Some(ResolvedLibrary {
         name,

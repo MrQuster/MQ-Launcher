@@ -85,7 +85,8 @@ pub fn is_allowed_download_url(raw_url: &str) -> bool {
         return false;
     };
     let host_lower = host.to_ascii_lowercase();
-    if host_lower == "127.0.0.1" || host_lower == "localhost" {
+    let unbracketed = host_lower.trim_start_matches('[').trim_end_matches(']');
+    if host_lower == "127.0.0.1" || host_lower == "localhost" || unbracketed == "::1" {
         return parsed.scheme() == "http" || parsed.scheme() == "https";
     }
     if parsed.scheme() != "https" {

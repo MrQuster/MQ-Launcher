@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry;
@@ -128,7 +128,7 @@ impl std::error::Error for StateTransitionError {}
 /// Lock-free atomic state machine for a single file's download/verify lifecycle.
 #[derive(Debug)]
 pub struct AtomicFileState {
-    state: AtomicU8,
+    packed: AtomicU64,
 }
 
 /// Alias matching architecture documentation for [`AtomicFileState`].
@@ -145,29 +145,50 @@ impl AtomicFileState {
     #[must_use]
     pub const fn new(initial: FileState) -> Self {
         Self {
-            state: AtomicU8::new(initial as u8),
+            packed: AtomicU64::new(initial as u64),
         }
     }
 
     /// Loads the current [`FileState`] with [`Ordering::Acquire`].
     #[must_use]
     pub fn load(&self) -> FileState {
-        let raw = self.state.load(Ordering::Acquire);
+        let raw = (self.packed.load(Ordering::Acquire) & 0xFF) as u8;
         FileState::from_u8(raw).expect("AtomicFileState only stores valid FileState discriminants")
+    }
+
+    /// Loads the current epoch of this state machine.
+    #[must_use]
+    pub fn load_epoch(&self) -> u64 {
+        self.packed.load(Ordering::Acquire) >> 8
     }
 
     /// Unconditionally resets the state (e.g., when re-queueing for a fresh install pass).
     pub fn store(&self, state: FileState) {
-        self.state.store(state as u8, Ordering::Release);
+        let current = self.packed.load(Ordering::Acquire);
+        let epoch = current >> 8;
+        self.packed
+            .store((epoch << 8) | (state as u64), Ordering::Release);
+    }
+
+    /// Resets state with an explicit epoch.
+    pub fn store_with_epoch(&self, state: FileState, epoch: u64) {
+        self.packed
+            .store((epoch << 8) | (state as u64), Ordering::Release);
     }
 
     /// Atomically transitions any non-`Done` state to [`FileState::Cancelled`].
     fn cancel_unless_done(&self) {
-        let mut current = self.state.load(Ordering::Acquire);
-        while current != FileState::Done as u8 && current != FileState::Cancelled as u8 {
-            match self.state.compare_exchange_weak(
+        let mut current = self.packed.load(Ordering::Acquire);
+        loop {
+            let state = (current & 0xFF) as u8;
+            let epoch = current >> 8;
+            if state == FileState::Done as u8 || state == FileState::Cancelled as u8 {
+                break;
+            }
+            let next_packed = (epoch << 8) | (FileState::Cancelled as u64);
+            match self.packed.compare_exchange_weak(
                 current,
-                FileState::Cancelled as u8,
+                next_packed,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -201,27 +222,51 @@ impl AtomicFileState {
             });
         }
 
-        match self.state.compare_exchange(
-            expected as u8,
-            next as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                // Re-verify active_epoch after CAS so a concurrent epoch advance
-                // cannot allow a stale transition to slip through.
-                if current_epoch != active_epoch.load(Ordering::Acquire) {
-                    if next != FileState::Done {
-                        self.cancel_unless_done();
-                    }
-                    return Err(StateTransitionError::StaleEpoch);
-                }
-                Ok(next)
+        loop {
+            let current = self.packed.load(Ordering::Acquire);
+            let observed_state_u8 = (current & 0xFF) as u8;
+            let observed_epoch = current >> 8;
+            let observed_state = FileState::from_u8(observed_state_u8)
+                .expect("AtomicFileState only stores valid FileState discriminants");
+
+            if observed_state != expected {
+                return Err(StateTransitionError::UnexpectedState {
+                    expected,
+                    actual: observed_state,
+                });
             }
-            Err(actual_raw) => {
-                let actual = FileState::from_u8(actual_raw)
-                    .expect("AtomicFileState only stores valid FileState discriminants");
-                Err(StateTransitionError::UnexpectedState { expected, actual })
+
+            if observed_epoch > current_epoch {
+                return Err(StateTransitionError::StaleEpoch);
+            }
+
+            let next_packed = (current_epoch << 8) | (next as u64);
+            match self.packed.compare_exchange_weak(
+                current,
+                next_packed,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // Re-verify active_epoch after CAS so a concurrent epoch advance
+                    // cannot allow a stale transition to slip through.
+                    if current_epoch != active_epoch.load(Ordering::Acquire) {
+                        let _ = self.packed.compare_exchange(
+                            next_packed,
+                            (current_epoch << 8) | (FileState::Cancelled as u64),
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                        return Err(StateTransitionError::StaleEpoch);
+                    }
+                    return Ok(next);
+                }
+                Err(_) => {
+                    if current_epoch != active_epoch.load(Ordering::Acquire) {
+                        self.cancel_unless_done();
+                        return Err(StateTransitionError::StaleEpoch);
+                    }
+                }
             }
         }
     }

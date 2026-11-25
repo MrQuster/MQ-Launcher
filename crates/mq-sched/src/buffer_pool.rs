@@ -225,7 +225,9 @@ impl BufferPool {
     /// Maximum idle resident memory retained by the pool in bytes.
     #[must_use]
     pub fn max_resident_bytes(&self) -> usize {
-        self.inner.chunk_size * self.inner.max_pooled_chunks
+        self.inner
+            .chunk_size
+            .saturating_mul(self.inner.max_pooled_chunks)
     }
 
     /// Current number of recycled buffers sitting idle in the bounded channel.

@@ -239,8 +239,8 @@ async fn prepare_installer_loader(
             if rel_after_maven.is_empty() {
                 continue;
             }
-            let safe_rel = validate_safe_rel_path(rel_after_maven)?;
-            let dest = libs_dir.join(safe_rel);
+            let _safe_rel = validate_safe_rel_path(rel_after_maven)?;
+            let dest = mq_core::resolve_safe_path(&libs_dir, rel_after_maven)?;
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -258,8 +258,8 @@ async fn prepare_installer_loader(
             if extracted_data_files.contains_key(val) {
                 continue;
             }
-            let safe_rel = validate_safe_rel_path(archive_rel)?;
-            let dest = forge_data_dir.join(safe_rel);
+            let _safe_rel = validate_safe_rel_path(archive_rel)?;
+            let dest = mq_core::resolve_safe_path(&forge_data_dir, archive_rel)?;
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }

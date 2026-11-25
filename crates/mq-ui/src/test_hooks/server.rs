@@ -30,7 +30,7 @@ impl TestHooksServer {
         ctx: egui::Context,
         paths: &MqPaths,
     ) -> anyhow::Result<(Self, mpsc::Receiver<QueuedRequest>)> {
-        let (tx, rx) = mpsc::channel::<QueuedRequest>();
+        let (tx, rx) = mpsc::sync_channel::<QueuedRequest>(256);
         let shutdown = Arc::new(AtomicBool::new(false));
 
         #[cfg(unix)]
@@ -57,7 +57,7 @@ impl TestHooksServer {
     fn start_unix(
         ctx: egui::Context,
         paths: &MqPaths,
-        tx: mpsc::Sender<QueuedRequest>,
+        tx: mpsc::SyncSender<QueuedRequest>,
         shutdown: Arc<AtomicBool>,
     ) -> anyhow::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
@@ -113,7 +113,7 @@ impl TestHooksServer {
     fn start_tcp(
         ctx: egui::Context,
         paths: &MqPaths,
-        tx: mpsc::Sender<QueuedRequest>,
+        tx: mpsc::SyncSender<QueuedRequest>,
         shutdown: Arc<AtomicBool>,
     ) -> anyhow::Result<PathBuf> {
         let addr_path = paths.data_dir.join("test-hooks.addr");
@@ -161,7 +161,7 @@ fn handle_stream<R: Read, W: Write>(
     reader_stream: R,
     mut writer: W,
     ctx: &egui::Context,
-    tx: &mpsc::Sender<QueuedRequest>,
+    tx: &mpsc::SyncSender<QueuedRequest>,
     required_token: Option<&str>,
 ) {
     let mut reader = BufReader::new(reader_stream);
@@ -211,10 +211,18 @@ fn handle_stream<R: Read, W: Write>(
 
         let req_id = req.req_id;
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        if tx.send(QueuedRequest { req, reply_tx }).is_err() {
-            let resp = HarnessResponse::err(req_id, "UI loop terminated");
-            let _ = write_json_line(&mut writer, &resp);
-            break;
+        match tx.try_send(QueuedRequest { req, reply_tx }) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                let resp = HarnessResponse::err(req_id, "Test hooks request queue is full");
+                let _ = write_json_line(&mut writer, &resp);
+                continue;
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                let resp = HarnessResponse::err(req_id, "UI loop terminated");
+                let _ = write_json_line(&mut writer, &resp);
+                break;
+            }
         }
 
         ctx.request_repaint();

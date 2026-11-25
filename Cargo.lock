@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "mq-auth"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2337,12 +2337,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
 [[package]]
 name = "mq-benches"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "criterion",
  "mq-core",
@@ -2359,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "mq-cli"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2384,6 +2385,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "sysinfo",
  "tempfile",
  "testsupport",
@@ -2391,13 +2393,14 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wgpu",
 ]
 
 [[package]]
 name = "mq-core"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "chrono",
  "directories",
@@ -2415,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "mq-install"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2441,7 +2444,7 @@ dependencies = [
 
 [[package]]
 name = "mq-instances"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2458,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "mq-launch"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "flate2",
  "flume",
@@ -2482,7 +2485,7 @@ dependencies = [
 
 [[package]]
 name = "mq-meta"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "hex",
  "mq-core",
@@ -2498,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "mq-mods"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2524,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "mq-net"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -2548,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "mq-sched"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -2567,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "mq-ui"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2605,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "mq-update"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4291,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "testsupport"
-version = "2.8.1"
+version = "2.8.2"
 dependencies = [
  "axum",
  "bytes",

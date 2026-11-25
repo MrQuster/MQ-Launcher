@@ -78,7 +78,10 @@ impl ComputePool {
     /// fallible construction.
     #[must_use]
     pub fn new(num_threads: usize) -> Self {
-        Self::try_new(num_threads).expect("failed to initialize mq-cpu rayon ThreadPool")
+        Self::try_new(num_threads)
+            .or_else(|_| Self::try_new(4))
+            .or_else(|_| Self::try_new(1))
+            .unwrap_or_else(|err| panic!("failed to initialize mq-cpu rayon ThreadPool: {err}"))
     }
 
     /// Fallibly builds a [`ComputePool`] with `num_threads` workers named `"mq-cpu-{i}"`.
@@ -91,7 +94,8 @@ impl ComputePool {
                 .unwrap_or(4)
         } else {
             num_threads
-        };
+        }
+        .clamp(1, 256);
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(resolved_threads)
@@ -239,7 +243,10 @@ impl ComputePool {
             if let Err(panic_payload) = catch_unwind(AssertUnwindSafe(|| producer(&tx))) {
                 let msg = extract_panic_message(panic_payload);
                 tracing::error!(panic = %msg, "caught panic in streaming mq-cpu worker");
-                let _ = tx.send(Err(ComputeError::Panicked(msg)));
+                let _ = tx.send_timeout(
+                    Err(ComputeError::Panicked(msg)),
+                    std::time::Duration::from_millis(250),
+                );
             }
         });
         rx

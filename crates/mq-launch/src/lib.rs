@@ -197,7 +197,8 @@ IMPLEMENTOR="Oracle Corporation"
         assert_eq!(required_java_major_for_mc("1.20.4", None), 17);
         assert_eq!(required_java_major_for_mc("1.19.4", None), 17);
         assert_eq!(required_java_major_for_mc("1.18", None), 17);
-        assert_eq!(required_java_major_for_mc("1.17.1", None), 8);
+        assert_eq!(required_java_major_for_mc("1.17.1", None), 16);
+        assert_eq!(required_java_major_for_mc("1.17", None), 16);
         assert_eq!(required_java_major_for_mc("1.16.5", None), 8);
         assert_eq!(required_java_major_for_mc("1.12.2", None), 8);
         assert_eq!(required_java_major_for_mc("1.16.5", Some(17)), 17);

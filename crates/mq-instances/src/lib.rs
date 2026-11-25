@@ -7,6 +7,7 @@
 pub mod importers;
 pub mod manager;
 pub mod manifest;
+pub(crate) mod nbt;
 pub mod package;
 pub mod servers;
 pub mod worlds;
