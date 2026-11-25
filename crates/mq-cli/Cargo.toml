@@ -48,7 +48,7 @@ reqwest.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 url.workspace = true
-wgpu = "24"
+wgpu = "30"
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
