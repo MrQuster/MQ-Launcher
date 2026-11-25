@@ -21,7 +21,7 @@
     #expr FileClose(CargoFile)
   #endif
   #if MyAppVersion == ""
-    #expr MyAppVersion = "2.8.2"
+    #expr MyAppVersion = "2.8.3"
   #endif
 #endif
 
@@ -34,7 +34,7 @@
 #endif
 
 #ifndef MyAppURL
-  #define MyAppURL "https://github.com/MrQuster/mq"
+  #define MyAppURL "https://github.com/MrQuster/MQ-Launcher"
 #endif
 
 #ifndef MyAppExeName

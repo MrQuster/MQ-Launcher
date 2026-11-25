@@ -1,11 +1,11 @@
 # ==============================================================================
 #  MQ Launcher -- 1-Command Universal Windows Installer
 #  Usage:
-#    irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1 | iex
+#    irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1 | iex
 #  Advanced:
-#    & ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Portable
-#    & ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Uninstall
-#    & ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Version 2.8.2 -Silent
+#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Portable
+#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Uninstall
+#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Version 2.8.3 -Silent
 # ==============================================================================
 
 function Invoke-MqInstaller {
@@ -107,7 +107,7 @@ Parameters:
 
     # Repository & Minisign configuration
     $envRepo = [Environment]::GetEnvironmentVariable("MQ_REPO")
-    $Repo = if ($envRepo) { $envRepo } else { "MrQuster/mq" }
+    $Repo = if ($envRepo) { $envRepo } else { "MrQuster/MQ-Launcher" }
     $MinisignPubKey = "RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt"
     $AppName = "MQ Launcher"
     $InnoAppIdKey = "{9D7C52A4-325A-4B6A-B68C-7C4E15F59D18}_is1"

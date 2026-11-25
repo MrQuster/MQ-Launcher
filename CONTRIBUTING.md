@@ -43,7 +43,7 @@
 Склонируйте репозиторий:
 
 ```bash
-git clone https://github.com/MrQuster/mq.git
+git clone https://github.com/MrQuster/MQ-Launcher.git
 cd mq
 ```
 
@@ -112,7 +112,7 @@ cargo test --workspace
    - Перед публикацией фрагментов вывода `~/.local/share/mq/logs/` или `%LOCALAPPDATA%\MQ\logs\` убедитесь, что в них отсутствуют личные токены авторизации, пути к домашним директориям или конфиденциальные данные.
    - MQ автоматически маскирует чувствительные поля в логах, но пользователь несет ответственность за публикуемый контент.
 2. **Нераскрытые уязвимости:**
-   - Не создавайте публичные pull request или issue с демонстрацией критических уязвимостей безопасности. Следуйте [Политике безопасности](docs/SECURITY.md) и используйте приватные отчеты через [GitHub Security Advisories](https://github.com/MrQuster/mq/security/advisories/new).
+   - Не создавайте публичные pull request или issue с демонстрацией критических уязвимостей безопасности. Следуйте [Политике безопасности](docs/SECURITY.md) и используйте приватные отчеты через [GitHub Security Advisories](https://github.com/MrQuster/MQ-Launcher/security/advisories/new).
 
 ---
 

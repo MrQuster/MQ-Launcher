@@ -1420,7 +1420,7 @@ mod tests {
     #[test]
     fn test_validate_release_download_url_enforces_https_and_allowed_hosts() {
         assert!(validate_release_download_url(
-            "https://github.com/MrQuster/mq/releases/download/v2.8.1/mq-linux-x86_64"
+            "https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.1/mq-linux-x86_64"
         )
         .is_ok());
         assert!(validate_release_download_url(
@@ -1436,7 +1436,7 @@ mod tests {
 
         // Reject plain HTTP on non-loopback hosts, non-GitHub hosts, credentials, and file://
         assert!(validate_release_download_url(
-            "http://github.com/MrQuster/mq/releases/download/v2.8.1/mq"
+            "http://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.1/mq"
         )
         .is_err());
         assert!(validate_release_download_url("https://evil-github.com/mq").is_err());

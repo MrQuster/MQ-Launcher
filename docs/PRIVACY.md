@@ -44,7 +44,7 @@ MQ Launcher initiates network connections strictly to fulfill requested actions 
 | `api.modrinth.com`<br>`cdn.modrinth.com` | Rinth, Inc. | Search and download of Minecraft mods, modpacks, resource packs, and shaders. |
 | `api.curseforge.com` | Eternal / Overwolf | CurseForge mod search and download. |
 | `api.adoptium.net`<br>`github.com/adoptium` | Eclipse Foundation | Temurin OpenJDK Java runtime discovery and archive downloads. |
-| `api.github.com`<br>`github.com/MrQuster/mq` | GitHub / MQ Authors | Checking for launcher self-updates, downloading update archives, and verifying Minisign Ed25519 signatures. |
+| `api.github.com`<br>`github.com/MrQuster/MQ-Launcher` | GitHub / MQ Authors | Checking for launcher self-updates, downloading update archives, and verifying Minisign Ed25519 signatures. |
 
 No other external network connections are established.
 

@@ -11,7 +11,7 @@ use mq_core::{Sha1Digest, Sha512Digest};
 pub const USER_AGENT: &str = concat!(
     "mq-launcher/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/MrQuster/mq)"
+    " (https://github.com/MrQuster/MQ-Launcher)"
 );
 
 /// Default maximum concurrent HTTP connections (`Semaphore` bound).

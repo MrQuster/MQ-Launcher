@@ -1,6 +1,6 @@
 ================================================================================
   MQ LAUNCHER — PORTABLE EDITION (WINDOWS X86_64)
-  https://github.com/MrQuster/mq
+  https://github.com/MrQuster/MQ-Launcher
 ================================================================================
 
 [ENGLISH]

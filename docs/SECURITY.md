@@ -15,7 +15,7 @@
 We take the security of MQ Launcher very seriously. If you discover a vulnerability or security issue:
 
 1. **GitHub Private Vulnerability Reporting (Preferred):**
-   Navigate to the [Security Advisories](https://github.com/MrQuster/mq/security/advisories/new) tab on GitHub and submit a report privately.
+   Navigate to the [Security Advisories](https://github.com/MrQuster/MQ-Launcher/security/advisories/new) tab on GitHub and submit a report privately.
 2. **Direct Contact:**
    Alternatively, open a security advisory or contact `MrQuster` directly via GitHub: [https://github.com/MrQuster](https://github.com/MrQuster).
 
@@ -46,7 +46,7 @@ sha256sum -c SHA256SUMS
 
 ### Verifying Build Provenance
 ```bash
-gh attestation verify mq-linux-x86_64 --repo MrQuster/mq
+gh attestation verify mq-linux-x86_64 --repo MrQuster/MQ-Launcher
 ```
 
 ---

@@ -30,12 +30,12 @@ use crate::resolver::{IntoLoaderFilter, IntoMcVersionFilter};
 /// Default production base URL for Modrinth API v2.
 pub const DEFAULT_MODRINTH_API_URL: &str = "https://api.modrinth.com/v2";
 
-/// Mandatory Modrinth API v2 `User-Agent` header (`MrQuster/mq/<version> (https://github.com/MrQuster/mq)`).
+/// Mandatory Modrinth API v2 `User-Agent` header (`MrQuster/mq/<version> (https://github.com/MrQuster/MQ-Launcher)`).
 /// Never includes a personal email address.
 pub const MODRINTH_USER_AGENT: &str = concat!(
     "MrQuster/mq/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/MrQuster/mq)"
+    " (https://github.com/MrQuster/MQ-Launcher)"
 );
 
 /// Default Modrinth API v2 rate limit (300 requests per minute per IP).
@@ -1899,7 +1899,7 @@ mod tests {
     #[test]
     fn modrinth_user_agent_matches_specification_without_personal_email() {
         assert!(MODRINTH_USER_AGENT.starts_with("MrQuster/mq/"));
-        assert!(MODRINTH_USER_AGENT.ends_with(" (https://github.com/MrQuster/mq)"));
+        assert!(MODRINTH_USER_AGENT.ends_with(" (https://github.com/MrQuster/MQ-Launcher)"));
         assert!(
             !MODRINTH_USER_AGENT.contains('@'),
             "MODRINTH_USER_AGENT must never include a personal email"

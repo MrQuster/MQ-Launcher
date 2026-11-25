@@ -23,12 +23,12 @@
 Скрипт загружает актуальный релиз, проверяет контрольные суммы SHA-256, устанавливает бинарный файл в `~/.local/bin/mq`, регистрирует `.desktop` файл в `~/.local/share/applications/` и добавляет векторную иконку:
 
 ```bash
-curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh
 ```
 
 Для установки конкретной версии:
 ```bash
-curl -fsSL https://github.com/MrQuster/mq/releases/download/v2.2.0/install.sh | sh
+curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/download/v2.2.0/install.sh | sh
 ```
 
 ### Способ 2: Портативный архив (Без интеграции в систему)
@@ -37,7 +37,7 @@ curl -fsSL https://github.com/MrQuster/mq/releases/download/v2.2.0/install.sh | 
 
 ```bash
 # 1. Загрузите архив релиза
-curl -LO https://github.com/MrQuster/mq/releases/download/v2.2.0/mq-linux-x86_64.tar.gz
+curl -LO https://github.com/MrQuster/MQ-Launcher/releases/download/v2.2.0/mq-linux-x86_64.tar.gz
 
 # 2. Распакуйте архив
 tar -xzf mq-linux-x86_64.tar.gz
@@ -56,14 +56,14 @@ tar -xzf mq-linux-x86_64.tar.gz
 В репозитории подготовлен официальный манифест `PKGBUILD`:
 
 ```bash
-git clone https://github.com/MrQuster/mq.git
+git clone https://github.com/MrQuster/MQ-Launcher.git
 cd mq/packaging
 makepkg -si
 ```
 
 #### Вариант B: Быстрая локальная установка
 ```bash
-git clone https://github.com/MrQuster/mq.git
+git clone https://github.com/MrQuster/MQ-Launcher.git
 cd mq
 ./scripts/install-local.sh
 ```
@@ -81,7 +81,7 @@ sudo apt-get install -y curl ca-certificates libx11-6 libxcursor1 libxrandr2 lib
 
 Установите лаунчер одной командой:
 ```bash
-curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh
 ```
 
 Убедитесь, что каталог `~/.local/bin` включен в переменную `$PATH`. Если команда `mq` не найдена в терминале, добавьте следующую строку в `~/.bashrc` или `~/.zshrc`:
@@ -100,7 +100,7 @@ sudo dnf install -y curl ca-certificates libX11 libXcursor libXrandr libXi libxk
 
 Установите лаунчер:
 ```bash
-curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh
 ```
 
 ---
@@ -112,16 +112,16 @@ curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | 
 Не требует прав администратора. Лаунчер устанавливается в профиль пользователя (`%LOCALAPPDATA%\Programs\MQ`), создает ярлыки в меню «Пуск» и на рабочем столе, а также добавляет путь в переменную среды `PATH`:
 
 ```powershell
-irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1 | iex
+irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1 | iex
 ```
 
 Для установки конкретной версии:
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/download/v2.2.0/install.ps1))) -Version 2.2.0
+& ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/download/v2.2.0/install.ps1))) -Version 2.2.0
 ```
 
 ### Способ 2: Классический инсталлятор Inno Setup
-1. Скачайте [`MQ-Setup-2.2.0.exe`](https://github.com/MrQuster/mq/releases/download/v2.2.0/MQ-Setup-2.2.0.exe).
+1. Скачайте [`MQ-Setup-2.2.0.exe`](https://github.com/MrQuster/MQ-Launcher/releases/download/v2.2.0/MQ-Setup-2.2.0.exe).
 2. Запустите установщик и следуйте подсказкам мастера.
 3. Доступен режим тихой установки для скриптов автоматизации:
    ```cmd
@@ -129,7 +129,7 @@ irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1 | iex
    ```
 
 ### Способ 3: Портативная версия (Portable ZIP)
-1. Скачайте [`mq-windows-x86_64-portable.zip`](https://github.com/MrQuster/mq/releases/download/v2.2.0/mq-windows-x86_64-portable.zip).
+1. Скачайте [`mq-windows-x86_64-portable.zip`](https://github.com/MrQuster/MQ-Launcher/releases/download/v2.2.0/mq-windows-x86_64-portable.zip).
 2. Распакуйте архив в любую удобную папку или на съемный USB-накопитель.
 3. Наличие маркера `portable.flag` указывает лаунчеру изолировать все игровые данные, конфигурацию и логи в локальной папке `data/` рядом с `mq.exe`.
 
@@ -140,7 +140,7 @@ winget install MrQuster.MQ
 
 ### Способ 5: Scoop
 ```powershell
-scoop install https://raw.githubusercontent.com/MrQuster/mq/main/packaging/scoop/mq.json
+scoop install https://raw.githubusercontent.com/MrQuster/MQ-Launcher/main/packaging/scoop/mq.json
 ```
 
 ---
@@ -158,8 +158,8 @@ RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt
 ### Проверка подписи контрольных сумм:
 ```bash
 # Загрузка архива, манифеста и подписи
-curl -LO https://github.com/MrQuster/mq/releases/download/v2.2.0/SHA256SUMS
-curl -LO https://github.com/MrQuster/mq/releases/download/v2.2.0/SHA256SUMS.minisig
+curl -LO https://github.com/MrQuster/MQ-Launcher/releases/download/v2.2.0/SHA256SUMS
+curl -LO https://github.com/MrQuster/MQ-Launcher/releases/download/v2.2.0/SHA256SUMS.minisig
 
 # Проверка подписи манифеста
 minisign -Vm SHA256SUMS -P RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt
@@ -170,7 +170,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 ### Проверка аттестации цепочки поставок через GitHub CLI:
 ```bash
-gh attestation verify mq-linux-x86_64 --repo MrQuster/mq
+gh attestation verify mq-linux-x86_64 --repo MrQuster/MQ-Launcher
 ```
 
 ---
@@ -196,7 +196,7 @@ mq doctor
 ### Linux:
 Если лаунчер был установлен через `install.sh`:
 ```bash
-curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh -s -- --uninstall
+curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh -s -- --uninstall
 ```
 Либо вручную:
 ```bash
@@ -208,6 +208,6 @@ rm -f ~/.local/share/icons/hicolor/scalable/apps/mq.svg
 ### Windows:
 Если лаунчер был установлен через `install.ps1`:
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Uninstall
 ```
 Либо через «Параметры Windows» → «Установленные приложения» → «MQ Launcher» → «Удалить».

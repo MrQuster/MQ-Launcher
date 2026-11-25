@@ -188,7 +188,7 @@ fi
 
 append ""
 append "---"
-append "**Полный журнал изменений:** https://github.com/MrQuster/mq/blob/main/CHANGELOG.md"
+append "**Полный журнал изменений:** https://github.com/MrQuster/MQ-Launcher/blob/main/CHANGELOG.md"
 
 if [[ -n "${OUTPUT_FILE}" ]]; then
     echo -n "${buf}" > "${OUTPUT_FILE}"

@@ -812,9 +812,9 @@ async fn cmd_about() -> Result<()> {
     println!("MQ Launcher v{} (Solid Edition)", env!("CARGO_PKG_VERSION"));
     println!("Автор: MrQuster");
     println!("Профиль автора: https://github.com/MrQuster");
-    println!("Репозиторий:    https://github.com/MrQuster/mq");
-    println!("Релизы:         https://github.com/MrQuster/mq/releases");
-    println!("Баг-трекер:     https://github.com/MrQuster/mq/issues");
+    println!("Репозиторий:    https://github.com/MrQuster/MQ-Launcher");
+    println!("Релизы:         https://github.com/MrQuster/MQ-Launcher/releases");
+    println!("Баг-трекер:     https://github.com/MrQuster/MQ-Launcher/issues");
     println!("Лицензия:       MIT License (MrQuster)");
     Ok(())
 }
@@ -822,7 +822,7 @@ async fn cmd_about() -> Result<()> {
 async fn cmd_self_update(args: SelfUpdateArgs) -> Result<()> {
     println!("Проверка обновлений MQ Launcher...");
     let cur_ver = env!("CARGO_PKG_VERSION");
-    let mgr = mq_update::UpdateManager::new("MrQuster", "mq");
+    let mgr = mq_update::UpdateManager::new("MrQuster", "MQ-Launcher");
     let update = mgr.check_latest(cur_ver, args.prerelease).await?;
     match update {
         Some(info) => {

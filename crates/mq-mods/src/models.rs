@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const MQ_USER_AGENT: &str = concat!(
     "MrQuster/mq/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/MrQuster/mq)"
+    " (https://github.com/MrQuster/MQ-Launcher)"
 );
 
 /// Upstream mod ecosystem catalog provider.

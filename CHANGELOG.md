@@ -5,6 +5,18 @@
 
 ---
 
+## [v2.8.3] — 2026-11-25 ("CI Windows & Clippy Fixes, MQ-Launcher Repository Migration")
+
+### Исправлено и улучшено / Fixed and improved
+- **Исправление сборки под Windows и кроссплатформенные блокировки (`mq-install`):**
+  - Поле `lock_file_path` в структуре `InstanceInstallLock` теперь доступно при компиляции под Windows с корректным атрибутом `#[cfg_attr(unix, allow(dead_code))]`, устранив ошибку сборки на Windows CI.
+- **Совместимость с Rust 1.100 Clippy (`mq-launch`):**
+  - Устранено предупреждение `clippy::needless_bool` при чтении IPC-ответа Discord RPC.
+- **Миграция репозитория на `MrQuster/MQ-Launcher`:**
+  - Все ссылки на GitHub, менеджер автообновлений (`UpdateManager`), скрипты установки `install.sh`/`install.ps1`, манифесты пакетов (Winget, Scoop, AUR PKGBUILD) и документация переведены на официальный репозиторий `MrQuster/MQ-Launcher`.
+
+---
+
 ## [v2.8.2] — 2026-11-25 ("Solid Edition — Stability & Cross-Platform Windows Parity")
 
 ### Исправлено и улучшено / Fixed and improved

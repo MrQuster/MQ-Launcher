@@ -1,7 +1,7 @@
 {
-    "version": "2.8.2",
+    "version": "2.8.3",
     "description": "High-performance multi-threaded Minecraft launcher written in Rust",
-    "homepage": "https://github.com/MrQuster/mq",
+    "homepage": "https://github.com/MrQuster/MQ-Launcher",
     "license": "MIT",
     "notes": [
         "MQ Launcher runs in portable mode (portable.flag) with all instances, config, and cache stored in data/ next to mq.exe.",
@@ -9,7 +9,7 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/MrQuster/mq/releases/download/v2.8.2/mq-windows-x86_64-portable.zip",
+            "url": "https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.3/mq-windows-x86_64-portable.zip",
             "hash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
     },
@@ -24,12 +24,12 @@
         "data"
     ],
     "checkver": {
-        "github": "https://github.com/MrQuster/mq"
+        "github": "https://github.com/MrQuster/MQ-Launcher"
     },
     "autoupdate": {
         "architecture": {
             "64bit": {
-                "url": "https://github.com/MrQuster/mq/releases/download/v$version/mq-windows-x86_64-portable.zip",
+                "url": "https://github.com/MrQuster/MQ-Launcher/releases/download/v$version/mq-windows-x86_64-portable.zip",
                 "hash": {
                     "url": "$baseurl/SHA256SUMS"
                 }

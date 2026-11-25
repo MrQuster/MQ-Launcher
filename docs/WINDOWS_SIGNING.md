@@ -89,7 +89,7 @@ Attestations are signed inside GitHub's ephemeral build runners using GitHub's O
 
 #### Verifying with GitHub CLI:
 ```powershell
-# Verify that the binary was built by GitHub Actions in the MrQuster/mq repository
+# Verify that the binary was built by GitHub Actions in the MrQuster/MQ-Launcher repository
 gh attestation verify .\MQ-Setup-2.3.0-x64.exe --owner MrQuster
 ```
 
@@ -100,7 +100,7 @@ Loaded 1 attestation from GitHub API
 ✓ Verification succeeded!
 
 [Attestation summary]
-  Repository:   MrQuster/mq
+  Repository:   MrQuster/MQ-Launcher
   Workflow:     .github/workflows/release.yml
   Commit:       1b1327ab498836dc3a8f3ed8a5ec5015202c3982
   Trigger:      release

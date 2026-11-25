@@ -355,8 +355,8 @@ mod tests {
     fn test_open_that_signature() {
         // Validate open_that accepts &str, String, Path, PathBuf at compile time
         let check_signatures = || {
-            let _ = open_that("https://github.com/MrQuster/mq");
-            let _ = open_that(String::from("https://github.com/MrQuster/mq"));
+            let _ = open_that("https://github.com/MrQuster/MQ-Launcher");
+            let _ = open_that(String::from("https://github.com/MrQuster/MQ-Launcher"));
             let _ = open_that(std::path::Path::new("."));
             let _ = open_that(std::path::PathBuf::from("."));
         };

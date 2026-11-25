@@ -1695,7 +1695,7 @@ impl SettingsView {
                         ui.label(RichText::new(pkg_notice).color(tokens.warning));
                         ui.add_space(8.0);
                         if secondary_glass_button(ui, Some(VectorIcon::Globe), "Открыть страницу релизов на GitHub").clicked() {
-                            let _ = crate::opener::open_that("https://github.com/MrQuster/mq/releases");
+                            let _ = crate::opener::open_that("https://github.com/MrQuster/MQ-Launcher/releases");
                         }
                     } else {
                         ui.label(RichText::new(format!("Текущая версия: v{}", env!("CARGO_PKG_VERSION"))).color(tokens.text_muted));
@@ -1812,9 +1812,9 @@ impl SettingsView {
                 .clicked()
                 {
                     let cmd = if cfg!(target_os = "windows") {
-                        "$env:MQ_UNINSTALL=1; irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1 | iex"
+                        "$env:MQ_UNINSTALL=1; irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1 | iex"
                     } else {
-                        "curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh -s -- --uninstall"
+                        "curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh -s -- --uninstall"
                     };
                     ui.ctx().copy_text(cmd.to_string());
                     state.status_message =
@@ -1983,18 +1983,18 @@ impl SettingsView {
                     {
                         let _ = crate::opener::open_that("https://github.com/MrQuster");
                     }
-                    if secondary_glass_button(ui, Some(VectorIcon::Globe), "MrQuster/mq").clicked()
+                    if secondary_glass_button(ui, Some(VectorIcon::Globe), "MrQuster/MQ-Launcher").clicked()
                     {
-                        let _ = crate::opener::open_that("https://github.com/MrQuster/mq");
+                        let _ = crate::opener::open_that("https://github.com/MrQuster/MQ-Launcher");
                     }
                     if secondary_glass_button(ui, Some(VectorIcon::Download), "Релизы").clicked()
                     {
-                        let _ = crate::opener::open_that("https://github.com/MrQuster/mq/releases");
+                        let _ = crate::opener::open_that("https://github.com/MrQuster/MQ-Launcher/releases");
                     }
                     if secondary_glass_button(ui, Some(VectorIcon::Warning), "Сообщить об ошибке")
                         .clicked()
                     {
-                        let _ = crate::opener::open_that("https://github.com/MrQuster/mq/issues");
+                        let _ = crate::opener::open_that("https://github.com/MrQuster/MQ-Launcher/issues");
                     }
                     if secondary_glass_button(
                         ui,

@@ -3,10 +3,10 @@
 #  MQ Launcher — 1-Command Universal Linux Installer
 #
 #  Usage:
-#    curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh
+#    curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh
 #
 #  Advanced Usage:
-#    curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh -s -- [FLAGS]
+#    curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh -s -- [FLAGS]
 #    sh install.sh [--version <tag>] [--uninstall] [--dry-run] [--install-dir <dir>]
 # ==============================================================================
 
@@ -59,7 +59,7 @@ show_help() {
 MQ Launcher — Solid Edition (1-Command Linux Installer)
 
 Использование:
-  curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh
+  curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh
   sh install.sh [ОПЦИИ]
 
 Опции:
@@ -78,7 +78,7 @@ MQ Launcher — Solid Edition (1-Command Linux Installer)
   MQ_MINISIGN_PUBKEY        Публичный ключ Minisign
   MQ_RELEASE_BASE_URL       Пользовательский URL для загрузки релизов (для тестов / зеркал)
   MQ_REPO_USER              Владелец репозитория GitHub (по умолчанию: MrQuster)
-  MQ_REPO_NAME              Имя репозитория (по умолчанию: mq)
+  MQ_REPO_NAME              Имя репозитория (по умолчанию: MQ-Launcher)
 EOF
 }
 
@@ -356,7 +356,7 @@ main() {
     MQ_RELEASE_PUBLIC_KEY="RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"
     minisign_pubkey="${MQ_MINISIGN_PUBKEY:-${MQ_RELEASE_PUBLIC_KEY}}"
     repo_user="${MQ_REPO_USER:-MrQuster}"
-    repo_name="${MQ_REPO_NAME:-mq}"
+    repo_name="${MQ_REPO_NAME:-MQ-Launcher}"
     custom_install_dir="${MQ_INSTALL_DIR:-}"
     custom_base_url="${MQ_RELEASE_BASE_URL:-}"
 

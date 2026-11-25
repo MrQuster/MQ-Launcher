@@ -1689,7 +1689,7 @@ impl MqApp {
                 UiWorkerCommand::CheckLauncherUpdate { current_version } => {
                     let resp_tx = self.state.resp_sender.clone();
                     tokio::spawn(async move {
-                        let mgr = mq_update::UpdateManager::new("MrQuster", "mq");
+                        let mgr = mq_update::UpdateManager::new("MrQuster", "MQ-Launcher");
                         let res = mgr
                             .check_latest(&current_version, false)
                             .await
@@ -1700,7 +1700,7 @@ impl MqApp {
                 UiWorkerCommand::DownloadLauncherUpdate { asset } => {
                     let resp_tx = self.state.resp_sender.clone();
                     tokio::spawn(async move {
-                        let mgr = mq_update::UpdateManager::new("MrQuster", "mq");
+                        let mgr = mq_update::UpdateManager::new("MrQuster", "MQ-Launcher");
                         match mgr.download_and_install(&asset, |_d, _t| {}).await {
                             Ok(_path) => {
                                 if let Err(e) = mq_update::UpdateManager::restart_process(&[]) {

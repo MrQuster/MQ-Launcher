@@ -2,15 +2,15 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
 
 PackageIdentifier: MrQuster.MQ
-PackageVersion: 2.8.2
+PackageVersion: 2.8.3
 PackageName: MQ Launcher
 Publisher: MrQuster
-PublisherUrl: https://github.com/MrQuster/mq
-PublisherSupportUrl: https://github.com/MrQuster/mq/issues
+PublisherUrl: https://github.com/MrQuster/MQ-Launcher
+PublisherSupportUrl: https://github.com/MrQuster/MQ-Launcher/issues
 Author: MrQuster
-PackageUrl: https://github.com/MrQuster/mq
+PackageUrl: https://github.com/MrQuster/MQ-Launcher
 License: MIT
-LicenseUrl: https://raw.githubusercontent.com/MrQuster/mq/main/LICENSE
+LicenseUrl: https://raw.githubusercontent.com/MrQuster/MQ-Launcher/main/LICENSE
 Copyright: Copyright (c) 2026 MrQuster
 ShortDescription: High-performance multi-threaded Minecraft launcher written in Rust
 Description: |-
@@ -34,7 +34,7 @@ Installers:
   - Architecture: x64
     InstallerType: inno
     Scope: user
-    InstallerUrl: https://github.com/MrQuster/mq/releases/download/v2.8.2/MQ-Setup-2.8.2-x64.exe
+    InstallerUrl: https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.3/MQ-Setup-2.8.3-x64.exe
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
     InstallerSwitches:
       Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-

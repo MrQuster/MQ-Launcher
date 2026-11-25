@@ -224,15 +224,9 @@ impl DiscordRpcClient {
         }
 
         let mut body = vec![0u8; body_len];
-        if self
-            .stream
+        self.stream
             .read_exact_with_timeout(&mut body, timeout)
-            .is_err()
-        {
-            return false;
-        }
-
-        true
+            .is_ok()
     }
 
     /// Sets playing activity status in Discord.

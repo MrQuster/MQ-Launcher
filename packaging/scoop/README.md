@@ -8,10 +8,10 @@ Users can install MQ Launcher using Scoop by adding the repository as a bucket o
 
 ```powershell
 # Option 1: Direct install from URL
-scoop install https://raw.githubusercontent.com/MrQuster/mq/main/packaging/scoop/mq.json
+scoop install https://raw.githubusercontent.com/MrQuster/MQ-Launcher/main/packaging/scoop/mq.json
 
 # Option 2: Add custom bucket
-scoop bucket add mq https://github.com/MrQuster/mq
+scoop bucket add mq https://github.com/MrQuster/MQ-Launcher
 scoop install mq
 ```
 
