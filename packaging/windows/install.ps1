@@ -517,7 +517,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
                 # If custom -InstallDir was passed, verify mq.exe exists before deleting
                 if ($InstallDir -and ($dirPath -eq $InstallDir) -and (-not (Test-Path -LiteralPath (Join-Path $dirPath "mq.exe")))) {
                     if (-not $Silent) {
-                        Write-Host "Skipping removal of $dirPath: mq.exe not found in custom directory" -ForegroundColor Yellow
+                        Write-Host "Skipping removal of ${dirPath}: mq.exe not found in custom directory" -ForegroundColor Yellow
                     }
                     continue
                 }
