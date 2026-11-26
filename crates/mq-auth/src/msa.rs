@@ -1090,6 +1090,15 @@ mod tests {
 
     #[test]
     fn resolve_ms_client_id_returns_missing_when_unset_and_succeeds_when_set() {
+        std::env::set_var("MQ_DISABLE_BUILTIN_MS_CLIENT_ID", "1");
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("MQ_DISABLE_BUILTIN_MS_CLIENT_ID");
+            }
+        }
+        let _guard = EnvGuard;
+
         let unset_cfg = AppConfig::default();
         let err = resolve_ms_client_id_with_env(&unset_cfg, None).unwrap_err();
         assert!(matches!(

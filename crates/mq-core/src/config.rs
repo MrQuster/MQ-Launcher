@@ -50,6 +50,9 @@ pub const CURSEFORGE_SECRET_FILE_NAME: &str = "curseforge_api_key.secret";
 /// Environment variable overriding `ms_client_id` in `config.toml`.
 pub const ENV_MS_CLIENT_ID: &str = "MQ_MS_CLIENT_ID";
 
+/// Default registered Microsoft OAuth2 Application (Client) ID for MQ Launcher.
+pub const DEFAULT_MS_CLIENT_ID: &str = "2306a0b0-5cbc-467d-8fb5-93f59bbfcddf";
+
 /// Opt-out environment variable disabling the built-in CurseForge key fallback (for testing).
 pub const ENV_DISABLE_BUILTIN_CF_KEY: &str = "MQ_DISABLE_BUILTIN_CF_KEY";
 
@@ -891,6 +894,9 @@ impl AppConfig {
         out
     }
 
+    /// Default registered Microsoft OAuth2 Application (Client) ID for MQ Launcher.
+    pub const DEFAULT_MS_CLIENT_ID: &str = DEFAULT_MS_CLIENT_ID;
+
     /// Resolves the effective Microsoft OAuth2 client ID, checking `$MQ_MS_CLIENT_ID` first
     /// and falling back to `self.ms_client_id`.
     pub fn effective_ms_client_id(&self) -> Option<String> {
@@ -903,11 +909,24 @@ impl AppConfig {
         if let Some(val) = env_val.map(str::trim).filter(|s| !s.is_empty()) {
             return Some(val.to_owned());
         }
-        self.ms_client_id
+        if let Some(val) = self
+            .ms_client_id
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
+        {
+            return Some(val.to_owned());
+        }
+        if env::var("MQ_DISABLE_BUILTIN_MS_CLIENT_ID").as_deref() == Ok("1") {
+            return None;
+        }
+        if let Some(val) = option_env!("MQ_MS_CLIENT_ID")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(val.to_owned());
+        }
+        Some(DEFAULT_MS_CLIENT_ID.to_owned())
     }
 }
 
@@ -1145,6 +1164,15 @@ mod tests {
             cfg.effective_ms_client_id_with_env(Some("env_ms_id"))
                 .as_deref(),
             Some("env_ms_id")
+        );
+
+        let empty_cfg = AppConfig::default();
+        std::env::set_var("MQ_DISABLE_BUILTIN_MS_CLIENT_ID", "1");
+        assert_eq!(empty_cfg.effective_ms_client_id_with_env(None), None);
+        std::env::remove_var("MQ_DISABLE_BUILTIN_MS_CLIENT_ID");
+        assert_eq!(
+            empty_cfg.effective_ms_client_id_with_env(None).as_deref(),
+            Some(DEFAULT_MS_CLIENT_ID)
         );
 
         let builtin = builtin_cf_api_key();

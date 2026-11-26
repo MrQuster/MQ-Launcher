@@ -5633,30 +5633,34 @@ impl InstancesView {
             }
 
             ui.add_space(8.0);
-            let wrapper_label = if cfg!(target_os = "windows") {
-                "Команда-обёртка запуска (необязательно; на Windows обычно не требуется):"
-            } else {
-                "Команда-враппер запуска (например, gamemoderun, mangohud, prime-run):"
-            };
-            ui.label(wrapper_label);
-            let mut wrapper_str = inst.wrapper_cmd.clone().unwrap_or_default();
-            if ui.text_edit_singleline(&mut wrapper_str).changed() {
-                inst.wrapper_cmd = if wrapper_str.trim().is_empty() {
-                    None
-                } else {
-                    Some(wrapper_str.trim().to_string())
-                };
-            }
+            egui::CollapsingHeader::new("Расширенные настройки запуска (для опытных)")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let wrapper_label = if cfg!(target_os = "windows") {
+                        "Команда-обёртка запуска (необязательно; на Windows обычно не требуется):"
+                    } else {
+                        "Команда-враппер запуска (например, gamemoderun, mangohud, prime-run):"
+                    };
+                    ui.label(wrapper_label);
+                    let mut wrapper_str = inst.wrapper_cmd.clone().unwrap_or_default();
+                    if ui.text_edit_singleline(&mut wrapper_str).changed() {
+                        inst.wrapper_cmd = if wrapper_str.trim().is_empty() {
+                            None
+                        } else {
+                            Some(wrapper_str.trim().to_string())
+                        };
+                    }
 
-            ui.add_space(8.0);
-            ui.label("Дополнительные аргументы JVM (через пробел):");
-            let mut jvm_args_str = inst.jvm_args.join(" ");
-            if ui.text_edit_singleline(&mut jvm_args_str).changed() {
-                inst.jvm_args = jvm_args_str
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-            }
+                    ui.add_space(8.0);
+                    ui.label("Дополнительные аргументы JVM (через пробел):");
+                    let mut jvm_args_str = inst.jvm_args.join(" ");
+                    if ui.text_edit_singleline(&mut jvm_args_str).changed() {
+                        inst.jvm_args = jvm_args_str
+                            .split_whitespace()
+                            .map(|s| s.to_string())
+                            .collect();
+                    }
+                });
 
             ui.add_space(8.0);
             ui.label("Язык Minecraft для этого инстанса (80+ языков):");

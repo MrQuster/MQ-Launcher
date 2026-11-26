@@ -47,7 +47,6 @@ impl SettingsSection {
 pub struct SettingsView {
     pub active_section: Option<SettingsSection>,
     pub theme_export_path: String,
-    pub catalog_key_input: String,
     pub theme_import_path: String,
     pub mc_locale_search: String,
     pub mc_locale_dropdown_open: bool,
@@ -92,8 +91,7 @@ impl SettingsView {
                     SettingsSection::Localization,
                     tr("settings_language", &lang),
                 ),
-                (SettingsSection::NetworkAndApi, "Сеть и API"),
-                (SettingsSection::Catalog, "Каталог"),
+                (SettingsSection::NetworkAndApi, "Система и сеть"),
                 (SettingsSection::Updates, "Обновления"),
                 (SettingsSection::About, "О программе"),
             ];
@@ -230,7 +228,7 @@ impl SettingsView {
                         SettingsSection::NetworkAndApi => {
                             self.render_network_api_settings(ui, state);
                         }
-                        SettingsSection::Catalog => self.render_catalog_settings(ui, state),
+                        SettingsSection::Catalog => {}
                         SettingsSection::Updates => self.render_updates_settings(ui, state),
                         SettingsSection::About => self.render_about_settings(ui, state),
                     },
@@ -1075,85 +1073,89 @@ impl SettingsView {
                     }
                 });
 
-                ui.add_space(6.0);
-                ui.label("Текущие аргументы JVM:");
-                let mut jvm_args_str = state.config.default_jvm_args.join(" ");
-                if ui.text_edit_singleline(&mut jvm_args_str).changed() {
-                    state.config.default_jvm_args = jvm_args_str
-                        .split_whitespace()
-                        .map(|s| s.to_string())
-                        .collect();
-                }
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new("Расширенные настройки запуска (для опытных)")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label("Текущие аргументы JVM:");
+                        let mut jvm_args_str = state.config.default_jvm_args.join(" ");
+                        if ui.text_edit_singleline(&mut jvm_args_str).changed() {
+                            state.config.default_jvm_args = jvm_args_str
+                                .split_whitespace()
+                                .map(|s| s.to_string())
+                                .collect();
+                        }
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(10.0);
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
 
-                // 3. Wrapper Command
-                ui.label(
-                    RichText::new("Команда-обёртка запуска игры")
-                        .strong()
-                        .size(14.0),
-                );
-                ui.add_space(4.0);
-
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .selectable_label(state.config.default_wrapper.is_none(), "Без обёртки")
-                        .clicked()
-                    {
-                        state.config.default_wrapper = None;
-                    }
-                    if cfg!(target_os = "windows") {
+                        // Wrapper Command
                         ui.label(
-                            RichText::new(
-                                "Linux-пресеты (gamemoderun, mangohud, prime-run) скрыты на Windows.",
-                            )
-                            .color(tokens.text_muted)
-                            .small(),
+                            RichText::new("Команда-обёртка запуска игры")
+                                .strong()
+                                .size(14.0),
                         );
-                    } else {
-                        if ui
-                            .selectable_label(
-                                state.config.default_wrapper.as_deref() == Some("gamemoderun"),
-                                "gamemoderun",
-                            )
-                            .clicked()
-                        {
-                            state.config.default_wrapper = Some("gamemoderun".to_string());
-                        }
-                        if ui
-                            .selectable_label(
-                                state.config.default_wrapper.as_deref() == Some("mangohud"),
-                                "mangohud",
-                            )
-                            .clicked()
-                        {
-                            state.config.default_wrapper = Some("mangohud".to_string());
-                        }
-                        if ui
-                            .selectable_label(
-                                state.config.default_wrapper.as_deref() == Some("prime-run"),
-                                "prime-run",
-                            )
-                            .clicked()
-                        {
-                            state.config.default_wrapper = Some("prime-run".to_string());
-                        }
-                    }
-                });
+                        ui.add_space(4.0);
 
-                let mut custom_wrapper = state.config.default_wrapper.clone().unwrap_or_default();
-                ui.horizontal(|ui| {
-                    ui.label("Или произвольная команда:");
-                    if ui.text_edit_singleline(&mut custom_wrapper).changed() {
-                        state.config.default_wrapper = if custom_wrapper.trim().is_empty() {
-                            None
-                        } else {
-                            Some(custom_wrapper.trim().to_string())
-                        };
-                    }
-                });
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .selectable_label(state.config.default_wrapper.is_none(), "Без обёртки")
+                                .clicked()
+                            {
+                                state.config.default_wrapper = None;
+                            }
+                            if cfg!(target_os = "windows") {
+                                ui.label(
+                                    RichText::new(
+                                        "Linux-пресеты (gamemoderun, mangohud, prime-run) скрыты на Windows.",
+                                    )
+                                    .color(tokens.text_muted)
+                                    .small(),
+                                );
+                            } else {
+                                if ui
+                                    .selectable_label(
+                                        state.config.default_wrapper.as_deref() == Some("gamemoderun"),
+                                        "gamemoderun",
+                                    )
+                                    .clicked()
+                                {
+                                    state.config.default_wrapper = Some("gamemoderun".to_string());
+                                }
+                                if ui
+                                    .selectable_label(
+                                        state.config.default_wrapper.as_deref() == Some("mangohud"),
+                                        "mangohud",
+                                    )
+                                    .clicked()
+                                {
+                                    state.config.default_wrapper = Some("mangohud".to_string());
+                                }
+                                if ui
+                                    .selectable_label(
+                                        state.config.default_wrapper.as_deref() == Some("prime-run"),
+                                        "prime-run",
+                                    )
+                                    .clicked()
+                                {
+                                    state.config.default_wrapper = Some("prime-run".to_string());
+                                }
+                            }
+                        });
+
+                        let mut custom_wrapper = state.config.default_wrapper.clone().unwrap_or_default();
+                        ui.horizontal(|ui| {
+                            ui.label("Или произвольная команда:");
+                            if ui.text_edit_singleline(&mut custom_wrapper).changed() {
+                                state.config.default_wrapper = if custom_wrapper.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(custom_wrapper.trim().to_string())
+                                };
+                            }
+                        });
+                    });
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -1489,65 +1491,6 @@ impl SettingsView {
         );
     }
 
-    fn render_catalog_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
-        let tokens = Tokens::from_config(&state.config.theme);
-        ui.label(RichText::new("Ключ CurseForge").color(tokens.text).strong());
-        ui.add_space(4.0);
-        let from_env = std::env::var("MQ_CURSEFORGE_API_KEY").is_ok_and(|v| !v.trim().is_empty());
-        let saved = state.config.curseforge_api_key.is_some();
-        let status = if saved {
-            "Ключ сохранён (файл с правами 0600)."
-        } else if from_env {
-            "Используется ключ из переменной MQ_CURSEFORGE_API_KEY."
-        } else if state.config.effective_cf_api_key().is_some() {
-            "Используется встроенный ключ CurseForge (каталог работает сразу)."
-        } else {
-            "Ключ не задан: CurseForge отключён, Modrinth работает полностью."
-        };
-        ui.label(RichText::new(status).color(tokens.text_muted));
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(
-                "Каталог CurseForge работает из коробки со встроенным ключом. При желании вы можете \
-                 указать свой личный ключ из консоли CurseForge ниже.",
-            )
-            .color(tokens.text_muted),
-        );
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if secondary_glass_button(ui, None, "Открыть страницу ключей").clicked()
-            {
-                let _ = crate::opener::open_that(crate::catalog_view::CURSEFORGE_KEYS_URL);
-            }
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.catalog_key_input)
-                    .password(true)
-                    .hint_text("API-ключ CurseForge")
-                    .desired_width(320.0),
-            );
-            let can_save = !self.catalog_key_input.trim().is_empty();
-            if primary_emerald_button(ui, Some(VectorIcon::Check), "Сохранить ключ").clicked()
-                && can_save
-            {
-                let key = mq_core::SecretString::new(self.catalog_key_input.trim());
-                state.config.curseforge_api_key = Some(key);
-                let _ = state.config.save(&state.paths);
-                self.catalog_key_input.clear();
-                state
-                    .catalog
-                    .mark_page_changed(std::time::Instant::now(), false);
-            }
-            if saved && secondary_glass_button(ui, None, "Удалить ключ").clicked() {
-                state.config.curseforge_api_key = None;
-                let _ = state.config.save(&state.paths);
-                let _ = mq_core::AppConfig::save_cf_api_key_secret_file(&state.paths, None);
-            }
-        });
-    }
-
     fn render_network_api_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
         let style = ThemeStyleParams::from_config(&state.config.theme);
@@ -1565,75 +1508,72 @@ impl SettingsView {
             |ui| {
                 ui.set_width(ui.available_width());
 
-                ui.label(RichText::new("Потоки и соединения").strong());
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("Максимум параллельных HTTP-соединений:");
-                    ui.add(egui::Slider::new(
-                        &mut state.config.max_connections,
-                        4..=128,
-                    ));
-                });
+                egui::CollapsingHeader::new("Расширенные настройки (для опытных)")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Потоки и соединения").strong());
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Максимум параллельных HTTP-соединений:");
+                            if ui
+                                .add(egui::Slider::new(
+                                    &mut state.config.max_connections,
+                                    4..=128,
+                                ))
+                                .changed()
+                            {
+                                let _ = state.config.save(&state.paths);
+                            }
+                        });
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
 
-                ui.label(RichText::new("Интеграции и ключи API").strong());
-                ui.add_space(4.0);
-                ui.label("CurseForge Core API Key:");
-                let mut cf_key = state
-                    .config
-                    .curseforge_api_key
-                    .as_ref()
-                    .map(|s| s.expose_secret().to_string())
-                    .unwrap_or_default();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut cf_key).password(true))
-                    .changed()
-                {
-                    state.config.curseforge_api_key = if cf_key.trim().is_empty() {
-                        None
-                    } else {
-                        Some(mq_core::SecretString::new(cf_key.trim()))
-                    };
-                }
-
-                ui.add_space(6.0);
-                ui.label("Microsoft OAuth Client ID:");
-                let mut ms_id = state.config.ms_client_id.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut ms_id).changed() {
-                    state.config.ms_client_id = if ms_id.trim().is_empty() {
-                        None
-                    } else {
-                        Some(ms_id.trim().to_string())
-                    };
-                }
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                ui.label(RichText::new("Графический бэкенд (GUI)").strong());
-                ui.add_space(4.0);
-                let (auto_label, wgpu_label) = if cfg!(target_os = "windows") {
-                    ("Авто (DX12 / Vulkan -> OpenGL)", "DX12 / Vulkan (WGPU)")
-                } else {
-                    ("Авто (Vulkan -> OpenGL)", "Vulkan (WGPU)")
-                };
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut state.config.ui_backend, GuiBackend::Auto, auto_label);
-                    ui.selectable_value(
-                        &mut state.config.ui_backend,
-                        GuiBackend::Vulkan,
-                        wgpu_label,
-                    );
-                    ui.selectable_value(
-                        &mut state.config.ui_backend,
-                        GuiBackend::Gl,
-                        "OpenGL (Glow)",
-                    );
-                });
+                        ui.label(RichText::new("Графический бэкенд (GUI)").strong());
+                        ui.add_space(4.0);
+                        let (auto_label, wgpu_label) = if cfg!(target_os = "windows") {
+                            ("Авто (DX12 / Vulkan -> OpenGL)", "DX12 / Vulkan (WGPU)")
+                        } else {
+                            ("Авто (Vulkan -> OpenGL)", "Vulkan (WGPU)")
+                        };
+                        let mut changed_backend = false;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_value(
+                                    &mut state.config.ui_backend,
+                                    GuiBackend::Auto,
+                                    auto_label,
+                                )
+                                .clicked()
+                            {
+                                changed_backend = true;
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut state.config.ui_backend,
+                                    GuiBackend::Vulkan,
+                                    wgpu_label,
+                                )
+                                .clicked()
+                            {
+                                changed_backend = true;
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut state.config.ui_backend,
+                                    GuiBackend::Gl,
+                                    "OpenGL (Glow)",
+                                )
+                                .clicked()
+                            {
+                                changed_backend = true;
+                            }
+                        });
+                        if changed_backend {
+                            let _ = state.config.save(&state.paths);
+                        }
+                    });
             },
         );
     }

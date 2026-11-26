@@ -798,18 +798,9 @@ impl AccountsView {
             return;
         }
 
-        if let Some(client_id) = oauth_cfg.client_id.as_deref() {
-            ui.label(
-                RichText::new(format!(
-                    "{}: {}",
-                    tr_acc(is_en, "Настроен клиент ID", "Configured Client ID"),
-                    &client_id[..client_id.len().min(8)]
-                ))
-                .color(TEXT_MUTED)
-                .small(),
-            );
-            ui.add_space(8.0);
+        let client_id = oauth_cfg.client_id.as_deref().unwrap_or("mq-launcher");
 
+        ui.horizontal_wrapped(|ui| {
             if primary_emerald_button(
                 ui,
                 Some(VectorIcon::Globe),
@@ -824,7 +815,13 @@ impl AccountsView {
                 self.ely_waiting_browser = true;
                 let state_str = Uuid::new_v4().to_string();
                 let port = oauth_cfg.redirect_port;
-                let auth_url = ElyByOAuthFlow::generate_auth_url(client_id, port, &state_str);
+                let pkce = mq_auth::elyby::PkcePair::generate();
+                let auth_url = ElyByOAuthFlow::generate_auth_url_pkce(
+                    client_id,
+                    port,
+                    &state_str,
+                    &pkce.challenge,
+                );
                 self.ely_auth_url = Some(auth_url.clone());
                 let _ = crate::opener::open_that(&auth_url);
 
@@ -832,6 +829,7 @@ impl AccountsView {
                 self.ely_cancel_flag = cancel_flag.clone();
                 let client_id_owned = client_id.to_string();
                 let client_secret_owned = oauth_cfg.client_secret.clone();
+                let verifier_owned = pkce.verifier;
                 let paths_clone = state.paths.clone();
                 let resp_tx = state.resp_sender.clone();
 
@@ -850,12 +848,13 @@ impl AccountsView {
                                     .build()
                                     .unwrap_or_default();
                                 let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-                                match ElyByOAuthFlow::exchange_code_for_token(
+                                match ElyByOAuthFlow::exchange_code_pkce(
                                     &http,
                                     &client_id_owned,
-                                    client_secret_owned.as_deref(),
                                     &code,
+                                    Some(&verifier_owned),
                                     &redirect_uri,
+                                    client_secret_owned.as_deref(),
                                 )
                                 .await
                                 {
@@ -936,69 +935,17 @@ impl AccountsView {
                     });
                 });
             }
-        } else {
-            ui.label(
-                RichText::new(tr_acc(
-                    is_en,
-                    "Для входа через браузер необходимо указать Client ID приложения Ely.by OAuth2.",
-                    "To sign in via browser, configure an Ely.by OAuth2 Client ID.",
-                ))
-                .color(STATUS_WARN),
-            );
-            ui.label(
-                RichText::new(tr_acc(
-                    is_en,
-                    "1. Зарегистрируйте приложение на account.ely.by/dev/applications",
-                    "1. Register an app at account.ely.by/dev/applications",
-                ))
-                .color(TEXT_MUTED)
-                .small(),
-            );
-            ui.label(
-                RichText::new(tr_acc(
-                    is_en,
-                    "2. Укажите Redirect URI: http://127.0.0.1:25585/callback",
-                    "2. Set Redirect URI: http://127.0.0.1:25585/callback",
-                ))
-                .color(TEXT_MUTED)
-                .small(),
-            );
-            ui.label(
-                RichText::new(tr_acc(
-                    is_en,
-                    "3. Задайте переменную окружения MQ_ELYBY_CLIENT_ID=<id> или пропишите в config.toml",
-                    "3. Set MQ_ELYBY_CLIENT_ID=<id> or configure it in config.toml",
-                ))
-                .color(TEXT_MUTED)
-                .small(),
-            );
-            ui.add_space(8.0);
 
-            ui.horizontal_wrapped(|ui| {
-                if primary_emerald_button(
-                    ui,
-                    Some(VectorIcon::Globe),
-                    tr_acc(
-                        is_en,
-                        "Зарегистрировать приложение на Ely.by",
-                        "Register app on Ely.by",
-                    ),
-                )
-                .clicked()
-                {
-                    let _ = crate::opener::open_that("https://account.ely.by/dev/applications");
-                }
-                if secondary_glass_button(
-                    ui,
-                    Some(VectorIcon::Globe),
-                    tr_acc(is_en, "Создать аккаунт на Ely.by", "Create Ely.by account"),
-                )
-                .clicked()
-                {
-                    let _ = crate::opener::open_that("https://ely.by/registration");
-                }
-            });
-        }
+            if secondary_glass_button(
+                ui,
+                Some(VectorIcon::Globe),
+                tr_acc(is_en, "Создать аккаунт на Ely.by", "Create Ely.by account"),
+            )
+            .clicked()
+            {
+                let _ = crate::opener::open_that("https://ely.by/registration");
+            }
+        });
     }
 
     fn render_msa_tab(&mut self, ui: &mut Ui, state: &mut UiState) {
@@ -1021,12 +968,13 @@ impl AccountsView {
             self.msa_waiting_login = false;
         }
 
-        if state.config.effective_ms_client_id().is_none() {
+        let has_client_id = state.config.effective_ms_client_id().is_some();
+        if !has_client_id {
             ui.label(
                 RichText::new(tr_acc(
                     is_en,
-                    "Для входа по лицензии Microsoft укажите Client ID в MQ_MS_CLIENT_ID или настройках (Офлайн-режим и Ely.by работают сразу из коробки).",
-                    "To sign in with Microsoft, set Client ID in MQ_MS_CLIENT_ID or Settings (Offline and Ely.by work out of the box).",
+                    "Вход через лицензию Microsoft временно недоступен — скоро заработает после подтверждения приложения в Microsoft.",
+                    "Microsoft account sign-in will be enabled once Microsoft app approval is complete.",
                 ))
                 .color(STATUS_WARN)
                 .small(),
@@ -1122,101 +1070,99 @@ impl AccountsView {
                     }
                 });
             }
-        } else if primary_emerald_button(
-            ui,
-            Some(VectorIcon::User),
-            tr_acc(is_en, "Войти через Microsoft", "Sign in with Microsoft"),
-        )
-        .clicked()
-        {
-            if let Some(client_id) = state.config.effective_ms_client_id() {
-                self.msa_waiting_login = true;
-                self.msa_user_code = None;
-                self.msa_verification_uri = None;
-                let cancel_flag = Arc::new(AtomicBool::new(false));
-                self.msa_cancel_flag = cancel_flag.clone();
-                let client_id_owned = client_id;
-                let paths_clone = state.paths.clone();
-                let resp_tx = state.resp_sender.clone();
+        } else {
+            let btn = ui.add_enabled_ui(has_client_id, |ui| {
+                primary_emerald_button(
+                    ui,
+                    Some(VectorIcon::User),
+                    tr_acc(is_en, "Войти через Microsoft", "Sign in with Microsoft"),
+                )
+            });
+            if has_client_id && btn.inner.clicked() {
+                if let Some(client_id) = state.config.effective_ms_client_id() {
+                    self.msa_waiting_login = true;
+                    self.msa_user_code = None;
+                    self.msa_verification_uri = None;
+                    let cancel_flag = Arc::new(AtomicBool::new(false));
+                    self.msa_cancel_flag = cancel_flag.clone();
+                    let client_id_owned = client_id;
+                    let paths_clone = state.paths.clone();
+                    let resp_tx = state.resp_sender.clone();
 
-                let handle = tokio::runtime::Handle::current();
-                std::thread::spawn(move || {
-                    handle.block_on(async move {
-                        let client = match mq_auth::MsaClient::new() {
-                            Ok(c) => c,
-                            Err(e) => {
-                                let _ =
-                                    resp_tx.send(crate::state::UiWorkerResponse::MsaLoginFinished(
-                                        Err(format!("Ошибка инициализации MSA: {e}")),
-                                    ));
-                                return;
-                            }
-                        };
-                        let prompt = match client.start_device_code_flow(&client_id_owned).await {
-                            Ok(p) => p,
-                            Err(e) => {
-                                let _ =
-                                    resp_tx.send(crate::state::UiWorkerResponse::MsaLoginFinished(
-                                        Err(format!("Ошибка Device Code: {e}")),
-                                    ));
-                                return;
-                            }
-                        };
-                        if cancel_flag.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let _ = resp_tx.send(crate::state::UiWorkerResponse::MsaDeviceCodeReady {
-                            verification_uri: prompt.verification_uri.clone(),
-                            user_code: prompt.user_code.clone(),
-                        });
-
-                        let outcome: Result<String, String> = match client
-                            .poll_and_complete_login(&client_id_owned, &prompt)
-                            .await
-                        {
-                            Ok(acc) => {
-                                if cancel_flag.load(Ordering::SeqCst) {
+                    let handle = tokio::runtime::Handle::current();
+                    std::thread::spawn(move || {
+                        handle.block_on(async move {
+                            let client = match mq_auth::MsaClient::new() {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    let _ = resp_tx.send(
+                                        crate::state::UiWorkerResponse::MsaLoginFinished(Err(
+                                            format!("Ошибка инициализации MSA: {e}"),
+                                        )),
+                                    );
                                     return;
                                 }
-                                let username = acc.username.clone();
-                                match mq_auth::AccountStore::load_or_default(&paths_clone) {
-                                    Ok(mut store) => {
-                                        store.upsert_account(acc, true);
-                                        match store.save(&paths_clone) {
-                                            Ok(()) => Ok(username),
-                                            Err(e) => {
-                                                Err(format!("Не удалось сохранить аккаунт: {e}"))
+                            };
+                            let prompt = match client.start_device_code_flow(&client_id_owned).await
+                            {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    let _ = resp_tx.send(
+                                        crate::state::UiWorkerResponse::MsaLoginFinished(Err(
+                                            format!("Ошибка Device Code: {e}"),
+                                        )),
+                                    );
+                                    return;
+                                }
+                            };
+                            if cancel_flag.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let _ =
+                                resp_tx.send(crate::state::UiWorkerResponse::MsaDeviceCodeReady {
+                                    verification_uri: prompt.verification_uri.clone(),
+                                    user_code: prompt.user_code.clone(),
+                                });
+
+                            let outcome: Result<String, String> = match client
+                                .poll_and_complete_login(&client_id_owned, &prompt)
+                                .await
+                            {
+                                Ok(acc) => {
+                                    if cancel_flag.load(Ordering::SeqCst) {
+                                        return;
+                                    }
+                                    let username = acc.username.clone();
+                                    match mq_auth::AccountStore::load_or_default(&paths_clone) {
+                                        Ok(mut store) => {
+                                            store.upsert_account(acc, true);
+                                            match store.save(&paths_clone) {
+                                                Ok(()) => Ok(username),
+                                                Err(e) => Err(format!(
+                                                    "Не удалось сохранить аккаунт: {e}"
+                                                )),
                                             }
                                         }
+                                        Err(e) => Err(format!(
+                                            "Не удалось загрузить хранилище аккаунтов: {e}"
+                                        )),
                                     }
-                                    Err(e) => Err(format!(
-                                        "Не удалось загрузить хранилище аккаунтов: {e}"
-                                    )),
                                 }
-                            }
-                            Err(e) => {
-                                if cancel_flag.load(Ordering::SeqCst) {
-                                    return;
+                                Err(e) => {
+                                    if cancel_flag.load(Ordering::SeqCst) {
+                                        return;
+                                    }
+                                    Err(format!("Ошибка авторизации Microsoft: {e}"))
                                 }
-                                Err(format!("Ошибка авторизации Microsoft: {e}"))
+                            };
+                            if !cancel_flag.load(Ordering::SeqCst) {
+                                let _ = resp_tx.send(
+                                    crate::state::UiWorkerResponse::MsaLoginFinished(outcome),
+                                );
                             }
-                        };
-                        if !cancel_flag.load(Ordering::SeqCst) {
-                            let _ = resp_tx
-                                .send(crate::state::UiWorkerResponse::MsaLoginFinished(outcome));
-                        }
+                        });
                     });
-                });
-            } else {
-                state.status_message = Some((
-                    tr_acc(
-                        is_en,
-                        "Укажите Client ID в настройках или переменной MQ_MS_CLIENT_ID",
-                        "Configure Client ID in settings or MQ_MS_CLIENT_ID",
-                    )
-                    .to_string(),
-                    true,
-                ));
+                }
             }
         }
     }

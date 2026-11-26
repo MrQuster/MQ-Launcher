@@ -5,7 +5,7 @@
 #  Advanced:
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Portable
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Uninstall
-#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Version 2.8.3 -Silent
+#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Version 2.8.4 -Silent
 # ==============================================================================
 
 function Invoke-MqInstaller {

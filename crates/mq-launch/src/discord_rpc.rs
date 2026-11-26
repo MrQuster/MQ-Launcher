@@ -13,13 +13,22 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::fs::{File, OpenOptions};
 
-const DISCORD_APP_ID: &str = "1342500000000000000";
+const DISCORD_APP_ID: &str = "1575415195591778364";
 
 fn get_discord_app_id() -> String {
-    std::env::var("MQ_DISCORD_APP_ID")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DISCORD_APP_ID.to_string())
+    if let Ok(val) = std::env::var("MQ_DISCORD_APP_ID") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Some(val) = option_env!("MQ_DISCORD_APP_ID") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DISCORD_APP_ID.to_string()
 }
 
 #[cfg(windows)]
@@ -298,7 +307,10 @@ mod tests {
     #[test]
     fn test_discord_app_id_override() {
         std::env::remove_var("MQ_DISCORD_APP_ID");
-        assert_eq!(get_discord_app_id(), DISCORD_APP_ID);
+        let expected = option_env!("MQ_DISCORD_APP_ID")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(DISCORD_APP_ID);
+        assert_eq!(get_discord_app_id(), expected);
 
         std::env::set_var("MQ_DISCORD_APP_ID", "999888777666555444");
         assert_eq!(get_discord_app_id(), "999888777666555444");

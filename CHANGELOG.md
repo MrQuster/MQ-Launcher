@@ -5,6 +5,20 @@
 
 ---
 
+## [v2.8.4] — 2026-11-26 ("Discord Rich Presence, Ely.by PKCE, Official Microsoft OAuth & UI Cleanup")
+
+### Исправлено и улучшено / Fixed and improved
+- **Официальный Discord Rich Presence (`mq-launch`):**
+  - Подключен реальный зарегистрированный Discord Application ID лаунчера (`1575415195591778364`) с поддержкой оверрайда на этапе компиляции через `MQ_DISCORD_APP_ID`.
+- **Авторизация Ely.by через PKCE (`mq-auth`, `mq-ui`):**
+  - Реализован и активирован безопасный OAuth2 PKCE-вход через встроенный `mq-launcher` Client ID в браузере без необходимости ручной настройки.
+- **Встроенный официальный вход Microsoft Account (`mq-core`, `mq-auth`, `mq-ui`):**
+  - Подключен зарегистрированный в Microsoft Azure Entra ID официальный Application Client ID (`2306a0b0-5cbc-467d-8fb5-93f59bbfcddf`) для бесшовной Device Code авторизации из коробки.
+- **Очистка интерфейса от лишних технических полей (`mq-ui`):**
+  - Удалены устаревшие поля ввода API-ключей разработчика (CurseForge, Microsoft Client ID) из видимого UI каталога и настроек; технические параметры JVM, врапперы и параметры сетевых соединений аккуратно спрятаны в сворачиваемые разделы «Расширенные настройки (для опытных)», сохраняя лаунчер чистым и удобным для обычных игроков.
+
+---
+
 ## [v2.8.3] — 2026-11-25 ("CI Windows & Clippy Fixes, MQ-Launcher Repository Migration")
 
 ### Исправлено и улучшено / Fixed and improved

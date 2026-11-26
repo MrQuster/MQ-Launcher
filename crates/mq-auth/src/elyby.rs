@@ -627,6 +627,16 @@ impl PkcePair {
             challenge,
         }
     }
+
+    #[inline]
+    pub fn generate_pkce_pair() -> Self {
+        Self::generate()
+    }
+}
+
+#[inline]
+pub fn generate_pkce_pair() -> PkcePair {
+    PkcePair::generate()
 }
 
 /// Builds an OAuth2 authorization URL with PKCE (S256) for browser-based Ely.by sign-in.
@@ -887,6 +897,24 @@ impl ElyByOAuthFlow {
         redirect_uri: &str,
     ) -> MqResult<ElyByTokenResponse> {
         Self::exchange_code_pkce(client, client_id, code, None, redirect_uri, client_secret).await
+    }
+
+    pub async fn exchange_code_for_token_pkce(
+        client: &reqwest::Client,
+        client_id: &str,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+    ) -> MqResult<ElyByTokenResponse> {
+        Self::exchange_code_pkce(
+            client,
+            client_id,
+            code,
+            Some(code_verifier),
+            redirect_uri,
+            None,
+        )
+        .await
     }
 
     pub async fn exchange_code_pkce(

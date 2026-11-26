@@ -47,6 +47,7 @@ jobs:
       - name: Build release binary
         env:
           MQ_CURSEFORGE_API_KEY: ${{ secrets.MQ_CURSEFORGE_API_KEY }}
+          MQ_MS_CLIENT_ID: ${{ secrets.MQ_MS_CLIENT_ID }}
         run: cargo build --release --locked -p mq-cli
 
       - name: Verify no test-hooks in release binary
@@ -104,6 +105,7 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
           MQ_CURSEFORGE_API_KEY: ${{ secrets.MQ_CURSEFORGE_API_KEY }}
+          MQ_MS_CLIENT_ID: ${{ secrets.MQ_MS_CLIENT_ID }}
         run: cargo build --release --locked -p mq-cli
 
       - name: Verify no test-hooks in release binary
@@ -278,12 +280,12 @@ jobs:
             
             #### 🐧 Linux (Arch / Ubuntu / Fedora / Debian / NixOS):
             ```bash
-            curl -fsSL https://github.com/MrQuster/mq/releases/latest/download/install.sh | sh
+            curl -fsSL https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.sh | sh
             ```
             
             #### 🪟 Windows 10 / 11 (PowerShell):
             ```powershell
-            irm https://github.com/MrQuster/mq/releases/latest/download/install.ps1 | iex
+            irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1 | iex
             ```
             
             Or download the standalone Inno Setup installer (`MQ-Setup-<version>-x64.exe`) or portable ZIP (`mq-windows-x86_64-portable.zip`).

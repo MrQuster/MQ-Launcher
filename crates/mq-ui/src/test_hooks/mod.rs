@@ -1307,7 +1307,7 @@ fn parse_settings_section(raw: &str) -> Option<SettingsSection> {
         "localization" | "language" | "язык" | "локализация" => {
             Some(SettingsSection::Localization)
         }
-        "networkandapi" | "network" | "сеть" | "сетьиapi" => {
+        "networkandapi" | "network" | "сеть" | "сетьиapi" | "система" | "системаисеть" => {
             Some(SettingsSection::NetworkAndApi)
         }
         "catalog" | "каталог" => Some(SettingsSection::Catalog),

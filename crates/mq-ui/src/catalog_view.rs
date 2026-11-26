@@ -863,46 +863,11 @@ impl CatalogView {
             |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
-                    RichText::new("Для CurseForge нужен API-ключ")
-                        .color(tokens.text)
-                        .strong(),
-                );
-                ui.add_space(4.0);
-                ui.label(
                     RichText::new(
-                        "1. Откройте страницу ключей и войдите в аккаунт.\n\
-                         2. Создайте ключ и вставьте его ниже.\n\
-                         Ключ можно также задать переменной окружения MQ_CURSEFORGE_API_KEY.\n\
-                         Modrinth работает без ключа.",
+                        "Каталог CurseForge временно недоступен — показаны результаты Modrinth.",
                     )
                     .color(tokens.text_muted),
                 );
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if secondary_glass_button(ui, None, "Открыть страницу ключей").clicked()
-                    {
-                        let _ = crate::opener::open_that(CURSEFORGE_KEYS_URL);
-                    }
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.curseforge_api_key_input)
-                            .password(true)
-                            .hint_text("API-ключ CurseForge")
-                            .desired_width(280.0),
-                    );
-                    let can_save = !self.curseforge_api_key_input.trim().is_empty();
-                    if primary_emerald_button(ui, None, "Сохранить ключ").clicked() && can_save
-                    {
-                        state.config.curseforge_api_key = Some(mq_core::SecretString::new(
-                            self.curseforge_api_key_input.trim(),
-                        ));
-                        let _ = state.config.save(&state.paths);
-                        self.curseforge_api_key_input.clear();
-                        state.catalog.mark_page_changed(Instant::now(), false);
-                    }
-                });
             },
         );
     }
