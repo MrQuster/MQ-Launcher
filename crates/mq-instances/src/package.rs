@@ -471,6 +471,8 @@ pub fn import_instance_archive_detailed(
     // 2. Detect optional common root folder wrapper (common in MultiMC / Prism exports like `MyPack/instance.cfg`).
     let root_markers = [
         INSTANCE_MANIFEST_FILE,
+        "instance.json",
+        "mq-instance.json",
         "modrinth.index.json",
         "manifest.json",
         "instance.cfg",
@@ -525,7 +527,10 @@ pub fn import_instance_archive_detailed(
             .any(|n| effective_rel(n).eq_ignore_ascii_case(target))
     };
 
-    let format = if has_file(INSTANCE_MANIFEST_FILE) {
+    let format = if has_file(INSTANCE_MANIFEST_FILE)
+        || has_file("instance.json")
+        || has_file("mq-instance.json")
+    {
         ImportedArchiveFormat::MqNative
     } else if has_file("modrinth.index.json") {
         ImportedArchiveFormat::ModrinthMrpack
@@ -534,7 +539,38 @@ pub fn import_instance_archive_detailed(
     } else if has_file("instance.cfg") || has_file("mmc-pack.json") {
         ImportedArchiveFormat::MultiMcPrism
     } else {
-        ImportedArchiveFormat::MqNative
+        let is_resource_pack = normalized_names.iter().any(|n| {
+            let clean = n.trim_matches('/');
+            clean.eq_ignore_ascii_case("pack.mcmeta")
+                || (clean
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|base| base.eq_ignore_ascii_case("pack.mcmeta"))
+                    && clean.matches('/').count() <= 1)
+        });
+        if is_resource_pack {
+            return Err(MqError::Archive(
+                "Этот архив является ресурс-паком (содержит pack.mcmeta), а не инстансом или модпаком. Добавляйте ресурс-паки внутри вкладки нужного инстанса."
+                    .to_owned(),
+            ));
+        }
+
+        let is_shader_pack = normalized_names.iter().any(|n| {
+            let clean = n.trim_matches('/');
+            let lower = clean.to_ascii_lowercase();
+            lower == "shaders" || lower.starts_with("shaders/") || lower.contains("/shaders/")
+        });
+        if is_shader_pack {
+            return Err(MqError::Archive(
+                "Этот архив является шейдер-паком (содержит папку shaders/), а не инстансом или модпаком. Добавляйте шейдеры внутри вкладки нужного инстанса."
+                    .to_owned(),
+            ));
+        }
+
+        return Err(MqError::Archive(
+            "Архив не содержит манифест инстанса или модпака (instance.toml, instance.json, mq-instance.json, mmc-pack.json, manifest.json или modrinth.index.json)."
+                .to_owned(),
+        ));
     };
 
     fs::create_dir_all(&dest_dir)?;
@@ -1058,5 +1094,31 @@ lang_initialized = true
         }
         let slip_err = import_instance_from_zip(&slip_zip, &dest_root, None).unwrap_err();
         assert!(matches!(slip_err, MqError::ZipSlip { .. }));
+
+        // 5. Resource pack & shader pack archives must be rejected with helpful hints
+        let rp_zip = tmp.path().join("my-resourcepack.zip");
+        {
+            let file = File::create(&rp_zip).unwrap();
+            let mut zw = ZipWriter::new(file);
+            let opts = SimpleFileOptions::default();
+            zw.start_file("pack.mcmeta", opts).unwrap();
+            zw.write_all(br#"{"pack":{"pack_format":34,"description":"RP"}}"#)
+                .unwrap();
+            zw.finish().unwrap();
+        }
+        let rp_err = import_instance_from_zip(&rp_zip, &dest_root, None).unwrap_err();
+        assert!(rp_err.to_string().contains("ресурс-пак"));
+
+        let sh_zip = tmp.path().join("my-shaders.zip");
+        {
+            let file = File::create(&sh_zip).unwrap();
+            let mut zw = ZipWriter::new(file);
+            let opts = SimpleFileOptions::default();
+            zw.start_file("shaders/composite.fsh", opts).unwrap();
+            zw.write_all(b"void main() {}").unwrap();
+            zw.finish().unwrap();
+        }
+        let sh_err = import_instance_from_zip(&sh_zip, &dest_root, None).unwrap_err();
+        assert!(sh_err.to_string().contains("шейдер"));
     }
 }

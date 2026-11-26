@@ -98,7 +98,7 @@ const fn tr_acc(is_en: bool, ru: &'static str, en: &'static str) -> &'static str
 
 impl AccountsView {
     pub fn ui(&mut self, ui: &mut Ui, state: &mut UiState) {
-        let is_en = state.config.launcher_locale == "en";
+        let is_en = state.config.launcher_locale.starts_with("en");
 
         ui.heading(
             RichText::new(tr_acc(is_en, "Управление аккаунтами", "Account Management"))
@@ -405,6 +405,11 @@ impl AccountsView {
                                                     Some(VectorIcon::Trash),
                                                     "",
                                                 )
+                                                .on_hover_text(tr_acc(
+                                                    is_en,
+                                                    "Удалить аккаунт",
+                                                    "Delete account",
+                                                ))
                                                 .clicked()
                                                 {
                                                     let _ = state
@@ -445,7 +450,7 @@ impl AccountsView {
     }
 
     fn render_skin_library_section(&mut self, ui: &mut Ui, state: &mut UiState) {
-        let is_en = state.config.launcher_locale == "en";
+        let is_en = state.config.launcher_locale.starts_with("en");
         let tokens = crate::theme::Tokens::from_config(&state.config.theme);
         let style = crate::theme_styles::ThemeStyleParams::active(ui.ctx());
         let card_r = style.card_corner_radius(state.config.theme.corner_radius);
@@ -485,7 +490,7 @@ impl AccountsView {
     fn render_skin_list_and_import(
         &mut self,
         ui: &mut Ui,
-        _state: &mut UiState,
+        state: &mut UiState,
         skins_dir: &Path,
         _tokens: &crate::theme::Tokens,
         is_en: bool,
@@ -513,19 +518,37 @@ impl AccountsView {
                         .small(),
                     );
                 } else {
+                    let active_skin_path = state
+                        .accounts
+                        .active_account()
+                        .and_then(|a| a.skin_url.as_deref());
                     let mut delete_id: Option<String> = None;
                     for skin in &skins {
                         let is_sel = self.selected_skin_id.as_deref() == Some(&skin.id);
+                        let skin_path_str = skin.file_path.display().to_string();
+                        let is_applied = active_skin_path == Some(skin_path_str.as_str());
                         ui.horizontal(|ui| {
-                            let label_text = format!(
-                                "{} ({})",
-                                skin.name,
-                                if skin.slim { "Slim 3px" } else { "Classic 4px" }
-                            );
+                            let label_text = if is_applied {
+                                format!(
+                                    "{} ({}) [{}]",
+                                    skin.name,
+                                    if skin.slim { "Slim 3px" } else { "Classic 4px" },
+                                    tr_acc(is_en, "Активный", "Active")
+                                )
+                            } else {
+                                format!(
+                                    "{} ({})",
+                                    skin.name,
+                                    if skin.slim { "Slim 3px" } else { "Classic 4px" }
+                                )
+                            };
                             if ui.selectable_label(is_sel, label_text).clicked() {
                                 self.selected_skin_id = Some(skin.id.clone());
                             }
-                            if secondary_glass_button(ui, Some(VectorIcon::Trash), "").clicked() {
+                            if secondary_glass_button(ui, Some(VectorIcon::Trash), "")
+                                .on_hover_text(tr_acc(is_en, "Удалить скин", "Delete skin"))
+                                .clicked()
+                            {
                                 delete_id = Some(skin.id.clone());
                             }
                         });
@@ -539,6 +562,79 @@ impl AccountsView {
                     }
                 }
             });
+
+        let selected_skin = self
+            .selected_skin_id
+            .as_deref()
+            .and_then(|id| skins.iter().find(|s| s.id == id))
+            .cloned();
+        if let Some(skin) = selected_skin {
+            ui.add_space(6.0);
+            let is_offline_active = state
+                .accounts
+                .active_account()
+                .is_some_and(|a| a.kind == AccountKind::Offline);
+            ui.horizontal_wrapped(|ui| {
+                let apply_btn = ui.add_enabled_ui(is_offline_active, |ui| {
+                    primary_emerald_button(
+                        ui,
+                        Some(VectorIcon::Check),
+                        tr_acc(is_en, "Применить к активному профилю", "Apply skin"),
+                    )
+                });
+                if is_offline_active && apply_btn.inner.clicked() {
+                    if let Some(mut profile) = state.accounts.active_account().cloned() {
+                        let path_str = skin.file_path.display().to_string();
+                        profile.skin_url = Some(path_str);
+                        if let Ok(bytes) = std::fs::read(&skin.file_path) {
+                            if let Ok(avatar) = mq_auth::extract_head_avatar_from_png(&bytes) {
+                                profile.avatar_head = Some(avatar);
+                            }
+                        }
+                        let uname = profile.username.clone();
+                        state.accounts.upsert_account(profile, true);
+                        match state.accounts.save(&state.paths) {
+                            Ok(()) => {
+                                state.status_message = Some((
+                                    if is_en {
+                                        format!("Skin '{}' applied to '{}'", skin.name, uname)
+                                    } else {
+                                        format!(
+                                            "Скин «{}» применён к профилю «{}»",
+                                            skin.name, uname
+                                        )
+                                    },
+                                    false,
+                                ));
+                            }
+                            Err(e) => {
+                                state.status_message = Some((
+                                    format!(
+                                        "{}: {e}",
+                                        tr_acc(
+                                            is_en,
+                                            "Не удалось сохранить аккаунты",
+                                            "Failed to save accounts"
+                                        )
+                                    ),
+                                    true,
+                                ));
+                            }
+                        }
+                    }
+                } else if !is_offline_active {
+                    ui.label(
+                        RichText::new(tr_acc(
+                            is_en,
+                            "Локальные скины применяются только к активному оффлайн-профилю",
+                            "Local skins apply only to an active offline profile",
+                        ))
+                        .color(TEXT_MUTED)
+                        .small(),
+                    );
+                }
+            });
+        }
 
         ui.add_space(8.0);
         ui.separator();
@@ -619,7 +715,7 @@ impl AccountsView {
     }
 
     fn render_offline_tab(&mut self, ui: &mut Ui, state: &mut UiState) {
-        let is_en = state.config.launcher_locale == "en";
+        let is_en = state.config.launcher_locale.starts_with("en");
         ui.label(
             RichText::new(tr_acc(
                 is_en,
@@ -721,8 +817,12 @@ impl AccountsView {
         if state.ely_login_done.take().is_some() {
             self.ely_waiting_browser = false;
             self.ely_auth_url = None;
+            state.ely_auth_url = None;
         }
-        let is_en = state.config.launcher_locale == "en";
+        if let Some(url) = state.ely_auth_url.take() {
+            self.ely_auth_url = Some(url);
+        }
+        let is_en = state.config.launcher_locale.starts_with("en");
         ui.label(
             RichText::new(tr_acc(
                 is_en,
@@ -748,23 +848,32 @@ impl AccountsView {
             ui.add_space(6.0);
 
             ui.horizontal(|ui| {
-                if secondary_glass_button(
-                    ui,
-                    Some(VectorIcon::Globe),
-                    tr_acc(is_en, "Открыть ссылку ещё раз", "Open link again"),
-                )
-                .clicked()
+                let has_url = self.ely_auth_url.is_some();
+                if ui
+                    .add_enabled_ui(has_url, |ui| {
+                        secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Globe),
+                            tr_acc(is_en, "Открыть ссылку ещё раз", "Open link again"),
+                        )
+                    })
+                    .inner
+                    .clicked()
                 {
                     if let Some(ref url) = self.ely_auth_url {
                         let _ = crate::opener::open_that(url);
                     }
                 }
-                if secondary_glass_button(
-                    ui,
-                    Some(VectorIcon::Copy),
-                    tr_acc(is_en, "Скопировать ссылку", "Copy link"),
-                )
-                .clicked()
+                if ui
+                    .add_enabled_ui(has_url, |ui| {
+                        secondary_glass_button(
+                            ui,
+                            Some(VectorIcon::Copy),
+                            tr_acc(is_en, "Скопировать ссылку", "Copy link"),
+                        )
+                    })
+                    .inner
+                    .clicked()
                 {
                     if let Some(ref url) = self.ely_auth_url {
                         ui.ctx().copy_text(url.clone());
@@ -787,7 +896,9 @@ impl AccountsView {
                 .clicked()
                 {
                     self.ely_waiting_browser = false;
-                    self.ely_cancel_flag.store(true, Ordering::SeqCst);
+                    self.ely_auth_url = None;
+                    state.ely_auth_url = None;
+                    self.ely_cancel_flag.store(true, Ordering::Relaxed);
                     state.status_message = Some((
                         tr_acc(is_en, "Вход через Ely.by отменён", "Ely.by login cancelled")
                             .to_string(),
@@ -813,32 +924,67 @@ impl AccountsView {
             .clicked()
             {
                 self.ely_waiting_browser = true;
+                self.ely_auth_url = None;
+                state.ely_auth_url = None;
+                state.ely_login_done = None;
                 let state_str = Uuid::new_v4().to_string();
-                let port = oauth_cfg.redirect_port;
+                let preferred_port = oauth_cfg.redirect_port;
                 let pkce = mq_auth::elyby::PkcePair::generate();
-                let auth_url = ElyByOAuthFlow::generate_auth_url_pkce(
-                    client_id,
-                    port,
-                    &state_str,
-                    &pkce.challenge,
-                );
-                self.ely_auth_url = Some(auth_url.clone());
-                let _ = crate::opener::open_that(&auth_url);
 
                 let cancel_flag = Arc::new(AtomicBool::new(false));
                 self.ely_cancel_flag = cancel_flag.clone();
                 let client_id_owned = client_id.to_string();
                 let client_secret_owned = oauth_cfg.client_secret.clone();
                 let verifier_owned = pkce.verifier;
+                let challenge_owned = pkce.challenge;
                 let paths_clone = state.paths.clone();
                 let resp_tx = state.resp_sender.clone();
 
-                // Spawn background task to receive loopback callback and exchange token
+                // Bind loopback socket first so redirect_uri & auth_url carry the actual bound port,
+                // then await callback with cancel support.
                 let handle = tokio::runtime::Handle::current();
                 std::thread::spawn(move || {
                     handle.block_on(async move {
-                        let res = ElyByOAuthFlow::start_loopback_listener(port, &state_str).await;
-                        if cancel_flag.load(Ordering::SeqCst) {
+                        if cancel_flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let srv = match ElyByOAuthFlow::bind_loopback_server(preferred_port).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                if !cancel_flag.load(Ordering::Relaxed) {
+                                    let _ = resp_tx.send(
+                                        crate::state::UiWorkerResponse::ElyByLoginFinished(Err(
+                                            format!("Не удалось открыть локальный порт для Ely.by: {e}"),
+                                        )),
+                                    );
+                                }
+                                return;
+                            }
+                        };
+                        let actual_port = srv.port;
+                        let redirect_uri = format!("http://127.0.0.1:{actual_port}/callback");
+                        let auth_url = ElyByOAuthFlow::generate_auth_url_pkce(
+                            &client_id_owned,
+                            actual_port,
+                            &state_str,
+                            &challenge_owned,
+                        );
+                        if cancel_flag.load(Ordering::Relaxed) {
+                            drop(srv);
+                            return;
+                        }
+                        let _ = resp_tx.send(crate::state::UiWorkerResponse::ElyByAuthUrlReady(
+                            auth_url.clone(),
+                        ));
+                        let _ = crate::opener::open_that(&auth_url);
+
+                        let res = ElyByOAuthFlow::wait_for_callback(
+                            srv,
+                            &state_str,
+                            Some(cancel_flag.clone()),
+                        )
+                        .await;
+                        if cancel_flag.load(Ordering::Relaxed) {
                             return;
                         }
                         let outcome: Result<String, String> = match res {
@@ -847,7 +993,6 @@ impl AccountsView {
                                     .timeout(std::time::Duration::from_secs(20))
                                     .build()
                                     .unwrap_or_default();
-                                let redirect_uri = format!("http://127.0.0.1:{port}/callback");
                                 match ElyByOAuthFlow::exchange_code_pkce(
                                     &http,
                                     &client_id_owned,
@@ -927,7 +1072,7 @@ impl AccountsView {
                                 Err(format!("Ошибка ожидания ответа браузера: {e}"))
                             }
                         };
-                        if !cancel_flag.load(Ordering::SeqCst) {
+                        if !cancel_flag.load(Ordering::Relaxed) {
                             let _ = resp_tx.send(
                                 crate::state::UiWorkerResponse::ElyByLoginFinished(outcome),
                             );
@@ -949,7 +1094,7 @@ impl AccountsView {
     }
 
     fn render_msa_tab(&mut self, ui: &mut Ui, state: &mut UiState) {
-        let is_en = state.config.launcher_locale == "en";
+        let is_en = state.config.launcher_locale.starts_with("en");
         ui.label(
             RichText::new(tr_acc(
                 is_en,
@@ -964,7 +1109,7 @@ impl AccountsView {
             self.msa_verification_uri = Some(uri);
             self.msa_user_code = Some(code);
         }
-        if state.msa_login_done.is_some() {
+        if state.msa_login_done.take().is_some() {
             self.msa_waiting_login = false;
         }
 
@@ -1083,6 +1228,8 @@ impl AccountsView {
                     self.msa_waiting_login = true;
                     self.msa_user_code = None;
                     self.msa_verification_uri = None;
+                    state.msa_device_code = None;
+                    state.msa_login_done = None;
                     let cancel_flag = Arc::new(AtomicBool::new(false));
                     self.msa_cancel_flag = cancel_flag.clone();
                     let client_id_owned = client_id;

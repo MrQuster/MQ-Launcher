@@ -476,111 +476,184 @@ impl MqApp {
         let guard = self.state.cancel_epoch.snapshot();
         let resp_tx = self.state.resp_sender.clone();
         let default_mc_loc = self.state.config.default_mc_locale.clone();
+        let auto_backup_worlds = self.state.config.auto_backup_worlds;
+        let max_world_backups = self.state.config.max_world_backups;
 
-        if let Some(inst) = self
+        let Some(inst) = self
             .state
             .instances
             .iter()
             .find(|i| i.id == instance_id)
             .cloned()
-        {
-            if self.state.config.auto_backup_worlds {
-                let _ = mq_instances::auto_backup_instance_worlds(
-                    &inst_dir,
-                    self.state.config.max_world_backups,
-                );
-            }
+        else {
+            self.state.is_launching = false;
+            self.state.installing_instance = None;
+            self.state.status_message = Some((
+                format!("Инстанс '{}' не найден", instance_id.as_str()),
+                true,
+            ));
+            return;
+        };
 
+        if !dry_run
+            && (self.state.running_instances.contains_key(&instance_id)
+                || self.state.launch_cancel_flags.contains_key(&instance_id))
+        {
+            self.state.is_launching = false;
+            return;
+        }
+
+        let cancel_launch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if !dry_run {
+            self.state
+                .launch_cancel_flags
+                .insert(instance_id.clone(), cancel_launch.clone());
             self.state
                 .game_session_starts
                 .insert(instance_id.clone(), std::time::Instant::now());
-
-            if self.state.config.discord_rpc_enabled {
-                let inst_name = inst.name.clone();
-                let inst_mc = inst.mc_version.clone();
-                let rpc_resp_tx = self.state.resp_sender.clone();
-                std::thread::spawn(move || {
-                    if let Some(mut rpc) = mq_launch::DiscordRpcClient::connect_default() {
-                        rpc.set_playing_activity(
-                            &inst_name,
-                            &format!("Minecraft {inst_mc}"),
-                            chrono::Utc::now().timestamp() as u64,
-                        );
-                        let _ = rpc_resp_tx.send(UiWorkerResponse::DiscordRpcConnected(rpc));
-                    }
-                });
-            }
-
             if self.state.config.mini_overlay_on_launch {
                 self.state.mini_overlay_active = true;
             }
+        }
 
-            let active_acc = self
-                .state
-                .accounts
-                .active_account()
-                .cloned()
-                .unwrap_or_else(|| mq_auth::create_offline_account("Player").unwrap());
-            let account_secrets: Vec<String> = self
-                .state
-                .accounts
-                .collect_secret_strings()
-                .into_iter()
-                .map(String::from)
-                .collect();
+        let active_acc = self
+            .state
+            .accounts
+            .active_account()
+            .cloned()
+            .unwrap_or_else(|| mq_auth::create_offline_account("Player").unwrap());
+        let account_secrets: Vec<String> = self
+            .state
+            .accounts
+            .collect_secret_strings()
+            .into_iter()
+            .map(String::from)
+            .collect();
 
-            spawn_monitored_task(
-                "launch_instance",
-                paths.clone(),
-                instance_id.clone(),
-                resp_tx.clone(),
-                async move {
-                    // 1. Check if installation is needed
-                    let resolved_path = inst_dir.join("resolved_version.json");
-                    let client_jar_path = inst_dir.join("client.jar");
-                    let is_installed = resolved_path.exists() && client_jar_path.exists();
+        spawn_monitored_task(
+            "launch_instance",
+            paths.clone(),
+            instance_id.clone(),
+            resp_tx.clone(),
+            async move {
+                use std::sync::atomic::Ordering;
 
-                    if !is_installed {
-                        let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
-                            instance_id.clone(),
-                        ));
-                        let req = mq_install::InstallRequest {
-                            mc_version: inst.mc_version.clone(),
-                            loader: inst.loader,
-                            loader_version: inst.loader_version.clone(),
-                            instance_dir: inst_dir.clone(),
-                            mock_base_url: configured_mock_base_url(),
-                        };
+                if cancel_launch.load(Ordering::SeqCst) {
+                    let _ = resp_tx.send(UiWorkerResponse::LaunchAborted(instance_id));
+                    return;
+                }
 
-                        match mq_install::install_game(
-                            &req,
-                            &paths,
-                            &net,
-                            &cas,
-                            &pool,
-                            &guard,
-                            Some(&bus),
-                        )
-                        .await
-                        {
-                            Ok(summary) => {
-                                bus.publish(mq_core::Event::PhaseCompleted {
-                                    phase: "install_game".to_string(),
-                                    elapsed_ms: summary.elapsed_ms,
-                                });
-                                let _ = resp_tx.send(UiWorkerResponse::InstanceInstallCompleted(
-                                    instance_id.clone(),
-                                ));
+                // 1. Check if installation is needed
+                let resolved_path = inst_dir.join("resolved_version.json");
+                let client_jar_path = inst_dir.join("client.jar");
+                let is_installed = resolved_path.exists() && client_jar_path.exists();
+
+                if !is_installed {
+                    let _ = resp_tx.send(UiWorkerResponse::InstanceInstallStarted(
+                        instance_id.clone(),
+                    ));
+                    let req = mq_install::InstallRequest {
+                        mc_version: inst.mc_version.clone(),
+                        loader: inst.loader,
+                        loader_version: inst.loader_version.clone(),
+                        instance_dir: inst_dir.clone(),
+                        mock_base_url: configured_mock_base_url(),
+                    };
+
+                    match mq_install::install_game(
+                        &req,
+                        &paths,
+                        &net,
+                        &cas,
+                        &pool,
+                        &guard,
+                        Some(&bus),
+                    )
+                    .await
+                    {
+                        Ok(summary) => {
+                            bus.publish(mq_core::Event::PhaseCompleted {
+                                phase: "install_game".to_string(),
+                                elapsed_ms: summary.elapsed_ms,
+                            });
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceInstallCompleted(
+                                instance_id.clone(),
+                            ));
+                        }
+                        Err(e) => {
+                            if cancel_launch.load(Ordering::SeqCst) {
+                                let _ = resp_tx.send(UiWorkerResponse::LaunchAborted(instance_id));
+                                return;
                             }
-                            Err(e) => {
-                                if guard.is_cancelled() {
-                                    return;
-                                }
-                                let err_msg =
-                                    format!("Ошибка скачивания инстанса {}: {e}", inst.name);
+                            if guard.is_cancelled() {
+                                let _ = resp_tx.send(UiWorkerResponse::DryRunFinished(instance_id));
+                                return;
+                            }
+                            let err_msg = format!("Ошибка скачивания инстанса {}: {e}", inst.name);
+                            bus.publish(mq_core::Event::TaskError {
+                                context: format!("Установка {}", inst.name),
+                                message: e.to_string(),
+                            });
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                instance_id,
+                                error: err_msg,
+                            });
+                            return;
+                        }
+                    }
+                }
+
+                if cancel_launch.load(Ordering::SeqCst) {
+                    let _ = resp_tx.send(UiWorkerResponse::LaunchAborted(instance_id));
+                    return;
+                }
+
+                // 2. Read resolved version metadata
+                let bytes = match std::fs::read(&resolved_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let err_msg = format!("Не удалось прочитать resolved_version.json: {e}");
+                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                            instance_id,
+                            error: err_msg,
+                        });
+                        return;
+                    }
+                };
+
+                let ver = match serde_json::from_slice::<mq_meta::ResolvedVersion>(&bytes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let err_msg = format!("Ошибка структуры resolved_version.json: {e}");
+                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                            instance_id,
+                            error: err_msg,
+                        });
+                        return;
+                    }
+                };
+
+                // 3. Ensure Ely.by authlib injector if Ely.by account is active
+                let authlib_path = if active_acc.kind == mq_auth::AccountKind::ElyBy {
+                    let client = mq_auth::ElyByClient::new();
+                    match client.ensure_authlib_injector(&paths).await {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            let cached_jar = paths.authlib_injector_jar();
+                            if cached_jar.is_file()
+                                && std::fs::metadata(&cached_jar).is_ok_and(|m| m.len() > 0)
+                            {
+                                tracing::warn!(
+                                    "ensure_authlib_injector failed ({e}), using existing cached jar"
+                                );
+                                Some(cached_jar)
+                            } else {
+                                let err_msg = format!(
+                                    "Не удалось подготовить Ely.by authlib-injector.jar (проверьте интернет-соединение): {e}"
+                                );
                                 bus.publish(mq_core::Event::TaskError {
-                                    context: format!("Установка {}", inst.name),
-                                    message: e.to_string(),
+                                    context: "Ely.by Authlib".to_string(),
+                                    message: err_msg.clone(),
                                 });
                                 let _ = resp_tx.send(UiWorkerResponse::InstanceError {
                                     instance_id,
@@ -590,195 +663,207 @@ impl MqApp {
                             }
                         }
                     }
+                } else {
+                    None
+                };
 
-                    // 2. Read resolved version metadata
-                    let bytes = match std::fs::read(&resolved_path) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            let err_msg =
-                                format!("Не удалось прочитать resolved_version.json: {e}");
-                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                instance_id,
-                                error: err_msg,
-                            });
-                            return;
+                if cancel_launch.load(Ordering::SeqCst) {
+                    let _ = resp_tx.send(UiWorkerResponse::LaunchAborted(instance_id));
+                    return;
+                }
+
+                // 4. Auto-backup worlds in background task before building launch command
+                if !dry_run && auto_backup_worlds {
+                    let backup_dir = inst_dir.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        mq_instances::auto_backup_instance_worlds(&backup_dir, max_world_backups)
+                    })
+                    .await
+                    {
+                        Ok(Ok(created)) if !created.is_empty() => {
+                            bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
+                                instance: instance_id.to_string(),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                                level: mq_core::GameLogLevel::Info,
+                                line: format!("[MQ] Создано автобэкапов миров: {}", created.len()),
+                            }));
                         }
-                    };
-
-                    let ver = match serde_json::from_slice::<mq_meta::ResolvedVersion>(&bytes) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let err_msg = format!("Ошибка структуры resolved_version.json: {e}");
-                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                instance_id,
-                                error: err_msg,
-                            });
-                            return;
-                        }
-                    };
-
-                    // 3. Ensure Ely.by authlib injector if Ely.by account is active
-                    let authlib_path = if active_acc.kind == mq_auth::AccountKind::ElyBy {
-                        let client = mq_auth::ElyByClient::new();
-                        match client.ensure_authlib_injector(&paths).await {
-                            Ok(p) => Some(p),
-                            Err(e) => {
-                                bus.publish(mq_core::Event::TaskError {
-                                    context: "Ely.by Authlib".to_string(),
-                                    message: format!("Не удалось загрузить скин-инжектор: {e}"),
-                                });
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    // 4. Discover and select compatible Java Virtual Machine
-                    let java_runtimes = mq_launch::discover_java_runtimes();
-                    let req_major = mq_launch::required_java_major_for_mc(
-                        &ver.mc_version,
-                        Some(ver.java_version.major_version),
-                    );
-
-                    let selected_java = match mq_launch::select_java_runtime(
-                        &java_runtimes,
-                        req_major,
-                        inst.java_path.as_deref(),
-                    ) {
-                        Ok(j) => j,
-                        Err(e) => {
-                            let err_msg = format!(
-                            "Подходящая версия Java не найдена (требуется Java {req_major}): {e}"
-                        );
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(instance = %instance_id, "auto_backup_instance_worlds failed: {e}");
                             bus.publish(mq_core::Event::TaskError {
-                                context: "Поиск Java".to_string(),
-                                message: err_msg.clone(),
+                                context: "Автобэкап миров".to_string(),
+                                message: e.to_string(),
                             });
-                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                instance_id,
-                                error: err_msg,
-                            });
-                            return;
                         }
-                    };
-
-                    // 5. Construct launch context and arguments
-                    let launch_ctx = mq_launch::LaunchContext {
-                        paths,
-                        instance: inst.clone(),
-                        version: ver,
-                        account: active_acc,
-                        java_bin: selected_java.path.clone(),
-                        authlib_injector_jar: authlib_path,
-                        extra_secrets_to_redact: Vec::new(),
-                    };
-
-                    let built_cmd = match mq_launch::build_launch_command_with_quick_play(
-                        &launch_ctx,
-                        quick_play.as_ref(),
-                    ) {
-                        Ok(cmd) => cmd,
                         Err(e) => {
-                            let err_msg = format!("Ошибка построения аргументов JVM: {e}");
-                            bus.publish(mq_core::Event::TaskError {
-                                context: "Запуск JVM".to_string(),
-                                message: err_msg.clone(),
-                            });
-                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                                instance_id,
-                                error: err_msg,
-                            });
-                            return;
-                        }
-                    };
-
-                    let mut all_secrets: Vec<String> = launch_ctx.collect_secrets();
-                    for s in account_secrets {
-                        if !s.is_empty() && !all_secrets.contains(&s) {
-                            all_secrets.push(s);
+                            tracing::warn!(instance = %instance_id, "auto_backup task panicked: {e}");
                         }
                     }
-                    let secret_refs: Vec<&str> = all_secrets.iter().map(String::as_str).collect();
+                }
 
-                    if dry_run {
-                        bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
-                            instance: instance_id.to_string(),
-                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                            level: mq_core::GameLogLevel::Info,
-                            line: format!(
-                                "DRY RUN COMMAND:\n{}",
-                                built_cmd.to_redacted_command_line(&secret_refs)
-                            ),
-                        }));
-                    } else {
-                        let _ = resp_tx.send(UiWorkerResponse::GameStarted(instance_id.clone()));
+                if cancel_launch.load(Ordering::SeqCst) {
+                    let _ = resp_tx.send(UiWorkerResponse::LaunchAborted(instance_id));
+                    return;
+                }
 
-                        // Ensure valid assets/indexes/<id>.json and lang assets before game starts
-                        let _ = mq_launch::ensure_prelaunch_assets(
-                            &launch_ctx.paths,
-                            &inst_dir,
-                            &launch_ctx.version,
-                        )
-                        .await;
+                // 5. Discover and select compatible Java Virtual Machine
+                let java_runtimes = mq_launch::discover_java_runtimes();
+                let req_major = mq_launch::required_java_major_for_mc(
+                    &ver.mc_version,
+                    Some(ver.java_version.major_version),
+                );
 
-                        // Auto-synchronize options.txt language
-                        let target_mc_lang =
-                            inst.mc_locale.as_deref().unwrap_or(default_mc_loc.as_str());
-                        let _ = mq_launch::sync_minecraft_options_lang(&inst_dir, target_mc_lang);
+                let selected_java = match mq_launch::select_java_runtime(
+                    &java_runtimes,
+                    req_major,
+                    inst.java_path.as_deref(),
+                ) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        let err_msg = format!(
+                            "Подходящая версия Java не найдена (требуется Java {req_major}): {e}"
+                        );
+                        bus.publish(mq_core::Event::TaskError {
+                            context: "Поиск Java".to_string(),
+                            message: err_msg.clone(),
+                        });
+                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                            instance_id,
+                            error: err_msg,
+                        });
+                        return;
+                    }
+                };
 
-                        bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
-                            instance: instance_id.to_string(),
-                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                            level: mq_core::GameLogLevel::Info,
-                            line: format!(
-                                "[MQ] Запуск игры '{}' (MC {}, Java {}, Язык: {})...",
-                                inst.name,
-                                inst.mc_version,
-                                selected_java.full_version,
-                                target_mc_lang
-                            ),
-                        }));
+                // 6. Construct launch context and arguments
+                let launch_ctx = mq_launch::LaunchContext {
+                    paths,
+                    instance: inst.clone(),
+                    version: ver,
+                    account: active_acc,
+                    java_bin: selected_java.path.clone(),
+                    authlib_injector_jar: authlib_path,
+                    extra_secrets_to_redact: Vec::new(),
+                };
 
-                        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
-                        let pid_resp_tx = resp_tx.clone();
-                        let pid_inst = instance_id.clone();
-                        tokio::spawn(async move {
-                            if let Ok(pid) = pid_rx.await {
+                let built_cmd = match mq_launch::build_launch_command_with_quick_play(
+                    &launch_ctx,
+                    quick_play.as_ref(),
+                ) {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        let err_msg = format!("Ошибка построения аргументов JVM: {e}");
+                        bus.publish(mq_core::Event::TaskError {
+                            context: "Запуск JVM".to_string(),
+                            message: err_msg.clone(),
+                        });
+                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                            instance_id,
+                            error: err_msg,
+                        });
+                        return;
+                    }
+                };
+
+                let mut all_secrets: Vec<String> = launch_ctx.collect_secrets();
+                for s in account_secrets {
+                    if !s.is_empty() && !all_secrets.contains(&s) {
+                        all_secrets.push(s);
+                    }
+                }
+                let secret_refs: Vec<&str> = all_secrets.iter().map(String::as_str).collect();
+
+                if dry_run {
+                    bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
+                        instance: instance_id.to_string(),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                        level: mq_core::GameLogLevel::Info,
+                        line: format!(
+                            "DRY RUN COMMAND:\n{}",
+                            built_cmd.to_redacted_command_line(&secret_refs)
+                        ),
+                    }));
+                    let _ = resp_tx.send(UiWorkerResponse::DryRunFinished(instance_id));
+                } else {
+                    if cancel_launch.load(Ordering::SeqCst) {
+                        let _ = resp_tx.send(UiWorkerResponse::LaunchAborted(instance_id));
+                        return;
+                    }
+
+                    let _ = resp_tx.send(UiWorkerResponse::GameStarted(instance_id.clone()));
+
+                    // Ensure valid assets/indexes/<id>.json and lang assets before game starts
+                    let _ = mq_launch::ensure_prelaunch_assets(
+                        &launch_ctx.paths,
+                        &inst_dir,
+                        &launch_ctx.version,
+                    )
+                    .await;
+
+                    if cancel_launch.load(Ordering::SeqCst) {
+                        let _ = resp_tx.send(UiWorkerResponse::LaunchAborted(instance_id));
+                        return;
+                    }
+
+                    // Auto-synchronize options.txt language
+                    let target_mc_lang =
+                        inst.mc_locale.as_deref().unwrap_or(default_mc_loc.as_str());
+                    let _ = mq_launch::sync_minecraft_options_lang(&inst_dir, target_mc_lang);
+
+                    bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
+                        instance: instance_id.to_string(),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                        level: mq_core::GameLogLevel::Info,
+                        line: format!(
+                            "[MQ] Запуск игры '{}' (MC {}, Java {}, Язык: {})...",
+                            inst.name, inst.mc_version, selected_java.full_version, target_mc_lang
+                        ),
+                    }));
+
+                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+                    let pid_resp_tx = resp_tx.clone();
+                    let pid_inst = instance_id.clone();
+                    let pid_cancel = cancel_launch.clone();
+                    tokio::spawn(async move {
+                        if let Ok(pid) = pid_rx.await {
+                            if pid_cancel.load(Ordering::SeqCst) {
+                                let _ = mq_launch::kill_process_tree(pid);
+                            } else {
                                 let _ = pid_resp_tx.send(UiWorkerResponse::GamePid {
                                     instance_id: pid_inst,
                                     pid,
                                 });
                             }
-                        });
+                        }
+                    });
 
-                        let exit_code = match mq_launch::spawn_and_stream_game_with_pid(
-                            &built_cmd,
-                            instance_id.as_str(),
-                            all_secrets,
-                            Some(bus.clone()),
-                            Some(pid_tx),
-                        )
-                        .await
-                        {
-                            Ok(status) => mq_launch::exit_status_code(&status),
-                            Err(e) => {
-                                bus.publish(mq_core::Event::TaskError {
-                                    context: "Процесс игры".to_string(),
-                                    message: format!("Ошибка процесса: {e}"),
-                                });
-                                -1
-                            }
-                        };
+                    let exit_code = match mq_launch::spawn_and_stream_game_with_pid(
+                        &built_cmd,
+                        instance_id.as_str(),
+                        all_secrets,
+                        Some(bus.clone()),
+                        Some(pid_tx),
+                    )
+                    .await
+                    {
+                        Ok(status) => mq_launch::exit_status_code(&status),
+                        Err(e) => {
+                            bus.publish(mq_core::Event::TaskError {
+                                context: "Процесс игры".to_string(),
+                                message: format!("Ошибка процесса: {e}"),
+                            });
+                            -1
+                        }
+                    };
 
-                        let _ = resp_tx.send(UiWorkerResponse::GameExited {
-                            instance_id,
-                            exit_code,
-                        });
-                    }
-                },
-            );
-        }
+                    let _ = resp_tx.send(UiWorkerResponse::GameExited {
+                        instance_id,
+                        exit_code,
+                    });
+                }
+            },
+        );
     }
 
     fn handle_worker_commands(&mut self) {
@@ -841,17 +926,21 @@ impl MqApp {
                     let resp_tx = self.state.resp_sender.clone();
 
                     tokio::spawn(async move {
-                        if let Ok(rep) =
-                            mq_mods::scan_mods_directory(&mods_dir, &pool, &guard).await
-                        {
-                            let _ = resp_tx.send(UiWorkerResponse::ScanModsResults {
-                                mods: rep.mods,
-                                conflicts: rep.conflicts,
-                            });
-                            bus.publish(mq_core::Event::PhaseCompleted {
-                                phase: "mods_scan".to_string(),
-                                elapsed_ms: rep.scan_duration_ms,
-                            });
+                        match mq_mods::scan_mods_directory(&mods_dir, &pool, &guard).await {
+                            Ok(rep) => {
+                                let _ = resp_tx.send(UiWorkerResponse::ScanModsResults {
+                                    mods: rep.mods,
+                                    conflicts: rep.conflicts,
+                                });
+                                bus.publish(mq_core::Event::PhaseCompleted {
+                                    phase: "mods_scan".to_string(),
+                                    elapsed_ms: rep.scan_duration_ms,
+                                });
+                            }
+                            Err(e) => {
+                                let _ =
+                                    resp_tx.send(UiWorkerResponse::ScanModsFailed(e.to_string()));
+                            }
                         }
                     });
                 }
@@ -1019,7 +1108,7 @@ impl MqApp {
                     let resp_tx = self.state.resp_sender.clone();
                     if let Some(inst) = inst_opt {
                         tokio::spawn(async move {
-                            if let Ok(report) = mq_mods::preflight_check_mods(
+                            match mq_mods::preflight_check_mods(
                                 &mods_dir,
                                 inst.loader,
                                 &inst.mc_version,
@@ -1028,12 +1117,22 @@ impl MqApp {
                             )
                             .await
                             {
-                                let _ = resp_tx.send(UiWorkerResponse::PreflightResult {
-                                    instance_id,
-                                    report,
-                                });
+                                Ok(report) => {
+                                    let _ = resp_tx.send(UiWorkerResponse::PreflightResult {
+                                        instance_id,
+                                        report,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = resp_tx
+                                        .send(UiWorkerResponse::PreflightFailed(e.to_string()));
+                                }
                             }
                         });
+                    } else {
+                        let _ = resp_tx.send(UiWorkerResponse::PreflightFailed(
+                            "Инстанс не найден".to_string(),
+                        ));
                     }
                 }
                 UiWorkerCommand::AutoFixPreflight {
@@ -1162,17 +1261,45 @@ impl MqApp {
                                 }
                             },
                         );
+                    } else {
+                        self.state.installing_instance = None;
+                        self.state.installing_operation = None;
+                        self.state.is_launching = false;
+                        self.state.status_message = Some((
+                            format!("Инстанс '{}' не найден", instance_id.as_str()),
+                            true,
+                        ));
                     }
                 }
                 UiWorkerCommand::StopGame { instance_id } => {
                     self.state.stopped_by_user.insert(instance_id.clone());
+                    if let Some(flag) = self.state.launch_cancel_flags.get(&instance_id) {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     if let Some(Some(pid)) = self.state.running_instances.get(&instance_id).copied()
                     {
                         tokio::spawn(async move {
                             let _ = mq_launch::kill_process_tree(pid);
                         });
+                        self.state.status_message = Some(("Остановка игры...".to_string(), false));
+                    } else {
+                        let had_prelaunch =
+                            self.state.launch_cancel_flags.contains_key(&instance_id);
+                        let had_pending =
+                            self.state.running_instances.remove(&instance_id).is_some();
+                        if had_prelaunch || had_pending {
+                            self.state.is_launching = false;
+                            self.state.game_running = !self.state.running_instances.is_empty();
+                            self.state.running_instance =
+                                self.state.running_instances.keys().next().cloned();
+                            self.state.pending_game_exited.push((instance_id, 0));
+                            self.state.status_message =
+                                Some(("Отмена запуска игры...".to_string(), false));
+                        } else {
+                            self.state.status_message =
+                                Some(("Остановка игры...".to_string(), false));
+                        }
                     }
-                    self.state.status_message = Some(("Остановка игры...".to_string(), false));
                 }
                 UiWorkerCommand::CancelDownload => {
                     self.state.cancel_epoch.cancel_and_advance();
@@ -1282,6 +1409,14 @@ impl MqApp {
                                 }
                             },
                         );
+                    } else {
+                        self.state.installing_instance = None;
+                        self.state.installing_operation = None;
+                        self.state.is_launching = false;
+                        self.state.status_message = Some((
+                            format!("Инстанс '{}' не найден", instance_id.as_str()),
+                            true,
+                        ));
                     }
                 }
                 UiWorkerCommand::LaunchInstance {
@@ -1294,6 +1429,7 @@ impl MqApp {
                     instance_id,
                     quick_play,
                 } => {
+                    self.state.is_launching = true;
                     self.launch_instance_core(instance_id, false, Some(quick_play));
                 }
                 UiWorkerCommand::AutoInstallMissingDeps {
@@ -1310,9 +1446,9 @@ impl MqApp {
                         .iter()
                         .find(|i| i.id == instance_id)
                         .cloned();
-                    self.state.is_auto_fixing_deps = true;
-                    tokio::spawn(async move {
-                        if let Some(inst) = inst {
+                    if let Some(inst) = inst {
+                        self.state.is_auto_fixing_deps = true;
+                        tokio::spawn(async move {
                             let report = mq_mods::auto_install_missing_dependencies(
                                 &mods_dir,
                                 &missing_ids,
@@ -1326,8 +1462,14 @@ impl MqApp {
                                 instance_id,
                                 report,
                             });
-                        }
-                    });
+                        });
+                    } else {
+                        self.state.is_auto_fixing_deps = false;
+                        let _ = resp_tx.send(UiWorkerResponse::AutoFixDepsDone {
+                            instance_id,
+                            report: Err("Инстанс не найден".to_string()),
+                        });
+                    }
                 }
                 UiWorkerCommand::CheckModpackUpdate { instance_id } => {
                     let resp_tx = self.state.resp_sender.clone();
@@ -1701,8 +1843,29 @@ impl MqApp {
                     let resp_tx = self.state.resp_sender.clone();
                     tokio::spawn(async move {
                         let mgr = mq_update::UpdateManager::new("MrQuster", "MQ-Launcher");
-                        match mgr.download_and_install(&asset, |_d, _t| {}).await {
+                        let prog_tx = resp_tx.clone();
+                        let last_permille =
+                            std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                        match mgr
+                            .download_and_install(&asset, move |done, total| {
+                                let frac = match total {
+                                    Some(t) if t > 0 => crate::state::safe_progress_ratio(done, t),
+                                    _ => 0.0,
+                                };
+                                let permille = (frac * 1000.0) as u32;
+                                let prev = last_permille.load(std::sync::atomic::Ordering::Relaxed);
+                                if permille >= prev.saturating_add(5) || frac >= 1.0 {
+                                    last_permille
+                                        .store(permille, std::sync::atomic::Ordering::Relaxed);
+                                    let _ = prog_tx
+                                        .try_send(UiWorkerResponse::UpdateDownloadProgress(frac));
+                                }
+                            })
+                            .await
+                        {
                             Ok(_path) => {
+                                let _ =
+                                    resp_tx.try_send(UiWorkerResponse::UpdateDownloadProgress(1.0));
                                 if let Err(e) = mq_update::UpdateManager::restart_process(&[]) {
                                     let _ = resp_tx.send(UiWorkerResponse::UpdateDownloadFailed(
                                         format!(
@@ -2139,6 +2302,7 @@ impl MqApp {
             active_dag_tasks,
             cpu_snapshot: self.state.latest_cpu.clone(),
             watchdog_violations: self.state.watchdog.violation_count(),
+            lang_code: self.state.config.launcher_locale.clone(),
         }
     }
 
@@ -2575,6 +2739,71 @@ impl MqApp {
         }
     }
 
+    fn sync_discord_rpc(&mut self) {
+        if !self.state.config.discord_rpc_enabled || !self.state.game_running {
+            self.state.discord_rpc_dirty = false;
+            if let Some(rpc) = self.discord_rpc.take() {
+                // `DiscordRpcClient::drop` calls `clear_activity()` exactly once off the UI thread.
+                std::thread::spawn(move || drop(rpc));
+            }
+            if let Some(rpc) = self.state.pending_discord_rpc.take() {
+                std::thread::spawn(move || drop(rpc));
+            }
+            return;
+        }
+
+        if self.state.discord_rpc_busy {
+            self.state.discord_rpc_dirty = true;
+            return;
+        }
+
+        let target_id = self
+            .state
+            .running_instance
+            .clone()
+            .or_else(|| self.state.running_instances.keys().next().cloned());
+        let Some(inst_id) = target_id else {
+            return;
+        };
+        let Some(inst) = self
+            .state
+            .instances
+            .iter()
+            .find(|i| i.id == inst_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let elapsed_secs = self
+            .state
+            .game_session_starts
+            .get(&inst_id)
+            .map(|t| t.elapsed().as_secs() as i64)
+            .unwrap_or(0);
+        let start_ts = chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(elapsed_secs)
+            .max(0) as u64;
+
+        // Move any existing client into the worker thread so replacing `self.discord_rpc`
+        // never triggers a stale `Drop::clear_activity()` race.
+        let existing_rpc = self.discord_rpc.take();
+        let inst_name = inst.name;
+        let inst_mc = inst.mc_version;
+        let resp_tx = self.state.resp_sender.clone();
+        self.state.discord_rpc_busy = true;
+        self.state.discord_rpc_dirty = false;
+
+        std::thread::spawn(move || {
+            let mut client = existing_rpc.or_else(mq_launch::DiscordRpcClient::connect_default);
+            if let Some(ref mut rpc) = client {
+                rpc.set_playing_activity(&inst_name, &format!("Minecraft {inst_mc}"), start_ts);
+            }
+            let _ = resp_tx.send(UiWorkerResponse::DiscordRpcFinished(client));
+        });
+    }
+
     /// Drains async worker events, pending UI commands, and single-instance `.mrpack` IPC.
     /// Runs even when the window is minimized (`0x0` viewport on Windows) so downloads,
     /// launches, and external `.mrpack` open requests never stall while minimized.
@@ -2582,6 +2811,8 @@ impl MqApp {
         let had_events = !self.state.resp_receiver.is_empty() || !self.state.event_bus.is_empty();
         self.state.drain_events();
         self.handle_worker_commands();
+        self.settings_view
+            .apply_pending_update_events(&mut self.state);
         if had_events {
             ctx.request_repaint();
         }
@@ -2604,27 +2835,49 @@ impl MqApp {
         }
 
         if let Some(rpc) = self.state.pending_discord_rpc.take() {
-            self.discord_rpc = Some(rpc);
+            if let Some(old) = self.discord_rpc.replace(rpc) {
+                std::thread::spawn(move || drop(old));
+            }
         }
 
+        let mut rpc_needs_update = self.state.discord_rpc_dirty
+            || (!self.state.config.discord_rpc_enabled && self.discord_rpc.is_some());
+
         for _inst_id in self.state.pending_game_started.drain(..) {
-            if self.state.config.hide_on_launch {
-                self.window_hidden_for_game = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            rpc_needs_update = true;
+            let action = if self.state.config.theme.launch_action != mq_core::LaunchAction::KeepOpen
+            {
+                self.state.config.theme.launch_action
+            } else if self.state.config.hide_on_launch {
+                mq_core::LaunchAction::Minimize
+            } else {
+                mq_core::LaunchAction::KeepOpen
+            };
+            match action {
+                mq_core::LaunchAction::KeepOpen => {}
+                mq_core::LaunchAction::Minimize => {
+                    self.window_hidden_for_game = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+                mq_core::LaunchAction::HideUntilExit => {
+                    self.window_hidden_for_game = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
             }
         }
 
         for (_inst_id, _code) in self.state.pending_game_exited.drain(..) {
-            if self.window_hidden_for_game {
+            rpc_needs_update = true;
+            if !self.state.game_running && self.window_hidden_for_game {
                 self.window_hidden_for_game = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
-            if !self.state.game_running {
-                if let Some(mut rpc) = self.discord_rpc.take() {
-                    rpc.clear_activity();
-                }
-            }
+        }
+
+        if rpc_needs_update {
+            self.sync_discord_rpc();
         }
     }
 
@@ -2781,10 +3034,6 @@ impl MqApp {
                     let _ = self.state.accounts.save(&self.state.paths);
                 }
                 SidebarAction::OpenAccountsTab => self.current_tab = NavTab::Accounts,
-                SidebarAction::ChangeLanguage(code) => {
-                    self.state.config.launcher_locale = code;
-                    let _ = self.state.config.save(&self.state.paths);
-                }
             }
         }
 

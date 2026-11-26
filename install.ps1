@@ -5,7 +5,7 @@
 #  Advanced:
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Portable
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Uninstall
-#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Version 2.8.4 -Silent
+#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Version 2.8.5 -Silent
 # ==============================================================================
 
 function Invoke-MqInstaller {
@@ -381,6 +381,31 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
         } catch {
             if ($BaseUrl) {
                 # Local test servers may not provide .minisig files
+                return
+            }
+            $isNotFound = $false
+            $ex = $_.Exception
+            if ($ex -and $ex.PSObject.Properties['Response'] -and $ex.Response) {
+                try {
+                    if ([int]$ex.Response.StatusCode -eq 404) {
+                        $isNotFound = $true
+                    }
+                } catch {}
+            }
+            if (-not $isNotFound -and $ex -and $ex.InnerException -and $ex.InnerException.PSObject.Properties['Response'] -and $ex.InnerException.Response) {
+                try {
+                    if ([int]$ex.InnerException.Response.StatusCode -eq 404) {
+                        $isNotFound = $true
+                    }
+                } catch {}
+            }
+            if (-not $isNotFound -and "$_" -match '(404|Not\s*Found|Could not find|Cannot find path)') {
+                $isNotFound = $true
+            }
+            if ($isNotFound) {
+                if (-not $Silent) {
+                    Write-Host "[WARN] Minisign signature not found at $SigUrl; continuing with HTTPS + SHA256SUMS verification" -ForegroundColor Yellow
+                }
                 return
             }
             throw "Failed to download Minisign signature from $SigUrl : $_"

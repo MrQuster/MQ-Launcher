@@ -373,6 +373,149 @@ pub fn tr<'a>(key: &'a str, lang_code: &str) -> &'a str {
         ("settings_mc_language", Language::ChineseSimplified) => "默认 Minecraft 语言",
         ("settings_mc_language", Language::Japanese) => "デフォルトのMinecraft言語",
 
+        ("settings_network", Language::Ukrainian) => "Система і мережа",
+        ("settings_network", Language::Russian) => "Система и сеть",
+        ("settings_network", Language::English) => "System & Network",
+        ("settings_network", Language::Polish) => "System i sieć",
+        ("settings_network", Language::German) => "System & Netzwerk",
+        ("settings_network", Language::Spanish) => "Sistema y red",
+        ("settings_network", Language::French) => "Système et réseau",
+        ("settings_network", Language::Belarusian) => "Сістэма і сетка",
+        ("settings_network", Language::Kazakh) => "Жүйе және желі",
+        ("settings_network", Language::ChineseSimplified) => "系统与网络",
+        ("settings_network", Language::Japanese) => "システムとネットワーク",
+
+        ("settings_updates", Language::Ukrainian) => "Оновлення",
+        ("settings_updates", Language::Russian) => "Обновления",
+        ("settings_updates", Language::English) => "Updates",
+        ("settings_updates", Language::Polish) => "Aktualizacje",
+        ("settings_updates", Language::German) => "Updates",
+        ("settings_updates", Language::Spanish) => "Actualizaciones",
+        ("settings_updates", Language::French) => "Mises à jour",
+        ("settings_updates", Language::Belarusian) => "Абнаўленні",
+        ("settings_updates", Language::Kazakh) => "Жаңартулар",
+        ("settings_updates", Language::ChineseSimplified) => "更新",
+        ("settings_updates", Language::Japanese) => "アップデート",
+
+        ("settings_about", Language::Ukrainian) => "Про програму",
+        ("settings_about", Language::Russian) => "О программе",
+        ("settings_about", Language::English) => "About",
+        ("settings_about", Language::Polish) => "O programie",
+        ("settings_about", Language::German) => "Über",
+        ("settings_about", Language::Spanish) => "Acerca de",
+        ("settings_about", Language::French) => "À propos",
+        ("settings_about", Language::Belarusian) => "Пра праграму",
+        ("settings_about", Language::Kazakh) => "Бағдарлама туралы",
+        ("settings_about", Language::ChineseSimplified) => "关于",
+        ("settings_about", Language::Japanese) => "このアプリについて",
+
+        // Sidebar groups & footer
+        ("nav_group_library", Language::Ukrainian) => "Бібліотека",
+        ("nav_group_library", Language::Russian) => "Библиотека",
+        ("nav_group_library", Language::English) => "Library",
+        ("nav_group_library", Language::Polish) => "Biblioteka",
+        ("nav_group_library", Language::German) => "Bibliothek",
+        ("nav_group_library", Language::Spanish) => "Biblioteca",
+        ("nav_group_library", Language::French) => "Bibliothèque",
+        ("nav_group_library", Language::Belarusian) => "Бібліятэка",
+        ("nav_group_library", Language::Kazakh) => "Кітапхана",
+        ("nav_group_library", Language::ChineseSimplified) => "库",
+        ("nav_group_library", Language::Japanese) => "ライブラリ",
+
+        ("nav_group_activity", Language::Ukrainian) => "Активність",
+        ("nav_group_activity", Language::Russian) => "Активность",
+        ("nav_group_activity", Language::English) => "Activity",
+        ("nav_group_activity", Language::Polish) => "Aktywność",
+        ("nav_group_activity", Language::German) => "Aktivität",
+        ("nav_group_activity", Language::Spanish) => "Actividad",
+        ("nav_group_activity", Language::French) => "Activité",
+        ("nav_group_activity", Language::Belarusian) => "Актыўнасць",
+        ("nav_group_activity", Language::Kazakh) => "Белсенділік",
+        ("nav_group_activity", Language::ChineseSimplified) => "活动",
+        ("nav_group_activity", Language::Japanese) => "アクティビティ",
+
+        ("nav_group_system", Language::Ukrainian) => "Система",
+        ("nav_group_system", Language::Russian) => "Система",
+        ("nav_group_system", Language::English) => "System",
+        ("nav_group_system", Language::Polish) => "System",
+        ("nav_group_system", Language::German) => "System",
+        ("nav_group_system", Language::Spanish) => "Sistema",
+        ("nav_group_system", Language::French) => "Système",
+        ("nav_group_system", Language::Belarusian) => "Сістэма",
+        ("nav_group_system", Language::Kazakh) => "Жүйе",
+        ("nav_group_system", Language::ChineseSimplified) => "系统",
+        ("nav_group_system", Language::Japanese) => "システム",
+
+        ("sidebar_expand", Language::English) => "Expand menu",
+        ("sidebar_expand", Language::Ukrainian) => "Розгорнути меню",
+        ("sidebar_expand", _) => "Развернуть меню",
+
+        ("sidebar_collapse", Language::English) => "Collapse menu",
+        ("sidebar_collapse", Language::Ukrainian) => "Згорнути меню",
+        ("sidebar_collapse", _) => "Свернуть меню",
+
+        ("sidebar_update_available", Language::English) => "Update available",
+        ("sidebar_update_available", Language::Ukrainian) => "Доступне оновлення",
+        ("sidebar_update_available", _) => "Доступно обновление",
+
+        ("sidebar_manage_accounts", Language::English) => "Manage accounts",
+        ("sidebar_manage_accounts", Language::Ukrainian) => "Керування акаунтами",
+        ("sidebar_manage_accounts", _) => "Управление аккаунтами",
+
+        ("sidebar_guest", Language::English) => "Guest",
+        ("sidebar_guest", Language::Ukrainian) => "Гість",
+        ("sidebar_guest", _) => "Гость",
+
+        ("sidebar_offline", Language::English) => "Offline",
+        ("sidebar_offline", Language::Ukrainian) => "Офлайн",
+        ("sidebar_offline", _) => "Офлайн",
+
+        ("sidebar_guest_offline", Language::English) => "Guest (Offline)",
+        ("sidebar_guest_offline", Language::Ukrainian) => "Гість (Офлайн)",
+        ("sidebar_guest_offline", _) => "Гость (Офлайн)",
+
+        // Bottom HUD telemetry
+        ("hud_cpu", Language::English) => "CPU",
+        ("hud_cpu", Language::Ukrainian) => "Процесор",
+        ("hud_cpu", _) => "Процессор",
+
+        ("hud_mem", Language::English) => "RAM",
+        ("hud_mem", Language::Ukrainian) => "Пам'ять",
+        ("hud_mem", _) => "Память",
+
+        ("hud_mib", Language::English) => "MiB",
+        ("hud_mib", _) => "МБ",
+
+        ("hud_files_per_sec", Language::English) => "files/s",
+        ("hud_files_per_sec", Language::Ukrainian) => "файлів/с",
+        ("hud_files_per_sec", _) => "файлов/с",
+
+        ("hud_files_short", Language::English) => "f/s",
+        ("hud_files_short", _) => "ф/с",
+
+        ("hud_mib_per_sec", Language::English) => "MiB/s",
+        ("hud_mib_per_sec", _) => "МБ/с",
+
+        ("hud_downloads_none", Language::English) => "Downloads: idle",
+        ("hud_downloads_none", Language::Ukrainian) => "Завантаження: немає активних",
+        ("hud_downloads_none", _) => "Загрузки: нет активных",
+
+        ("hud_downloads_label", Language::English) => "Downloads",
+        ("hud_downloads_label", Language::Ukrainian) => "Завантаження",
+        ("hud_downloads_label", _) => "Загрузки",
+
+        ("hud_active_word", Language::English) => "active",
+        ("hud_active_word", Language::Ukrainian) => "активних",
+        ("hud_active_word", _) => "активных",
+
+        ("hud_none_short", Language::English) => "idle",
+        ("hud_none_short", Language::Ukrainian) => "немає активних",
+        ("hud_none_short", _) => "нет активных",
+
+        ("hud_active_short", Language::English) => "act.",
+        ("hud_active_short", Language::Ukrainian) => "акт.",
+        ("hud_active_short", _) => "акт.",
+
         // Default fallbacks
         _ => key,
     }

@@ -57,8 +57,31 @@ const WINDOWS_MONOSPACE_FILES: &[&str] = &[
     "cour.ttf",
 ];
 
+/// Optional CJK system fallback font candidates on Linux (only loaded if present on disk).
+pub const CJK_FALLBACK_FONT_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/TTF/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/droid/DroidSansFallbackFull.ttf",
+];
+
+const WINDOWS_CJK_FILES: &[&str] = &[
+    "msyh.ttc",
+    "msyh.ttf",
+    "YuGothR.ttc",
+    "YuGothM.ttc",
+    "meiryo.ttc",
+    "simsun.ttc",
+    "malgun.ttf",
+];
+
 const SYSTEM_PROPORTIONAL_KEY: &str = "mq_system_proportional";
 const SYSTEM_MONOSPACE_KEY: &str = "mq_system_monospace";
+const SYSTEM_CJK_FALLBACK_KEY: &str = "mq_system_cjk_fallback";
 
 /// Summary of the proportional and monospace fonts selected during startup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +90,8 @@ pub struct LoadedFontSummary {
     pub proportional_path: Option<PathBuf>,
     /// Path to the loaded system monospace font, or `None` if using `egui` built-in fallback.
     pub monospace_path: Option<PathBuf>,
+    /// Path to an optional CJK fallback font, or `None` if unavailable on this host.
+    pub cjk_fallback_path: Option<PathBuf>,
 }
 
 impl LoadedFontSummary {
@@ -96,7 +121,13 @@ impl LoadedFontSummary {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or("egui-builtin-monospace");
-        format!("proportional={prop}, monospace={mono}")
+        let cjk = self
+            .cjk_fallback_path
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("none");
+        format!("proportional={prop}, monospace={mono}, cjk={cjk}")
     }
 }
 
@@ -152,6 +183,27 @@ pub fn discover_windows_monospace_fonts(
         .unwrap_or_else(|| PathBuf::from("C:\\Windows\\Fonts"));
     for file in WINDOWS_MONOSPACE_FILES {
         push_unique(&mut out, sys_fonts.join(file));
+    }
+    out
+}
+
+/// Builds ordered optional CJK fallback font candidate paths on Windows.
+pub fn discover_windows_cjk_fonts(
+    windir: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let sys_fonts = windir
+        .map(|d| d.join("Fonts"))
+        .unwrap_or_else(|| PathBuf::from("C:\\Windows\\Fonts"));
+    for file in WINDOWS_CJK_FILES {
+        push_unique(&mut out, sys_fonts.join(file));
+    }
+    if let Some(local) = local_app_data {
+        let user_fonts = local.join("Microsoft").join("Windows").join("Fonts");
+        for file in WINDOWS_CJK_FILES {
+            push_unique(&mut out, user_fonts.join(file));
+        }
     }
     out
 }
@@ -218,7 +270,7 @@ pub fn build_font_definitions() -> (FontDefinitions, LoadedFontSummary) {
     let mut defs = FontDefinitions::default();
     let mut summary = LoadedFontSummary::default();
 
-    let (prop_candidates, mono_candidates) = if cfg!(target_os = "windows") {
+    let (prop_candidates, mono_candidates, cjk_candidates) = if cfg!(target_os = "windows") {
         let windir = env::var_os("WINDIR")
             .or_else(|| env::var_os("SystemRoot"))
             .map(PathBuf::from);
@@ -226,6 +278,7 @@ pub fn build_font_definitions() -> (FontDefinitions, LoadedFontSummary) {
         (
             discover_windows_proportional_fonts(windir.as_deref(), local_app_data.as_deref()),
             discover_windows_monospace_fonts(windir.as_deref(), local_app_data.as_deref()),
+            discover_windows_cjk_fonts(windir.as_deref(), local_app_data.as_deref()),
         )
     } else {
         let prop: Vec<PathBuf> = PROPORTIONAL_FONT_CANDIDATES
@@ -239,7 +292,11 @@ pub fn build_font_definitions() -> (FontDefinitions, LoadedFontSummary) {
                 push_unique(&mut mono, PathBuf::from(static_path));
             }
         }
-        (prop, mono)
+        let cjk: Vec<PathBuf> = CJK_FALLBACK_FONT_CANDIDATES
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        (prop, mono, cjk)
     };
 
     if let Some((path, bytes)) = load_first_available_font(&prop_candidates) {
@@ -269,6 +326,22 @@ pub fn build_font_definitions() -> (FontDefinitions, LoadedFontSummary) {
             .or_default()
             .push(SYSTEM_MONOSPACE_KEY.to_owned());
         summary.monospace_path = Some(path);
+    }
+
+    if let Some((path, bytes)) = load_first_available_font(&cjk_candidates) {
+        defs.font_data.insert(
+            SYSTEM_CJK_FALLBACK_KEY.to_owned(),
+            Arc::new(FontData::from_owned(bytes)),
+        );
+        defs.families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .push(SYSTEM_CJK_FALLBACK_KEY.to_owned());
+        defs.families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .push(SYSTEM_CJK_FALLBACK_KEY.to_owned());
+        summary.cjk_fallback_path = Some(path);
     }
 
     (defs, summary)

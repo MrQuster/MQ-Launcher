@@ -538,8 +538,11 @@ pub fn parse_wrapper_cmd(
                 }
             }
             '\\' => {
-                if let Some(next) = chars.next() {
-                    cur.push(next);
+                if in_quote == Some('"') && chars.peek() == Some(&'"') {
+                    chars.next();
+                    cur.push('"');
+                } else {
+                    cur.push('\\');
                 }
             }
             c if c.is_whitespace() && in_quote.is_none() => {
@@ -1131,7 +1134,7 @@ fn find_jvm_args_end(args: &[String]) -> usize {
     i
 }
 
-fn is_java_launcher_binary(program: &Path) -> bool {
+pub(crate) fn is_java_launcher_binary(program: &Path) -> bool {
     let raw = program.to_string_lossy();
     let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
     let lower = base.to_ascii_lowercase();
@@ -1496,6 +1499,21 @@ mod tests {
         assert!(is_linux_only_wrapper("/usr/bin/prime-run"));
         assert!(is_linux_only_wrapper("env DRI_PRIME=1 gamemoderun"));
         assert!(!is_linux_only_wrapper(r"C:\Tools\wrapper.exe --fast"));
+    }
+
+    #[test]
+    fn parse_wrapper_cmd_preserves_windows_backslashes_and_escapes_quoted_quotes() {
+        let (env, prog, args) = parse_wrapper_cmd(r"C:\Tools\wrapper.exe --fast");
+        assert!(env.is_empty());
+        assert_eq!(prog.as_deref(), Some(r"C:\Tools\wrapper.exe"));
+        assert_eq!(args, vec!["--fast"]);
+
+        let (env2, prog2, args2) = parse_wrapper_cmd(
+            r#"FOO="C:\My Dir\val" "C:\Program Files\Wrapper\wrap.exe" --msg "say \"hi\"""#,
+        );
+        assert_eq!(env2.get("FOO").map(String::as_str), Some(r"C:\My Dir\val"));
+        assert_eq!(prog2.as_deref(), Some(r"C:\Program Files\Wrapper\wrap.exe"));
+        assert_eq!(args2, vec!["--msg", r#"say "hi""#]);
     }
 
     #[test]

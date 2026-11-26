@@ -59,14 +59,76 @@ pub struct SettingsView {
     pub uninstall_purge_data: bool,
 }
 
+#[inline]
+const fn tr_set(is_en: bool, ru: &'static str, en: &'static str) -> &'static str {
+    if is_en {
+        en
+    } else {
+        ru
+    }
+}
+
+fn is_latin_or_cyrillic_only(s: &str) -> bool {
+    s.chars().all(|c| {
+        c.is_ascii()
+            || ('\u{00A0}'..='\u{024F}').contains(&c)
+            || ('\u{0400}'..='\u{04FF}').contains(&c)
+            || matches!(c, '–' | '—' | '•' | '·' | '«' | '»' | '’' | '‘' | '“' | '”')
+    })
+}
+
+fn format_mc_locale_clean(loc: &mq_meta::McLocaleInfo) -> String {
+    if is_latin_or_cyrillic_only(loc.name) && is_latin_or_cyrillic_only(loc.region) {
+        loc.display_label()
+    } else {
+        format!("{} [{}]", loc.english_name, loc.code)
+    }
+}
+
 impl SettingsView {
+    /// Applies pending update check, download progress, and error responses into `SettingsView`.
+    /// Called every frame from `MqApp::drain_background_and_ipc` regardless of the active tab.
+    pub fn apply_pending_update_events(&mut self, state: &mut UiState) {
+        if let Some(res) = state.pending_update_check.take() {
+            self.is_checking_update = false;
+            match res {
+                Ok(Some(info)) => {
+                    self.update_check_result =
+                        Some(format!("Найдена новая версия: v{}", info.version));
+                    self.available_update = Some(info);
+                }
+                Ok(None) => {
+                    self.available_update = None;
+                    self.update_check_result =
+                        Some("У вас установлена самая актуальная версия лаунчера.".to_string());
+                }
+                Err(e) => {
+                    self.update_check_result = Some(format!("Ошибка проверки обновлений: {e}"));
+                }
+            }
+        }
+        if let Some(frac) = state.pending_update_progress.take() {
+            self.update_progress = frac;
+        }
+        if let Some(err) = state.pending_update_error.take() {
+            self.is_downloading_update = false;
+            self.update_progress = 0.0;
+            self.update_check_result = Some(format!("Ошибка установки обновления: {err}"));
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut Ui, state: &mut UiState) {
         let tokens = Tokens::from_config(&state.config.theme);
         let style = ThemeStyleParams::active(ui.ctx());
-        let current_section = self
+        let current_section = match self
             .active_section
-            .unwrap_or(SettingsSection::Customization);
+            .unwrap_or(SettingsSection::Customization)
+        {
+            SettingsSection::Catalog => SettingsSection::Customization,
+            other => other,
+        };
         let lang = state.config.launcher_locale.clone();
+        let is_en = lang.starts_with("en");
 
         let indicator_slot = ui.painter().add(egui::Shape::Noop);
         let mut active_tab_rect: Option<egui::Rect> = None;
@@ -91,9 +153,12 @@ impl SettingsView {
                     SettingsSection::Localization,
                     tr("settings_language", &lang),
                 ),
-                (SettingsSection::NetworkAndApi, "Система и сеть"),
-                (SettingsSection::Updates, "Обновления"),
-                (SettingsSection::About, "О программе"),
+                (
+                    SettingsSection::NetworkAndApi,
+                    tr("settings_network", &lang),
+                ),
+                (SettingsSection::Updates, tr("settings_updates", &lang)),
+                (SettingsSection::About, tr("settings_about", &lang)),
             ];
             for (sec, title) in sub_tabs {
                 let is_sel = current_section == sec;
@@ -228,9 +293,9 @@ impl SettingsView {
                         SettingsSection::NetworkAndApi => {
                             self.render_network_api_settings(ui, state);
                         }
-                        SettingsSection::Catalog => {}
                         SettingsSection::Updates => self.render_updates_settings(ui, state),
                         SettingsSection::About => self.render_about_settings(ui, state),
+                        _ => self.render_customization_studio(ui, state),
                     },
                 );
 
@@ -241,12 +306,33 @@ impl SettingsView {
                 if primary_emerald_button(ui, Some(VectorIcon::Check), tr("btn_save", &lang))
                     .clicked()
                 {
-                    let _ = state.config.save(&state.paths);
-                    apply_theme(ui.ctx(), &state.config.theme);
-                    state.status_message = Some((
-                        "Настройки успешно сохранены в config.toml и theme.toml".to_string(),
-                        false,
-                    ));
+                    match state.config.save(&state.paths) {
+                        Ok(()) => {
+                            apply_theme(ui.ctx(), &state.config.theme);
+                            state.status_message = Some((
+                                tr_set(
+                                    is_en,
+                                    "Настройки успешно сохранены в config.toml и theme.toml",
+                                    "Settings saved to config.toml and theme.toml",
+                                )
+                                .to_string(),
+                                false,
+                            ));
+                        }
+                        Err(e) => {
+                            state.status_message = Some((
+                                format!(
+                                    "{}: {e}",
+                                    tr_set(
+                                        is_en,
+                                        "Ошибка сохранения настроек",
+                                        "Failed to save settings"
+                                    )
+                                ),
+                                true,
+                            ));
+                        }
+                    }
                 }
             });
     }
@@ -891,14 +977,25 @@ impl SettingsView {
                             } else {
                                 std::path::PathBuf::from(cleaned)
                             };
-                            if state.config.theme.save_to_file(&target_path).is_ok() {
-                                state.status_message = Some((
-                                    format!(
-                                        "Тема успешно экспортирована в {}",
-                                        target_path.display()
-                                    ),
-                                    false,
-                                ));
+                            match state.config.theme.save_to_file(&target_path) {
+                                Ok(()) => {
+                                    state.status_message = Some((
+                                        format!(
+                                            "Тема успешно экспортирована в {}",
+                                            target_path.display()
+                                        ),
+                                        false,
+                                    ));
+                                }
+                                Err(e) => {
+                                    state.status_message = Some((
+                                        format!(
+                                            "Не удалось экспортировать тему в {}: {e}",
+                                            target_path.display()
+                                        ),
+                                        true,
+                                    ));
+                                }
                             }
                         }
 
@@ -1162,29 +1259,40 @@ impl SettingsView {
                 ui.add_space(10.0);
 
                 // 4. Action upon Launch
+                let is_en = state.config.launcher_locale.starts_with("en");
                 ui.label(
-                    RichText::new("Поведение лаунчера при запуске Minecraft")
-                        .strong()
-                        .size(14.0),
+                    RichText::new(tr_set(
+                        is_en,
+                        "Поведение лаунчера при запуске Minecraft",
+                        "Launcher Behavior on Minecraft Launch",
+                    ))
+                    .strong()
+                    .size(14.0),
                 );
                 ui.add_space(4.0);
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let prev_action = state.config.theme.launch_action;
                     ui.selectable_value(
                         &mut state.config.theme.launch_action,
                         LaunchAction::KeepOpen,
-                        "Оставить лаунчер открытым",
+                        tr_set(is_en, "Оставить лаунчер открытым", "Keep launcher open"),
                     );
                     ui.selectable_value(
                         &mut state.config.theme.launch_action,
                         LaunchAction::Minimize,
-                        "Свернуть",
+                        tr_set(is_en, "Свернуть", "Minimize"),
                     );
                     ui.selectable_value(
                         &mut state.config.theme.launch_action,
                         LaunchAction::HideUntilExit,
-                        "Скрыть до выхода из игры",
+                        tr_set(is_en, "Скрыть до выхода из игры", "Hide until game exits"),
                     );
+                    if state.config.theme.launch_action != prev_action {
+                        state.config.hide_on_launch =
+                            state.config.theme.launch_action != LaunchAction::KeepOpen;
+                        let _ = state.config.save(&state.paths);
+                    }
                 });
 
                 ui.add_space(8.0);
@@ -1192,10 +1300,18 @@ impl SettingsView {
                 // Discord Rich Presence
                 let mut d_rpc = state.config.discord_rpc_enabled;
                 if ui
-                    .checkbox(&mut d_rpc, "Discord Rich Presence (отображать статус игры)")
+                    .checkbox(
+                        &mut d_rpc,
+                        tr_set(
+                            is_en,
+                            "Discord Rich Presence (отображать статус игры)",
+                            "Discord Rich Presence (show game activity)",
+                        ),
+                    )
                     .changed()
                 {
                     state.config.discord_rpc_enabled = d_rpc;
+                    state.discord_rpc_dirty = true;
                     let _ = state.config.save(&state.paths);
                 }
 
@@ -1203,7 +1319,14 @@ impl SettingsView {
                 let mut auto_bk = state.config.auto_backup_worlds;
                 ui.horizontal(|ui| {
                     if ui
-                        .checkbox(&mut auto_bk, "Автобэкап миров перед запуском")
+                        .checkbox(
+                            &mut auto_bk,
+                            tr_set(
+                                is_en,
+                                "Автобэкап миров перед запуском",
+                                "Auto-backup worlds before launch",
+                            ),
+                        )
                         .changed()
                     {
                         state.config.auto_backup_worlds = auto_bk;
@@ -1211,7 +1334,7 @@ impl SettingsView {
                     }
                     if state.config.auto_backup_worlds {
                         ui.add_space(12.0);
-                        ui.label("Хранить копий:");
+                        ui.label(tr_set(is_en, "Хранить копий:", "Keep backups:"));
                         let mut max_bk = state.config.max_world_backups.clamp(1, 10);
                         if ui.add(egui::Slider::new(&mut max_bk, 1..=10)).changed() {
                             state.config.max_world_backups = max_bk;
@@ -1220,21 +1343,18 @@ impl SettingsView {
                     }
                 });
 
-                // Скрывать лаунчер при запуске игры
-                let mut hide_on = state.config.hide_on_launch;
-                if ui
-                    .checkbox(&mut hide_on, "Скрывать лаунчер при запуске игры")
-                    .changed()
-                {
-                    state.config.hide_on_launch = hide_on;
-                    let _ = state.config.save(&state.paths);
-                }
-
                 // Компактный мини-оверлей при запуске
                 ui.horizontal(|ui| {
                     let mut mini_ov = state.config.mini_overlay_on_launch;
                     if ui
-                        .checkbox(&mut mini_ov, "Компактный мини-оверлей при запуске")
+                        .checkbox(
+                            &mut mini_ov,
+                            tr_set(
+                                is_en,
+                                "Компактный мини-оверлей при запуске",
+                                "Compact mini-overlay on launch",
+                            ),
+                        )
                         .changed()
                     {
                         state.config.mini_overlay_on_launch = mini_ov;
@@ -1242,9 +1362,9 @@ impl SettingsView {
                     }
                     ui.add_space(8.0);
                     let toggle_label = if state.mini_overlay_active {
-                        "Отключить мини-оверлей"
+                        tr_set(is_en, "Отключить мини-оверлей", "Disable mini-overlay")
                     } else {
-                        "Переключить мини-оверлей"
+                        tr_set(is_en, "Переключить мини-оверлей", "Toggle mini-overlay")
                     };
                     if secondary_glass_button(ui, None, toggle_label).clicked() {
                         state.mini_overlay_active = !state.mini_overlay_active;
@@ -1323,56 +1443,92 @@ impl SettingsView {
                 }
 
                 ui.add_space(6.0);
-                ui.label("Скачать проверенную Eclipse Temurin JRE напрямую из Adoptium:");
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                    for &ver in &[8u32, 17u32, 21u32] {
-                        let btn_label = match ver {
-                            8 => "Скачать Java 8 (<= 1.16.5)",
-                            17 => "Скачать Java 17 (1.17 - 1.20.4)",
-                            21 => "Скачать Java 21 (1.20.5+)",
-                            _ => "Скачать Java",
-                        };
-                        if secondary_glass_button(ui, Some(VectorIcon::Download), btn_label)
-                            .clicked()
-                        {
-                            let java_dir = state.paths.java_dir();
-                            let bus = state.event_bus.clone();
-                            let cmd_tx = state.cmd_sender.clone();
-                            tokio::spawn(async move {
-                                bus.publish(mq_core::Event::PhaseStarted {
-                                    phase: format!("Скачивание Eclipse Temurin Java {ver}"),
-                                    total_items: 1,
+                ui.label(tr_set(
+                    is_en,
+                    "Скачать проверенную Eclipse Temurin JRE напрямую из Adoptium:",
+                    "Download verified Eclipse Temurin JRE directly from Adoptium:",
+                ));
+                if state.is_downloading_java {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(tr_set(
+                                is_en,
+                                "Скачивание и установка Eclipse Temurin Java...",
+                                "Downloading and installing Eclipse Temurin Java...",
+                            ))
+                            .color(ACCENT_COBALT)
+                            .small(),
+                        );
+                    });
+                }
+                ui.add_enabled_ui(!state.is_downloading_java, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                        for &ver in &[8u32, 17u32, 21u32] {
+                            let btn_label = match (ver, is_en) {
+                                (8, false) => "Скачать Java 8 (<= 1.16.5)",
+                                (8, true) => "Download Java 8 (<= 1.16.5)",
+                                (17, false) => "Скачать Java 17 (1.17 - 1.20.4)",
+                                (17, true) => "Download Java 17 (1.17 - 1.20.4)",
+                                (21, false) => "Скачать Java 21 (1.20.5+)",
+                                (21, true) => "Download Java 21 (1.20.5+)",
+                                _ => "Download Java",
+                            };
+                            if secondary_glass_button(ui, Some(VectorIcon::Download), btn_label)
+                                .clicked()
+                            {
+                                state.is_downloading_java = true;
+                                let java_dir = state.paths.java_dir();
+                                let bus = state.event_bus.clone();
+                                let cmd_tx = state.cmd_sender.clone();
+                                let resp_tx = state.resp_sender.clone();
+                                tokio::spawn(async move {
+                                    struct JavaDownloadGuard(
+                                        flume::Sender<crate::state::UiWorkerResponse>,
+                                    );
+                                    impl Drop for JavaDownloadGuard {
+                                        fn drop(&mut self) {
+                                            let _ = self.0.send(
+                                                crate::state::UiWorkerResponse::JavaDownloadFinished,
+                                            );
+                                        }
+                                    }
+                                    let _guard = JavaDownloadGuard(resp_tx);
+                                    bus.publish(mq_core::Event::PhaseStarted {
+                                        phase: format!("Скачивание Eclipse Temurin Java {ver}"),
+                                        total_items: 1,
+                                    });
+                                    let client = reqwest::Client::builder()
+                                        .timeout(std::time::Duration::from_secs(120))
+                                        .build()
+                                        .unwrap_or_default();
+                                    match mq_launch::download_adoptium_java(&client, ver, &java_dir)
+                                        .await
+                                    {
+                                        Ok(rt) => {
+                                            let _ = cmd_tx.send(
+                                                crate::state::UiWorkerCommand::DiscoverJavaRuntimes,
+                                            );
+                                            bus.publish(mq_core::Event::PhaseCompleted {
+                                                phase: format!(
+                                                    "Java {ver} успешно установлена: {}",
+                                                    rt.full_version
+                                                ),
+                                                elapsed_ms: 0,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            bus.publish(mq_core::Event::TaskError {
+                                                context: format!("Загрузка Java {ver}"),
+                                                message: e.to_string(),
+                                            });
+                                        }
+                                    }
                                 });
-                                let client = reqwest::Client::builder()
-                                    .timeout(std::time::Duration::from_secs(120))
-                                    .build()
-                                    .unwrap_or_default();
-                                match mq_launch::download_adoptium_java(&client, ver, &java_dir)
-                                    .await
-                                {
-                                    Ok(rt) => {
-                                        let _ = cmd_tx.send(
-                                            crate::state::UiWorkerCommand::DiscoverJavaRuntimes,
-                                        );
-                                        bus.publish(mq_core::Event::PhaseCompleted {
-                                            phase: format!(
-                                                "Java {ver} успешно установлена: {}",
-                                                rt.full_version
-                                            ),
-                                            elapsed_ms: 0,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        bus.publish(mq_core::Event::TaskError {
-                                            context: format!("Загрузка Java {ver}"),
-                                            message: e.to_string(),
-                                        });
-                                    }
-                                }
-                            });
+                            }
                         }
-                    }
+                    });
                 });
             },
         );
@@ -1384,6 +1540,8 @@ impl SettingsView {
         let card_r = style.card_corner_radius(state.config.theme.corner_radius);
         let card = solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(14));
+        let lang_code = state.config.launcher_locale.clone();
+        let is_en = lang_code.starts_with("en");
 
         show_themed_card(
             ui,
@@ -1395,9 +1553,9 @@ impl SettingsView {
             |ui| {
                 ui.set_width(ui.available_width());
 
-                // 1. Launcher Interface Language
+                // 1. Launcher Interface Language (supported UI languages only: Russian & English)
                 ui.label(
-                    RichText::new("1. Язык интерфейса лаунчера (11 языков)")
+                    RichText::new(format!("1. {}", tr("settings_language", &lang_code)))
                         .color(tokens.text)
                         .strong()
                         .size(14.0),
@@ -1405,13 +1563,29 @@ impl SettingsView {
                 ui.add_space(4.0);
 
                 ui.horizontal_wrapped(|ui| {
-                    for lang in Language::ALL {
-                        let is_active = state.config.launcher_locale == lang.code();
+                    for lang in [Language::Russian, Language::English] {
+                        let is_active = if lang == Language::English {
+                            state.config.launcher_locale.starts_with("en")
+                        } else {
+                            !state.config.launcher_locale.starts_with("en")
+                        };
                         if ui.selectable_label(is_active, lang.native_name()).clicked() {
                             state.config.launcher_locale = lang.code().to_string();
-                            // Automatically harmonize default Minecraft locale if not set
                             state.config.default_mc_locale =
                                 mq_meta::launcher_locale_to_mc_locale(lang.code()).to_string();
+                            if let Err(e) = state.config.save(&state.paths) {
+                                state.status_message = Some((
+                                    format!(
+                                        "{}: {e}",
+                                        tr_set(
+                                            is_en,
+                                            "Ошибка сохранения настроек",
+                                            "Failed to save settings"
+                                        )
+                                    ),
+                                    true,
+                                ));
+                            }
                         }
                     }
                 });
@@ -1420,23 +1594,41 @@ impl SettingsView {
                 ui.separator();
                 ui.add_space(12.0);
 
-                // 2. Default Minecraft Game Locale (80+ locales)
+                // 2. Default Minecraft Game Locale (80+ locales, clean Latin/Cyrillic labels)
                 ui.label(
-                    RichText::new("2. Язык Minecraft по умолчанию (80+ языков)")
-                        .color(tokens.text)
-                        .strong()
-                        .size(14.0),
+                    RichText::new(format!(
+                        "2. {} (80+)",
+                        tr("settings_mc_language", &lang_code)
+                    ))
+                    .color(tokens.text)
+                    .strong()
+                    .size(14.0),
                 );
-                ui.label(RichText::new("Применяется автоматически ко всем новым инстансам и синхронизируется в options.txt перед запуском.").color(tokens.text_muted).small());
+                ui.label(
+                    RichText::new(tr_set(
+                        is_en,
+                        "Применяется автоматически ко всем новым инстансам и синхронизируется в options.txt перед запуском.",
+                        "Applied automatically to new instances and synced into options.txt before launch.",
+                    ))
+                    .color(tokens.text_muted)
+                    .small(),
+                );
                 ui.add_space(6.0);
 
                 let current_info = find_mc_locale(&state.config.default_mc_locale);
                 let current_title = current_info
-                    .map(|i| i.display_label())
+                    .map(format_mc_locale_clean)
                     .unwrap_or_else(|| state.config.default_mc_locale.clone());
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Выбранная локаль Minecraft:").color(tokens.text));
+                    ui.label(
+                        RichText::new(tr_set(
+                            is_en,
+                            "Выбранная локаль Minecraft:",
+                            "Selected Minecraft locale:",
+                        ))
+                        .color(tokens.text),
+                    );
                     version_badge(ui, &current_title, tokens.accent);
                 });
 
@@ -1454,7 +1646,11 @@ impl SettingsView {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.mc_locale_search)
                                 .frame(false)
-                                .hint_text("Поиск по всем 80+ языкам Minecraft (напр. українська, русский, polski)...")
+                                .hint_text(tr_set(
+                                    is_en,
+                                    "Поиск по всем 80+ языкам Minecraft (напр. українська, русский, polski)...",
+                                    "Search 80+ Minecraft locales (e.g. English, Russian, Japanese)...",
+                                ))
                                 .desired_width(324.0)
                                 .vertical_align(egui::Align::Center),
                         );
@@ -1464,7 +1660,7 @@ impl SettingsView {
                     &frame_resp.response,
                     ElementMeta::new(ElementKind::Input)
                         .id("mc_locale_search")
-                        .label("Поиск языка Minecraft")
+                        .label(tr_set(is_en, "Поиск языка Minecraft", "Search Minecraft locale"))
                         .text(self.mc_locale_search.as_str())
                         .fg(tokens.text)
                         .bg(tokens.bg_input),
@@ -1480,10 +1676,11 @@ impl SettingsView {
                         for loc in search_results.iter().take(25) {
                             let is_active = state.config.default_mc_locale == loc.code;
                             if ui
-                                .selectable_label(is_active, loc.display_label())
+                                .selectable_label(is_active, format_mc_locale_clean(loc))
                                 .clicked()
                             {
                                 state.config.default_mc_locale = loc.code.to_string();
+                                let _ = state.config.save(&state.paths);
                             }
                         }
                     });
@@ -1495,6 +1692,153 @@ impl SettingsView {
         let tokens = Tokens::from_config(&state.config.theme);
         let style = ThemeStyleParams::from_config(&state.config.theme);
         let card_r = style.card_corner_radius(state.config.theme.corner_radius);
+        let lang_code = state.config.launcher_locale.clone();
+        let is_en = lang_code.starts_with("en");
+
+        let info_card = solid_card_frame_with_config(&tokens, &state.config.theme)
+            .inner_margin(egui::Margin::same(14));
+        show_themed_card(
+            ui,
+            info_card,
+            card_r,
+            ui.make_persistent_id("settings_net_info_glass"),
+            &style,
+            &tokens,
+            |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(tr("settings_network", &lang_code))
+                        .color(tokens.text)
+                        .strong()
+                        .size(14.0),
+                );
+                ui.add_space(8.0);
+
+                ui.label(
+                    RichText::new(tr_set(is_en, "Пути данных", "Data Paths"))
+                        .color(tokens.text_muted)
+                        .small(),
+                );
+                ui.add_space(4.0);
+
+                let path_rows: [(&str, std::path::PathBuf); 4] = [
+                    (
+                        tr_set(is_en, "Каталог данных:", "Data directory:"),
+                        state.paths.data_dir.clone(),
+                    ),
+                    (
+                        tr_set(is_en, "Инстансы:", "Instances:"),
+                        state.paths.instances_dir(),
+                    ),
+                    (
+                        tr_set(is_en, "Конфигурация:", "Config directory:"),
+                        state.paths.config_dir.clone(),
+                    ),
+                    (
+                        tr_set(is_en, "Кэш:", "Cache directory:"),
+                        state.paths.cache_dir.clone(),
+                    ),
+                ];
+
+                for (label, path) in path_rows {
+                    let display_path =
+                        crate::opener::strip_windows_verbatim_prefix(&path.display().to_string());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(label).color(tokens.text_muted).small());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&display_path)
+                                    .color(tokens.text)
+                                    .monospace()
+                                    .small(),
+                            )
+                            .truncate(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if secondary_glass_button(
+                                ui,
+                                Some(VectorIcon::Folder),
+                                tr_set(is_en, "Открыть", "Open"),
+                            )
+                            .clicked()
+                            {
+                                let _ = crate::opener::open_that(&path);
+                            }
+                        });
+                    });
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.label(
+                    RichText::new(tr_set(
+                        is_en,
+                        "Сетевой статус и API",
+                        "Network & API Status",
+                    ))
+                    .color(tokens.text_muted)
+                    .small(),
+                );
+                ui.add_space(4.0);
+
+                let cf_status = if state
+                    .config
+                    .curseforge_api_key
+                    .as_ref()
+                    .is_some_and(|k| !k.expose_secret().trim().is_empty())
+                {
+                    tr_set(is_en, "Пользовательский ключ", "Custom key")
+                } else if mq_core::config::is_builtin_cf_key_disabled() {
+                    tr_set(is_en, "Отключён", "Disabled")
+                } else {
+                    tr_set(is_en, "Встроенный ключ активен", "Built-in key active")
+                };
+                let msa_status = if state.config.effective_ms_client_id().is_some() {
+                    tr_set(is_en, "Настроен", "Configured")
+                } else {
+                    tr_set(is_en, "Не настроен", "Not configured")
+                };
+                let backend_display = if state.gpu_backend_label.trim().is_empty() {
+                    format!("{:?}", state.config.ui_backend)
+                } else {
+                    state.gpu_backend_label.trim().to_string()
+                };
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                    version_badge(
+                        ui,
+                        &format!(
+                            "{}: {}",
+                            tr_set(is_en, "HTTP-потоки", "HTTP streams"),
+                            state.config.max_connections
+                        ),
+                        ACCENT_COBALT,
+                    );
+                    version_badge(ui, &format!("CurseForge: {cf_status}"), tokens.accent);
+                    version_badge(ui, &format!("Microsoft OAuth: {msa_status}"), tokens.accent);
+                    version_badge(ui, &format!("GPU: {backend_display}"), ACCENT_COBALT);
+                });
+
+                ui.add_space(8.0);
+                if secondary_glass_button(
+                    ui,
+                    Some(VectorIcon::Trash),
+                    tr_set(is_en, "Очистить временный кэш", "Clear temp cache"),
+                )
+                .clicked()
+                {
+                    let _ = state
+                        .cmd_sender
+                        .send(crate::state::UiWorkerCommand::CleanTempCache);
+                }
+            },
+        );
+
+        ui.add_space(12.0);
+
         let card = solid_card_frame_with_config(&tokens, &state.config.theme)
             .inner_margin(egui::Margin::same(14));
 
@@ -1508,99 +1852,102 @@ impl SettingsView {
             |ui| {
                 ui.set_width(ui.available_width());
 
-                egui::CollapsingHeader::new("Расширенные настройки (для опытных)")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Потоки и соединения").strong());
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.label("Максимум параллельных HTTP-соединений:");
-                            if ui
-                                .add(egui::Slider::new(
-                                    &mut state.config.max_connections,
-                                    4..=128,
-                                ))
-                                .changed()
-                            {
-                                let _ = state.config.save(&state.paths);
-                            }
-                        });
-
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-
-                        ui.label(RichText::new("Графический бэкенд (GUI)").strong());
-                        ui.add_space(4.0);
-                        let (auto_label, wgpu_label) = if cfg!(target_os = "windows") {
-                            ("Авто (DX12 / Vulkan -> OpenGL)", "DX12 / Vulkan (WGPU)")
-                        } else {
-                            ("Авто (Vulkan -> OpenGL)", "Vulkan (WGPU)")
-                        };
-                        let mut changed_backend = false;
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_value(
-                                    &mut state.config.ui_backend,
-                                    GuiBackend::Auto,
-                                    auto_label,
-                                )
-                                .clicked()
-                            {
-                                changed_backend = true;
-                            }
-                            if ui
-                                .selectable_value(
-                                    &mut state.config.ui_backend,
-                                    GuiBackend::Vulkan,
-                                    wgpu_label,
-                                )
-                                .clicked()
-                            {
-                                changed_backend = true;
-                            }
-                            if ui
-                                .selectable_value(
-                                    &mut state.config.ui_backend,
-                                    GuiBackend::Gl,
-                                    "OpenGL (Glow)",
-                                )
-                                .clicked()
-                            {
-                                changed_backend = true;
-                            }
-                        });
-                        if changed_backend {
+                egui::CollapsingHeader::new(tr_set(
+                    is_en,
+                    "Расширенные настройки (для опытных)",
+                    "Advanced Settings",
+                ))
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(tr_set(
+                            is_en,
+                            "Потоки и соединения",
+                            "Threads & Connections",
+                        ))
+                        .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(tr_set(
+                            is_en,
+                            "Максимум параллельных HTTP-соединений:",
+                            "Max parallel HTTP connections:",
+                        ));
+                        if ui
+                            .add(egui::Slider::new(
+                                &mut state.config.max_connections,
+                                4..=128,
+                            ))
+                            .changed()
+                        {
                             let _ = state.config.save(&state.paths);
                         }
                     });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    ui.label(
+                        RichText::new(tr_set(
+                            is_en,
+                            "Графический бэкенд (GUI)",
+                            "Graphics Backend (GUI)",
+                        ))
+                        .strong(),
+                    );
+                    ui.add_space(4.0);
+                    let (auto_label, wgpu_label) = if cfg!(target_os = "windows") {
+                        ("Авто (DX12 / Vulkan -> OpenGL)", "DX12 / Vulkan (WGPU)")
+                    } else {
+                        ("Авто (Vulkan -> OpenGL)", "Vulkan (WGPU)")
+                    };
+                    let mut changed_backend = false;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_value(
+                                &mut state.config.ui_backend,
+                                GuiBackend::Auto,
+                                auto_label,
+                            )
+                            .clicked()
+                        {
+                            changed_backend = true;
+                        }
+                        if ui
+                            .selectable_value(
+                                &mut state.config.ui_backend,
+                                GuiBackend::Vulkan,
+                                wgpu_label,
+                            )
+                            .clicked()
+                        {
+                            changed_backend = true;
+                        }
+                        if ui
+                            .selectable_value(
+                                &mut state.config.ui_backend,
+                                GuiBackend::Gl,
+                                "OpenGL (Glow)",
+                            )
+                            .clicked()
+                        {
+                            changed_backend = true;
+                        }
+                    });
+                    if changed_backend {
+                        let _ = state.config.save(&state.paths);
+                    }
+                });
             },
         );
     }
 
     fn render_updates_settings(&mut self, ui: &mut Ui, state: &mut UiState) {
-        if let Some(res) = state.pending_update_check.take() {
-            self.is_checking_update = false;
-            match res {
-                Ok(Some(info)) => {
-                    self.update_check_result =
-                        Some(format!("Найдена новая версия: v{}", info.version));
-                    self.available_update = Some(info);
-                }
-                Ok(None) => {
-                    self.available_update = None;
-                    self.update_check_result =
-                        Some("У вас установлена самая актуальная версия лаунчера.".to_string());
-                }
-                Err(e) => {
-                    self.update_check_result = Some(format!("Ошибка проверки обновлений: {e}"));
-                }
-            }
-        }
-        if let Some(err) = state.pending_update_error.take() {
-            self.is_downloading_update = false;
-            self.update_check_result = Some(format!("Ошибка установки обновления: {err}"));
-        }
+        self.apply_pending_update_events(state);
+        let lang_code = state.config.launcher_locale.clone();
+        let is_en = lang_code.starts_with("en");
 
         let tokens = Tokens::from_config(&state.config.theme);
         let style = ThemeStyleParams::from_config(&state.config.theme);
@@ -1622,7 +1969,12 @@ impl SettingsView {
                     &tokens,
                     |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("Обновления лаунчера").color(tokens.text).strong().size(15.0));
+                    ui.label(
+                        RichText::new(tr_set(is_en, "Обновления лаунчера", "Launcher Updates"))
+                            .color(tokens.text)
+                            .strong()
+                            .size(15.0),
+                    );
                     ui.add_space(8.0);
 
                     let is_packaged = mq_update::UpdateManager::is_packaged_install();
@@ -1669,6 +2021,7 @@ impl SettingsView {
                                 crate::components::render_progress_bar(ui, &tokens, self.update_progress, 6.0_f32);
                             } else if primary_emerald_button(ui, Some(VectorIcon::Download), "Обновить лаунчер сейчас").clicked() {
                                 self.is_downloading_update = true;
+                                self.update_progress = 0.0;
                                 let _ = state.cmd_sender.send(
                                     crate::state::UiWorkerCommand::DownloadLauncherUpdate {
                                         asset: Box::new(asset.clone()),
@@ -1960,9 +2313,6 @@ impl SettingsView {
                         ));
                     }
                 });
-
-                ui.add_space(12.0);
-                self.render_uninstall_card(ui, state, &tokens);
             },
         );
     }

@@ -126,11 +126,11 @@ try {
 
     $cmdInfo = Get-Command $installPs1
     $scriptText = Get-Content -Path $installPs1 -Raw
-    $hasBaseUrl = ($cmdInfo.Parameters.ContainsKey("BaseUrl")) -or ($scriptText -match '\$BaseUrl')
+    $hasBaseUrl = (($null -ne $cmdInfo.Parameters) -and $cmdInfo.Parameters.ContainsKey("BaseUrl")) -or ($scriptText -match '\$BaseUrl')
     Assert-True $hasBaseUrl "install.ps1 must support -BaseUrl parameter for local artifact testing"
-    $hasSilent = ($cmdInfo.Parameters.ContainsKey("Silent")) -or ($scriptText -match '\$Silent')
-    $hasInstallDir = ($cmdInfo.Parameters.ContainsKey("InstallDir")) -or ($scriptText -match '\$InstallDir')
-    $hasNoDesktop = ($cmdInfo.Parameters.ContainsKey("NoDesktopShortcut")) -or ($scriptText -match '\$NoDesktopShortcut')
+    $hasSilent = (($null -ne $cmdInfo.Parameters) -and $cmdInfo.Parameters.ContainsKey("Silent")) -or ($scriptText -match '\$Silent')
+    $hasInstallDir = (($null -ne $cmdInfo.Parameters) -and $cmdInfo.Parameters.ContainsKey("InstallDir")) -or ($scriptText -match '\$InstallDir')
+    $hasNoDesktop = (($null -ne $cmdInfo.Parameters) -and $cmdInfo.Parameters.ContainsKey("NoDesktopShortcut")) -or ($scriptText -match '\$NoDesktopShortcut')
 
     $targetInstallDir = if ($hasInstallDir) { $installDir } else { Join-Path $env:LOCALAPPDATA "MQ-Portable" }
     $installedExe = Join-Path $targetInstallDir "mq.exe"

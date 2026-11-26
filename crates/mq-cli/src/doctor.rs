@@ -1827,16 +1827,22 @@ pub async fn run_install_doctor(
 
 /// CLI runner for `mq doctor --install <version>`.
 pub async fn cmd_doctor_install(version: &str, args: &DoctorArgs, paths: &MqPaths) -> Result<()> {
-    println!("================================================================================");
-    println!(
-        "          MQ LAUNCHER v{} — ДИАГНОСТИКА УСТАНОВКИ (DOCTOR INSTALL)",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("================================================================================");
-    println!(
-        "[ПАРАМЕТРЫ] Версия Minecraft: {} | Модлоадер: {}",
-        version, args.loader
-    );
+    if !args.json {
+        println!(
+            "================================================================================"
+        );
+        println!(
+            "          MQ LAUNCHER v{} — ДИАГНОСТИКА УСТАНОВКИ (DOCTOR INSTALL)",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!(
+            "================================================================================"
+        );
+        println!(
+            "[ПАРАМЕТРЫ] Версия Minecraft: {} | Модлоадер: {}",
+            version, args.loader
+        );
+    }
 
     let report = run_install_doctor(
         version,
@@ -1846,66 +1852,75 @@ pub async fn cmd_doctor_install(version: &str, args: &DoctorArgs, paths: &MqPath
     )
     .await?;
 
-    println!(
-        "[СИСТЕМА]   ОС: {} | Архитектура: {} | Ядер CPU: {}",
-        report.system_info.os, report.system_info.arch, report.system_info.num_cpus
-    );
-    println!("--------------------------------------------------------------------------------");
-
-    for (idx, step) in report.steps.iter().enumerate() {
+    if !args.json {
         println!(
-            "[{}/{}] {:<6} [{}] {}",
-            idx + 1,
-            report.steps.len(),
-            step.status.label(),
-            step.stage.localized_name(),
-            step.summary
+            "[СИСТЕМА]   ОС: {} | Архитектура: {} | Ядер CPU: {}",
+            report.system_info.os, report.system_info.arch, report.system_info.num_cpus
         );
-        if let Some(err) = &step.error_reason {
-            println!("             [!] Ошибка/Причина: {err}");
-        }
-        for detail in &step.details {
-            println!("             * {detail}");
-        }
-    }
+        println!(
+            "--------------------------------------------------------------------------------"
+        );
 
-    println!("--------------------------------------------------------------------------------");
-    match report.overall_status {
-        StepStatus::Ok => {
+        for (idx, step) in report.steps.iter().enumerate() {
             println!(
-                "[ИТОГ]      [OK] Диагностика версии '{}' завершена: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ({}/{}).",
-                version,
+                "[{}/{}] {:<6} [{}] {}",
+                idx + 1,
                 report.steps.len(),
-                report.steps.len()
+                step.status.label(),
+                step.stage.localized_name(),
+                step.summary
             );
-            println!(
-                "            Версия готова к быстрой и надёжной установке: 'mq install {}'",
-                version
-            );
+            if let Some(err) = &step.error_reason {
+                println!("             [!] Ошибка/Причина: {err}");
+            }
+            for detail in &step.details {
+                println!("             * {detail}");
+            }
         }
-        StepStatus::Warn => {
-            println!(
-                "[ИТОГ]      [WARN] Диагностика завершена с предупреждениями (предупреждений: {}).",
-                report.warn_count()
-            );
-            println!("            Установка возможна, но обратите внимание на замечания выше.");
+
+        println!(
+            "--------------------------------------------------------------------------------"
+        );
+        match report.overall_status {
+            StepStatus::Ok => {
+                println!(
+                    "[ИТОГ]      [OK] Диагностика версии '{}' завершена: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ({}/{}).",
+                    version,
+                    report.steps.len(),
+                    report.steps.len()
+                );
+                println!(
+                    "            Версия готова к быстрой и надёжной установке: 'mq install {}'",
+                    version
+                );
+            }
+            StepStatus::Warn => {
+                println!(
+                    "[ИТОГ]      [WARN] Диагностика завершена с предупреждениями (предупреждений: {}).",
+                    report.warn_count()
+                );
+                println!("            Установка возможна, но обратите внимание на замечания выше.");
+            }
+            StepStatus::Fail => {
+                println!(
+                    "[ИТОГ]      [FAIL] Диагностика выявила критические проблемы (ошибок: {}).",
+                    report.fail_count()
+                );
+                println!(
+                    "            Установка данной версии в текущем окружении завершится сбоем."
+                );
+                println!("            Устраните указанные ошибки (например, загрузите требуемую версию Java).");
+            }
         }
-        StepStatus::Fail => {
-            println!(
-                "[ИТОГ]      [FAIL] Диагностика выявила критические проблемы (ошибок: {}).",
-                report.fail_count()
-            );
-            println!("            Установка данной версии в текущем окружении завершится сбоем.");
-            println!("            Устраните указанные ошибки (например, загрузите требуемую версию Java).");
-        }
+        println!(
+            "================================================================================"
+        );
     }
-    println!("================================================================================");
 
     let secret_strings = collect_diagnostic_secrets(paths);
     let known_secrets: Vec<&str> = secret_strings.iter().map(|s| s.as_str()).collect();
 
     if args.json {
-        println!("\n--- [JSON ЭКСПОРТ ДИАГНОСТИКИ (САНИТИЗИРОВАН)] ---");
         println!(
             "{}",
             export_diagnostic_json_sanitized(&report, &known_secrets)

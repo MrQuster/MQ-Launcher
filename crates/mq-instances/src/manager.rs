@@ -103,12 +103,7 @@ impl InstanceManager {
         loader: ModLoaderKind,
         loader_version: Option<String>,
     ) -> MqResult<InstanceManifest> {
-        let trimmed_name = name.trim();
-        if trimmed_name.is_empty() {
-            return Err(MqError::Metadata(
-                "instance name must not be empty".to_owned(),
-            ));
-        }
+        let trimmed_name = validate_instance_display_name(name)?;
 
         let trimmed_mc = mc_version.trim();
         if trimmed_mc.is_empty() {
@@ -130,11 +125,7 @@ impl InstanceManager {
     /// Creates the on-disk directory hierarchy and persists a pre-built [`InstanceManifest`],
     /// rejecting duplicate instance slugs or case-insensitive display names.
     pub fn create_from_manifest(&self, manifest: InstanceManifest) -> MqResult<InstanceManifest> {
-        if manifest.name.trim().is_empty() {
-            return Err(MqError::Metadata(
-                "instance name must not be empty".to_owned(),
-            ));
-        }
+        validate_instance_display_name(&manifest.name)?;
         if manifest.mc_version.trim().is_empty() {
             return Err(MqError::Metadata(
                 "Minecraft version must not be empty".to_owned(),
@@ -294,12 +285,7 @@ impl InstanceManager {
         src_id_or_name: &str,
         new_name: &str,
     ) -> MqResult<InstanceManifest> {
-        let trimmed_new_name = new_name.trim();
-        if trimmed_new_name.is_empty() {
-            return Err(MqError::Metadata(
-                "cloned instance name must not be empty".to_owned(),
-            ));
-        }
+        let trimmed_new_name = validate_instance_display_name(new_name)?;
 
         let src_manifest = self.load_instance(src_id_or_name)?;
         let new_id = windows_safe_instance_id(trimmed_new_name);
@@ -453,6 +439,24 @@ fn clone_tree_hardlink_or_copy(src_dir: &Path, dst_dir: &Path) -> MqResult<()> {
     Ok(())
 }
 
+fn validate_instance_display_name(name: &str) -> MqResult<&str> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(MqError::Metadata(
+            "instance name must not be empty".to_owned(),
+        ));
+    }
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.split(['/', '\\']).any(|seg| seg == "..")
+    {
+        return Err(MqError::Metadata(format!(
+            "instance name '{trimmed}' must not contain '/', '\\', or '..' path segments"
+        )));
+    }
+    Ok(trimmed)
+}
+
 /// Clears read-only attributes across files in a directory tree before removal so Windows
 /// `remove_dir_all` does not fail with `ERROR_ACCESS_DENIED` on read-only mod/world files.
 fn clear_readonly_recursive(dir: &Path) {
@@ -472,5 +476,41 @@ fn clear_readonly_recursive(dir: &Path) {
                 let _ = fs::set_permissions(&path, perms);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn rejects_invalid_display_names_and_allows_distinct_cyrillic_names() {
+        let tmp = tempdir().unwrap();
+        let paths = MqPaths::with_root(tmp.path());
+        let mgr = InstanceManager::new(paths);
+
+        for bad in ["bad/name", r"bad\name", "..", "foo/../bar"] {
+            let err = mgr
+                .create_instance(bad, "1.21.1", ModLoaderKind::Vanilla, None)
+                .unwrap_err();
+            assert!(
+                matches!(err, MqError::Metadata(_)),
+                "expected validation error for {bad:?}, got {err:?}"
+            );
+        }
+
+        let m1 = mgr
+            .create_instance("Моя сборка", "1.21.1", ModLoaderKind::Fabric, None)
+            .unwrap();
+        let m2 = mgr
+            .create_instance("Другая сборка", "1.21.1", ModLoaderKind::Fabric, None)
+            .unwrap();
+        assert_ne!(m1.id, m2.id);
+
+        let dup_err = mgr
+            .create_instance("Моя сборка", "1.21.1", ModLoaderKind::Fabric, None)
+            .unwrap_err();
+        assert!(matches!(dup_err, MqError::InstanceAlreadyExists(_)));
     }
 }

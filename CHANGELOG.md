@@ -5,6 +5,22 @@
 
 ---
 
+## [v2.8.5] — 2026-11-26 ("Distribution, Auth, UI & CLI Reliability")
+
+### Исправлено и улучшено / Fixed and improved
+- **Дистрибуция, подписи и автообновление (`mq-update`, `install.sh`, `install.ps1`, `release.yml`):**
+  - Приведён к единому официальному публичному ключу Minisign (`RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt`) во всех скриптах установки и релизном пайплайне.
+  - В `mq-update` и `install.ps1` добавлен мягкий fallback с предупреждением на HTTPS + `SHA256SUMS`, если в релизе отсутствует `SHA256SUMS.minisig` (с жёстким отклонением при невалидной подписи), а в режиме Inno Setup проверяется наличие `MQ-Setup-<ver>-x64.exe` до рапорта доступности обновления.
+  - Исправлен CI-тест `scripts/ci/test-install-ps1.ps1` при пустом `$cmdInfo.Parameters` в PowerShell.
+- **CLI и диагностика (`mq-cli`):**
+  - `mq accounts add --ely` переведён на OAuth2 PKCE (`PkcePair`) и динамический порт loopback-сервера (`bind_loopback_server` / `wait_for_callback`).
+  - Логи `tracing` перенаправлены в `stderr`, а текстовые баннеры в `mq doctor --json` и `mq doctor --install ... --json` отключены для строго валидного JSON в `stdout`.
+  - В `mq launch` добавлена поддержка `DiscordRpcClient` с очисткой статуса после завершения игры.
+- **Авторизация, запуск и интерфейс (`mq-auth`, `mq-core`, `mq-launch`, `mq-install`, `mq-instances`, `mq-mods`, `mq-ui`):**
+  - Исправлен повторный вход Microsoft Account, мгновенная отмена Ely.by loopback-сервера, транслитерация кириллических ID инстансов, Windows-обёртки и `@argfile` для Java 8 / Forge, синхронизация `.mq-lock.json`, а также отмена задач очереди каталога и отображение прогресса обновления в UI.
+
+---
+
 ## [v2.8.4] — 2026-11-26 ("Discord Rich Presence, Ely.by PKCE, Official Microsoft OAuth & UI Cleanup")
 
 ### Исправлено и улучшено / Fixed and improved

@@ -130,6 +130,19 @@ impl StreamKind {
     }
 }
 
+#[cfg(unix)]
+fn unix_ipc_candidate_paths(runtime_dir: Option<&str>, slot: u8) -> Vec<String> {
+    let mut paths = Vec::with_capacity(4);
+    if let Some(dir) = runtime_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        let d = dir.trim_end_matches('/');
+        paths.push(format!("{d}/discord-ipc-{slot}"));
+        paths.push(format!("{d}/app/com.discordapp.Discord/discord-ipc-{slot}"));
+        paths.push(format!("{d}/snap.discord/discord-ipc-{slot}"));
+    }
+    paths.push(format!("/tmp/discord-ipc-{slot}"));
+    paths
+}
+
 /// Lightweight Discord Rich Presence IPC v1 client.
 pub struct DiscordRpcClient {
     stream: StreamKind,
@@ -141,21 +154,13 @@ impl DiscordRpcClient {
     pub fn connect_default() -> Option<Self> {
         #[cfg(unix)]
         {
-            let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
-            for i in 0..10 {
-                let candidate_paths = [
-                    runtime_dir.as_ref().map(|d| format!("{d}/discord-ipc-{i}")),
-                    Some(format!("/tmp/discord-ipc-{i}")),
-                ];
-                for path_opt in candidate_paths.into_iter().flatten() {
-                    if let Ok(stream) = UnixStream::connect(&path_opt) {
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
-                        let mut client = Self {
-                            stream: StreamKind::Unix(stream),
-                            connected: true,
-                        };
-                        if client.send_handshake() {
+            let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+                .ok()
+                .filter(|d| !d.trim().is_empty());
+            for i in 0..10u8 {
+                for path in unix_ipc_candidate_paths(runtime_dir.as_deref(), i) {
+                    if let Ok(stream) = UnixStream::connect(&path) {
+                        if let Some(client) = Self::connect_unix_stream(stream) {
                             return Some(client);
                         }
                     }
@@ -175,11 +180,28 @@ impl DiscordRpcClient {
                     if client.send_handshake() {
                         return Some(client);
                     }
+                    client.connected = false;
                 }
             }
         }
 
         None
+    }
+
+    #[cfg(unix)]
+    fn connect_unix_stream(stream: UnixStream) -> Option<Self> {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+        let mut client = Self {
+            stream: StreamKind::Unix(stream),
+            connected: true,
+        };
+        if client.send_handshake() {
+            Some(client)
+        } else {
+            client.connected = false;
+            None
+        }
     }
 
     fn send_frame(&mut self, opcode: u32, payload: &str) -> bool {
@@ -217,25 +239,33 @@ impl DiscordRpcClient {
             .read_exact_with_timeout(&mut header, timeout)
             .is_err()
         {
+            self.connected = false;
             return false;
         }
 
         let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
         // In Discord IPC protocol, response opcode must be FRAME (1)
         if opcode != 1 {
+            self.connected = false;
             return false;
         }
 
         let body_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
         // Cap payload read at 64 KiB
         if body_len > 64 * 1024 {
+            self.connected = false;
             return false;
         }
 
         let mut body = vec![0u8; body_len];
-        self.stream
+        let ok = self
+            .stream
             .read_exact_with_timeout(&mut body, timeout)
-            .is_ok()
+            .is_ok();
+        if !ok {
+            self.connected = false;
+        }
+        ok
     }
 
     /// Sets playing activity status in Discord.
@@ -315,5 +345,36 @@ mod tests {
         std::env::set_var("MQ_DISCORD_APP_ID", "999888777666555444");
         assert_eq!(get_discord_app_id(), "999888777666555444");
         std::env::remove_var("MQ_DISCORD_APP_ID");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_ipc_paths_include_flatpak_and_snap_and_failed_handshake_clears_connected() {
+        use std::os::unix::net::UnixListener;
+
+        let paths = unix_ipc_candidate_paths(Some("/run/user/1000"), 3);
+        assert_eq!(
+            paths,
+            vec![
+                "/run/user/1000/discord-ipc-3",
+                "/run/user/1000/app/com.discordapp.Discord/discord-ipc-3",
+                "/run/user/1000/snap.discord/discord-ipc-3",
+                "/tmp/discord-ipc-3",
+            ]
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sock_path = tmp.path().join("discord-ipc-0");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let srv = std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                // Reply with invalid opcode (0 instead of 1) to force handshake failure.
+                let _ = conn.write_all(&[0, 0, 0, 0, 0, 0, 0, 0]);
+            }
+        });
+
+        let stream = UnixStream::connect(&sock_path).unwrap();
+        assert!(DiscordRpcClient::connect_unix_stream(stream).is_none());
+        let _ = srv.join();
     }
 }

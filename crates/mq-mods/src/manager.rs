@@ -5,12 +5,15 @@
 //! 1-click updates with `.bak` backup and automatic rollback on failure.
 
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use mq_core::fs_util::{remove_file_with_retry, rename_with_retry};
 use mq_core::{resolve_safe_path, MqError, MqPaths, MqResult, Sha1Digest, Sha512Digest};
 use mq_net::{DownloadSpec, NetEngine};
-use mq_sched::EpochGuard;
+use mq_sched::{CancelEpoch, ComputePool, EpochGuard};
+use sha1::{Digest as _, Sha1};
+use sha2::Sha512;
 
 use crate::curseforge::{expand_curseforge_cdn_urls, is_allowed_curseforge_download_url};
 use crate::lockfile::{ModLockEntry, ModLockFile};
@@ -104,9 +107,20 @@ pub fn delete_mod_and_find_orphans(instance_dir: &Path, file_name: &str) -> MqRe
     delete_mod(&mods_dir, file_name)?;
 
     let mut lock = ModLockFile::load_for_instance(instance_dir);
-    let key_to_remove = lock.find_by_filename(file_name).map(|(k, _)| k.clone());
+    let mods_lock = ModLockFile::load_or_default(&mods_dir);
+    let key_to_remove = lock
+        .find_by_filename(file_name)
+        .or_else(|| mods_lock.find_by_filename(file_name))
+        .map(|(k, _)| k.clone());
+    let mut changed = false;
     if let Some(ref key) = key_to_remove {
         lock.remove_entry(key);
+        changed = true;
+    }
+    if changed
+        || instance_dir.join(crate::lockfile::LOCKFILE_NAME).is_file()
+        || mods_dir.join(crate::lockfile::LOCKFILE_NAME).is_file()
+    {
         let _ = lock.save_for_instance(instance_dir);
     }
 
@@ -426,28 +440,30 @@ pub async fn update_installed_content(
             let _ = remove_file_with_retry(&bak_path);
 
             if let Ok((actual_sha1, actual_sha512, _)) = stream_hash_file_sha1_sha512(&new_path) {
-                let mut lock = ModLockFile::load_or_default(target_dir);
-                let existing_dep = lock
-                    .find_by_filename(old_file_name)
-                    .map(|(_, e)| (e.installed_as_dependency, e.required_by.clone()))
-                    .unwrap_or((false, Vec::new()));
-
-                lock.record_install(
-                    new_download.project_id.clone(),
-                    ModLockEntry {
-                        source,
-                        project_id: new_download.project_id.clone(),
-                        version_id: new_download.version_id.clone(),
-                        file_id: Some(new_download.version_id.clone()),
-                        filename: new_download.filename.clone(),
-                        sha1: Some(actual_sha1.to_hex()),
-                        sha512: actual_sha512.to_hex(),
-                        installed_as_dependency: existing_dep.0,
-                        required_by: existing_dep.1,
-                        kind,
-                    },
+                let dep_meta = record_updated_lock_entry(
+                    target_dir,
+                    old_file_name,
+                    new_download,
+                    kind,
+                    source,
+                    actual_sha1,
+                    actual_sha512,
+                    (false, Vec::new()),
                 );
-                let _ = lock.save(target_dir);
+                if let Some(inst_dir) = resolve_instance_dir_from_target(target_dir, kind) {
+                    if inst_dir != target_dir {
+                        record_updated_lock_entry(
+                            inst_dir,
+                            old_file_name,
+                            new_download,
+                            kind,
+                            source,
+                            actual_sha1,
+                            actual_sha512,
+                            dep_meta,
+                        );
+                    }
+                }
             }
 
             Ok(new_path)
@@ -464,6 +480,61 @@ pub async fn update_installed_content(
     }
 }
 
+fn resolve_instance_dir_from_target(target_dir: &Path, kind: ProjectKind) -> Option<&Path> {
+    let sub = kind.target_subfolder();
+    if sub.is_empty() {
+        Some(target_dir)
+    } else if target_dir.file_name().and_then(|n| n.to_str()) == Some(sub) {
+        target_dir.parent()
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_updated_lock_entry(
+    lock_dir: &Path,
+    old_file_name: &str,
+    new_download: &ResolvedModDownload,
+    kind: ProjectKind,
+    source: LockSource,
+    actual_sha1: Sha1Digest,
+    actual_sha512: Sha512Digest,
+    fallback_dep: (bool, Vec<String>),
+) -> (bool, Vec<String>) {
+    let mut lock = ModLockFile::load_or_default(lock_dir);
+    let existing = lock
+        .find_by_filename(old_file_name)
+        .map(|(k, e)| (k.clone(), e.installed_as_dependency, e.required_by.clone()));
+    let (installed_as_dependency, required_by) = match existing {
+        Some((old_key, dep, req_by)) => {
+            if old_key != new_download.project_id {
+                lock.entries.remove(&old_key);
+            }
+            (dep, req_by)
+        }
+        None => fallback_dep,
+    };
+
+    lock.record_install(
+        new_download.project_id.clone(),
+        ModLockEntry {
+            source,
+            project_id: new_download.project_id.clone(),
+            version_id: new_download.version_id.clone(),
+            file_id: Some(new_download.version_id.clone()),
+            filename: new_download.filename.clone(),
+            sha1: Some(actual_sha1.to_hex()),
+            sha512: actual_sha512.to_hex(),
+            installed_as_dependency,
+            required_by: required_by.clone(),
+            kind,
+        },
+    );
+    let _ = lock.save(lock_dir);
+    (installed_as_dependency, required_by)
+}
+
 /// Report summarizing installed and missing mod dependencies.
 #[derive(Debug, Clone, Default)]
 pub struct AutoFixDepsReport {
@@ -477,7 +548,26 @@ pub async fn auto_install_missing_dependencies(
     missing_ids: &[String],
     mc_version: &str,
     loader: mq_core::ModLoaderKind,
+    cf_api_key: Option<&str>,
+) -> MqResult<AutoFixDepsReport> {
+    auto_install_missing_dependencies_with_api_base(
+        mods_dir,
+        missing_ids,
+        mc_version,
+        loader,
+        cf_api_key,
+        "https://api.modrinth.com/v2",
+    )
+    .await
+}
+
+async fn auto_install_missing_dependencies_with_api_base(
+    mods_dir: &Path,
+    missing_ids: &[String],
+    mc_version: &str,
+    loader: mq_core::ModLoaderKind,
     _cf_api_key: Option<&str>,
+    api_base: &str,
 ) -> MqResult<AutoFixDepsReport> {
     fs::create_dir_all(mods_dir)?;
     let client = reqwest::Client::builder()
@@ -487,6 +577,14 @@ pub async fn auto_install_missing_dependencies(
 
     let mut report = AutoFixDepsReport::default();
     let loader_str = loader.as_str();
+    let api_root = api_base.trim_end_matches('/');
+
+    let mut target_lock = ModLockFile::load_or_default(mods_dir);
+    let inst_dir_opt = resolve_instance_dir_from_target(mods_dir, ProjectKind::Mod)
+        .filter(|d| *d != mods_dir)
+        .map(Path::to_path_buf);
+    let mut inst_lock_opt = inst_dir_opt.as_deref().map(ModLockFile::load_for_instance);
+    let mut lock_dirty = false;
 
     for id in missing_ids {
         let trimmed_id = id.trim();
@@ -495,13 +593,18 @@ pub async fn auto_install_missing_dependencies(
         }
 
         let url = format!(
-            "https://api.modrinth.com/v2/project/{trimmed_id}/version?game_versions=[\"{mc_version}\"]&loaders=[\"{loader_str}\"]"
+            "{api_root}/project/{trimmed_id}/version?game_versions=[\"{mc_version}\"]&loaders=[\"{loader_str}\"]"
         );
         let mut installed_ok = false;
         if let Ok(resp) = client.get(&url).send().await {
             if resp.status().is_success() {
                 if let Ok(versions) = resp.json::<Vec<serde_json::Value>>().await {
                     if let Some(v) = versions.first() {
+                        let version_id = v
+                            .get("id")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or_default()
+                            .to_owned();
                         if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
                             let file_entry = files
                                 .iter()
@@ -514,13 +617,106 @@ pub async fn auto_install_missing_dependencies(
                                     file_obj.get("url").and_then(|u| u.as_str()),
                                     file_obj.get("filename").and_then(|f| f.as_str()),
                                 ) {
-                                    if let Ok(dl_resp) = client.get(dl_url).send().await {
-                                        if dl_resp.status().is_success() {
-                                            if let Ok(bytes) = dl_resp.bytes().await {
-                                                let target = mods_dir.join(filename);
-                                                if fs::write(&target, &bytes).is_ok() {
-                                                    report.installed.push(filename.to_string());
-                                                    installed_ok = true;
+                                    let safe_target = (!filename.contains('/')
+                                        && !filename.contains('\\'))
+                                    .then(|| resolve_safe_path(mods_dir, filename).ok())
+                                    .flatten();
+
+                                    let url_ok = validate_content_download_url(dl_url).is_ok();
+                                    let hashes_obj = file_obj.get("hashes");
+                                    let expected_sha1 = hashes_obj
+                                        .and_then(|h| h.get("sha1"))
+                                        .and_then(|s| s.as_str())
+                                        .map(Sha1Digest::from_hex);
+                                    let expected_sha512 = hashes_obj
+                                        .and_then(|h| h.get("sha512"))
+                                        .and_then(|s| s.as_str())
+                                        .map(Sha512Digest::from_hex);
+                                    let hashes_parse_ok =
+                                        expected_sha1.as_ref().map(|r| r.is_ok()).unwrap_or(true)
+                                            && expected_sha512
+                                                .as_ref()
+                                                .map(|r| r.is_ok())
+                                                .unwrap_or(true);
+
+                                    if let (Some(target), true, true) =
+                                        (safe_target, url_ok, hashes_parse_ok)
+                                    {
+                                        if let Ok(dl_resp) = client.get(dl_url).send().await {
+                                            if dl_resp.status().is_success() {
+                                                if let Ok(bytes) = dl_resp.bytes().await {
+                                                    let actual_sha1 = {
+                                                        let mut h = Sha1::new();
+                                                        h.update(&bytes);
+                                                        Sha1Digest::from_bytes(h.finalize().into())
+                                                    };
+                                                    let actual_sha512 = {
+                                                        let mut h = Sha512::new();
+                                                        h.update(&bytes);
+                                                        Sha512Digest::from_bytes(
+                                                            h.finalize().into(),
+                                                        )
+                                                    };
+
+                                                    let sha1_matches = match expected_sha1 {
+                                                        Some(Ok(exp)) => exp == actual_sha1,
+                                                        Some(Err(_)) => false,
+                                                        None => true,
+                                                    };
+                                                    let sha512_matches = match expected_sha512 {
+                                                        Some(Ok(exp)) => exp == actual_sha512,
+                                                        Some(Err(_)) => false,
+                                                        None => true,
+                                                    };
+
+                                                    if sha1_matches && sha512_matches {
+                                                        if mq_core::platform::atomic_write(
+                                                            &target, &bytes,
+                                                        )
+                                                        .is_ok()
+                                                        {
+                                                            let existing_req_by = target_lock
+                                                                .entries
+                                                                .get(trimmed_id)
+                                                                .map(|e| e.required_by.clone())
+                                                                .unwrap_or_default();
+                                                            let entry = ModLockEntry {
+                                                                source: LockSource::Modrinth,
+                                                                project_id: trimmed_id.to_owned(),
+                                                                version_id: version_id.clone(),
+                                                                file_id: (!version_id.is_empty())
+                                                                    .then_some(version_id),
+                                                                filename: filename.to_owned(),
+                                                                sha1: Some(actual_sha1.to_hex()),
+                                                                sha512: actual_sha512.to_hex(),
+                                                                installed_as_dependency: true,
+                                                                required_by: existing_req_by,
+                                                                kind: ProjectKind::Mod,
+                                                            };
+                                                            target_lock.record_install(
+                                                                trimmed_id.to_owned(),
+                                                                entry.clone(),
+                                                            );
+                                                            if let Some(ref mut il) = inst_lock_opt
+                                                            {
+                                                                il.record_install(
+                                                                    trimmed_id.to_owned(),
+                                                                    entry,
+                                                                );
+                                                            }
+                                                            lock_dirty = true;
+                                                            report
+                                                                .installed
+                                                                .push(filename.to_string());
+                                                            installed_ok = true;
+                                                        }
+                                                    } else {
+                                                        tracing::warn!(
+                                                            project_id = %trimmed_id,
+                                                            filename = %filename,
+                                                            "Dependency hash verification failed"
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -535,6 +731,13 @@ pub async fn auto_install_missing_dependencies(
 
         if !installed_ok {
             report.not_found.push(trimmed_id.to_string());
+        }
+    }
+
+    if lock_dirty {
+        let _ = target_lock.save(mods_dir);
+        if let (Some(ref inst_dir), Some(ref il)) = (inst_dir_opt, inst_lock_opt) {
+            let _ = il.save_for_instance(inst_dir);
         }
     }
 
@@ -616,6 +819,8 @@ pub async fn apply_modpack_update(
     info: &ModpackUpdateInfo,
     _cf_api_key: Option<&str>,
 ) -> MqResult<usize> {
+    validate_content_download_url(&info.download_url)?;
+
     let client = reqwest::Client::builder()
         .user_agent("MrQuster/MQ")
         .build()
@@ -637,18 +842,80 @@ pub async fn apply_modpack_update(
         .await
         .map_err(|e| MqError::Network(format!("read bytes failed: {e}")))?;
 
-    let cursor = std::io::Cursor::new(bytes);
-    let mut zip = zip::ZipArchive::new(cursor)
-        .map_err(|e| MqError::Internal(format!("corrupt zip archive: {e}")))?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
+        .map_err(|e| MqError::Archive(format!("corrupt zip archive: {e}")))?;
+    let is_mrpack = zip.by_name("modrinth.index.json").is_ok();
+
+    if is_mrpack {
+        drop(zip);
+        use std::io::Write as _;
+        let mut tmp_mrpack = tempfile::NamedTempFile::new()?;
+        tmp_mrpack.write_all(&bytes)?;
+        tmp_mrpack.flush()?;
+
+        let mut fallback_root = None;
+        let paths = match instance_dir
+            .parent()
+            .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("instances"))
+            .and_then(|p| p.parent())
+        {
+            Some(data_root) => MqPaths::with_root(data_root),
+            None => {
+                let tmp = tempfile::tempdir()?;
+                let p = MqPaths::with_root(tmp.path());
+                fallback_root = Some(tmp);
+                p
+            }
+        };
+
+        let net = NetEngine::with_defaults()?;
+        let compute_pool = ComputePool::default();
+        let epoch = CancelEpoch::new();
+        let guard = epoch.snapshot();
+
+        let outcome = crate::mrpack::update_mrpack(
+            tmp_mrpack.path(),
+            instance_dir,
+            &paths,
+            &net,
+            &compute_pool,
+            &guard,
+            None,
+        )
+        .await?;
+        drop(fallback_root);
+
+        return Ok(outcome.install_outcome.installed_files.len()
+            + outcome.install_outcome.overrides_extracted
+            + outcome.install_outcome.client_overrides_extracted);
+    }
+
+    if zip.len() > crate::zip_safe::DEFAULT_MAX_ZIP_ENTRIES {
+        return Err(MqError::Archive(format!(
+            "zip-bomb detected: archive contains {} entries (limit: {})",
+            zip.len(),
+            crate::zip_safe::DEFAULT_MAX_ZIP_ENTRIES
+        )));
+    }
 
     let mut updated_count = 0;
+    let mut total_written = 0u64;
+    let max_entry = crate::zip_safe::DEFAULT_MAX_ENTRY_UNCOMPRESSED_BYTES;
+    let max_total = crate::zip_safe::DEFAULT_MAX_TOTAL_UNCOMPRESSED_BYTES;
     let preserve_prefixes = ["saves/", "screenshots/", "xaero/"];
     let preserve_exact = ["options.txt", "servers.dat"];
 
     for i in 0..zip.len() {
-        let mut file = zip
+        let file = zip
             .by_index(i)
-            .map_err(|e| MqError::Internal(format!("zip entry error: {e}")))?;
+            .map_err(|e| MqError::Archive(format!("zip entry error: {e}")))?;
+        if file.is_symlink()
+            || file
+                .unix_mode()
+                .is_some_and(crate::zip_safe::is_unix_symlink_mode)
+        {
+            continue;
+        }
         let raw_name = file.name().to_string();
         let normalized = raw_name.replace('\\', "/");
 
@@ -680,8 +947,17 @@ pub async fn apply_modpack_update(
             if let Some(p) = out_path.parent() {
                 fs::create_dir_all(p)?;
             }
+            let mut limited = file.take(max_entry + 1);
             let mut out = fs::File::create(&out_path)?;
-            std::io::copy(&mut file, &mut out)?;
+            let copied = std::io::copy(&mut limited, &mut out)?;
+            total_written = total_written.saturating_add(copied);
+            if copied > max_entry || total_written > max_total {
+                drop(out);
+                let _ = remove_file_with_retry(&out_path);
+                return Err(MqError::Archive(format!(
+                    "zip-bomb detected while extracting '{raw_name}': size limit exceeded"
+                )));
+            }
             updated_count += 1;
         }
     }
@@ -692,7 +968,7 @@ pub async fn apply_modpack_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha1::{Digest as _, Sha1};
+    use sha1::Sha1;
     use tempfile::tempdir;
 
     #[test]
@@ -1073,5 +1349,367 @@ mod tests {
         report.not_found.push("unknown-dep".into());
         assert_eq!(report.installed.len(), 1);
         assert_eq!(report.not_found.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_install_deps_validates_path_url_hashes_and_updates_lockfile() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let good_bytes = b"good-dep-jar-bytes".to_vec();
+        let good_sha1 = {
+            let mut h = Sha1::new();
+            h.update(&good_bytes);
+            Sha1Digest::from_bytes(h.finalize().into()).to_hex()
+        };
+        let good_sha512 = {
+            let mut h = Sha512::new();
+            h.update(&good_bytes);
+            Sha512Digest::from_bytes(h.finalize().into()).to_hex()
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let good_b = good_bytes.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let good_b = good_b.clone();
+                let s1 = good_sha1.clone();
+                let s512 = good_sha512.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let (status, body): (&str, Vec<u8>) =
+                        if path.starts_with("/project/good-dep/version") {
+                            let json = serde_json::json!([{
+                                "id": "ver-good",
+                                "files": [{
+                                    "primary": true,
+                                    "url": format!("http://{addr}/files/good-dep.jar"),
+                                    "filename": "good-dep.jar",
+                                    "hashes": { "sha1": s1, "sha512": s512 }
+                                }]
+                            }]);
+                            ("200 OK", json.to_string().into_bytes())
+                        } else if path.starts_with("/project/bad-path/version") {
+                            let json = serde_json::json!([{
+                                "id": "ver-badpath",
+                                "files": [{
+                                    "primary": true,
+                                    "url": format!("http://{addr}/files/good-dep.jar"),
+                                    "filename": "../../escape.jar"
+                                }]
+                            }]);
+                            ("200 OK", json.to_string().into_bytes())
+                        } else if path.starts_with("/project/bad-hash/version") {
+                            let json = serde_json::json!([{
+                                "id": "ver-badhash",
+                                "files": [{
+                                    "primary": true,
+                                    "url": format!("http://{addr}/files/good-dep.jar"),
+                                    "filename": "tampered.jar",
+                                    "hashes": { "sha1": "0000000000000000000000000000000000000000" }
+                                }]
+                            }]);
+                            ("200 OK", json.to_string().into_bytes())
+                        } else if path.starts_with("/project/bad-url/version") {
+                            let json = serde_json::json!([{
+                                "id": "ver-badurl",
+                                "files": [{
+                                    "primary": true,
+                                    "url": "https://evil.example.com/bad.jar",
+                                    "filename": "badurl.jar"
+                                }]
+                            }]);
+                            ("200 OK", json.to_string().into_bytes())
+                        } else if path == "/files/good-dep.jar" {
+                            ("200 OK", good_b)
+                        } else {
+                            ("404 Not Found", b"{}".to_vec())
+                        };
+                    let hdr = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(hdr.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                });
+            }
+        });
+
+        let tmp = tempdir().unwrap();
+        let inst_dir = tmp.path().join("inst");
+        let mods_dir = inst_dir.join("mods");
+        let missing = vec![
+            "good-dep".to_owned(),
+            "bad-path".to_owned(),
+            "bad-hash".to_owned(),
+            "bad-url".to_owned(),
+        ];
+        let report = auto_install_missing_dependencies_with_api_base(
+            &mods_dir,
+            &missing,
+            "1.21.1",
+            mq_core::ModLoaderKind::Fabric,
+            None,
+            &format!("http://{addr}"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.installed, vec!["good-dep.jar"]);
+        assert_eq!(report.not_found, vec!["bad-path", "bad-hash", "bad-url"]);
+        assert!(mods_dir.join("good-dep.jar").is_file());
+        assert!(!tmp.path().join("escape.jar").exists());
+        assert!(!mods_dir.join("tampered.jar").exists());
+        assert!(!mods_dir.join("badurl.jar").exists());
+
+        let mods_lock = ModLockFile::load_or_default(&mods_dir);
+        let inst_lock = ModLockFile::load_or_default(&inst_dir);
+        assert!(mods_lock.entries.contains_key("good-dep"));
+        assert!(inst_lock.entries.contains_key("good-dep"));
+        assert!(mods_lock.entries["good-dep"].installed_as_dependency);
+    }
+
+    #[tokio::test]
+    async fn update_installed_content_and_delete_sync_instance_and_target_lockfiles() {
+        use mq_net::NetConfig;
+        use mq_sched::{BufferPool, CancelEpoch, MIN_CHUNK_SIZE};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let new_bytes = b"sodium-0.6.0-payload".to_vec();
+        let new_sha1 = {
+            let mut h = Sha1::new();
+            h.update(&new_bytes);
+            Sha1Digest::from_bytes(h.finalize().into())
+        };
+        let new_sha512 = {
+            let mut h = Sha512::new();
+            h.update(&new_bytes);
+            Sha512Digest::from_bytes(h.finalize().into())
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = new_bytes.clone();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf).await;
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            }
+        });
+
+        let tmp = tempdir().unwrap();
+        let paths = MqPaths::with_root(tmp.path().join("data"));
+        let inst_dir = paths.instance_dir("sync-test");
+        let mods_dir = inst_dir.join("mods");
+        fs::create_dir_all(&mods_dir).unwrap();
+        fs::write(mods_dir.join("sodium-0.5.0.jar"), b"old").unwrap();
+
+        let mut init_lock = ModLockFile::default();
+        init_lock.record_install(
+            "AANobbMI",
+            ModLockEntry::new(LockSource::Modrinth, "AANobbMI", "v05", "sodium-0.5.0.jar"),
+        );
+        init_lock.save_for_instance(&inst_dir).unwrap();
+
+        let epoch = Arc::new(CancelEpoch::new());
+        let net = NetEngine::with_components(
+            NetConfig::default().with_max_retries(0),
+            Arc::new(BufferPool::with_limits(MIN_CHUNK_SIZE, 4, 4)),
+            epoch.clone(),
+            None,
+        )
+        .unwrap();
+        let guard = epoch.snapshot();
+
+        let dl = ResolvedModDownload {
+            project_id: "AANobbMI".into(),
+            version_id: "v06".into(),
+            filename: "sodium-0.6.0.jar".into(),
+            url: format!("http://{addr}/sodium-0.6.0.jar"),
+            size: new_bytes.len() as u64,
+            sha1: Some(new_sha1),
+            sha512: Some(new_sha512),
+            is_dependency: false,
+        };
+
+        update_installed_content(
+            &mods_dir,
+            "sodium-0.5.0.jar",
+            &dl,
+            ProjectKind::Mod,
+            LockSource::Modrinth,
+            &paths,
+            &net,
+            &guard,
+        )
+        .await
+        .unwrap();
+
+        let root_lock: ModLockFile =
+            serde_json::from_str(&fs::read_to_string(inst_dir.join(".mq-lock.json")).unwrap())
+                .unwrap();
+        let target_lock: ModLockFile =
+            serde_json::from_str(&fs::read_to_string(mods_dir.join(".mq-lock.json")).unwrap())
+                .unwrap();
+        assert_eq!(root_lock.entries["AANobbMI"].filename, "sodium-0.6.0.jar");
+        assert_eq!(target_lock.entries["AANobbMI"].filename, "sodium-0.6.0.jar");
+        assert_eq!(root_lock.entries["AANobbMI"].version_id, "v06");
+
+        delete_mod_and_find_orphans(&inst_dir, "sodium-0.6.0.jar").unwrap();
+        let root_after: ModLockFile =
+            serde_json::from_str(&fs::read_to_string(inst_dir.join(".mq-lock.json")).unwrap())
+                .unwrap();
+        let target_after: ModLockFile =
+            serde_json::from_str(&fs::read_to_string(mods_dir.join(".mq-lock.json")).unwrap())
+                .unwrap();
+        assert!(!root_after.entries.contains_key("AANobbMI"));
+        assert!(!target_after.entries.contains_key("AANobbMI"));
+    }
+
+    #[tokio::test]
+    async fn apply_modpack_update_delegates_mrpack_and_skips_symlinks_in_zip() {
+        use std::io::Write as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use zip::write::SimpleFileOptions;
+
+        // Build a .mrpack archive with modrinth.index.json and an override
+        let mrpack_bytes = {
+            let mut cur = std::io::Cursor::new(Vec::new());
+            {
+                let mut zw = zip::ZipWriter::new(&mut cur);
+                let opts = SimpleFileOptions::default();
+                let idx = serde_json::json!({
+                    "formatVersion": 1,
+                    "game": "minecraft",
+                    "versionId": "2.0.0",
+                    "name": "TestPack",
+                    "dependencies": { "minecraft": "1.21.1", "fabric-loader": "0.16.9" },
+                    "files": []
+                });
+                zw.start_file("modrinth.index.json", opts).unwrap();
+                zw.write_all(idx.to_string().as_bytes()).unwrap();
+                zw.start_file("overrides/config/pack.toml", opts).unwrap();
+                zw.write_all(b"updated = true\n").unwrap();
+                zw.finish().unwrap();
+            }
+            cur.into_inner()
+        };
+
+        // Build a regular zip containing a symlink + zip-slip test or safe file + preserved options.txt
+        let zip_bytes = {
+            let mut cur = std::io::Cursor::new(Vec::new());
+            {
+                let mut zw = zip::ZipWriter::new(&mut cur);
+                let opts = SimpleFileOptions::default();
+                zw.add_symlink("overrides/evil_link", "/etc/passwd", opts)
+                    .unwrap();
+                zw.start_file("overrides/options.txt", opts).unwrap();
+                zw.write_all(b"overwritten").unwrap();
+                zw.start_file("overrides/config/zip.toml", opts).unwrap();
+                zw.write_all(b"zip = true\n").unwrap();
+                zw.finish().unwrap();
+            }
+            cur.into_inner()
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mr_b = mrpack_bytes.clone();
+        let zp_b = zip_bytes.clone();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mr_b = mr_b.clone();
+                    let zp_b = zp_b.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 512];
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("/");
+                        let body = if path == "/pack.mrpack" { mr_b } else { zp_b };
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(hdr.as_bytes()).await;
+                        let _ = stream.write_all(&body).await;
+                    });
+                }
+            }
+        });
+
+        let tmp = tempdir().unwrap();
+        let inst_mr = tmp.path().join("data").join("instances").join("mr-pack");
+        fs::create_dir_all(&inst_mr).unwrap();
+        let count_mr = apply_modpack_update(
+            &inst_mr,
+            &ModpackUpdateInfo {
+                latest_version_id: "2.0.0".into(),
+                latest_version_name: "2.0.0".into(),
+                changelog: String::new(),
+                download_url: format!("http://{addr}/pack.mrpack"),
+                source: "modrinth".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_mr, 1);
+        assert_eq!(
+            fs::read_to_string(inst_mr.join("config/pack.toml")).unwrap(),
+            "updated = true\n"
+        );
+        assert!(inst_mr.join(".mq-mrpack-state.json").is_file());
+
+        let inst_zip = tmp.path().join("data").join("instances").join("zip-pack");
+        fs::create_dir_all(&inst_zip).unwrap();
+        fs::write(inst_zip.join("options.txt"), b"user-options").unwrap();
+        let count_zip = apply_modpack_update(
+            &inst_zip,
+            &ModpackUpdateInfo {
+                latest_version_id: "1.1".into(),
+                latest_version_name: "1.1".into(),
+                changelog: String::new(),
+                download_url: format!("http://{addr}/pack.zip"),
+                source: "curseforge".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_zip, 1);
+        assert!(!inst_zip.join("evil_link").exists());
+        assert_eq!(
+            fs::read_to_string(inst_zip.join("options.txt")).unwrap(),
+            "user-options"
+        );
+        assert_eq!(
+            fs::read_to_string(inst_zip.join("config/zip.toml")).unwrap(),
+            "zip = true\n"
+        );
     }
 }

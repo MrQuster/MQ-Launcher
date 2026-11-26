@@ -8,6 +8,7 @@ use egui::{
 };
 use mq_core::CpuSnapshot;
 
+use crate::i18n::tr;
 use crate::state::safe_clamp_f32;
 use crate::theme::{solid_hud_frame, Tokens, ACCENT_COBALT, RADIUS_TAG};
 use crate::widgets::{status_dot, version_badge};
@@ -32,6 +33,8 @@ pub struct BottomHudData {
     pub cpu_snapshot: CpuSnapshot,
     /// Cumulative `UiWatchdog` (`>8ms` frame budget) violation count.
     pub watchdog_violations: u64,
+    /// Active UI language code (e.g. `"ru_RU"`, `"en_US"`). Defaults to Russian when empty.
+    pub lang_code: String,
 }
 
 /// Returns `true` when the window viewport has been minimized or resized to `0x0` (`<= 1.0px`)
@@ -58,6 +61,10 @@ fn core_bar_color(tokens: &Tokens, usage_pct: f32) -> Color32 {
 
 /// Renders per-core CPU load vertical bars, wrapping neatly into rows when >16 cores are present.
 pub fn render_per_core_bars(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens) {
+    render_per_core_bars_localized(ui, snap, tokens, "ru_RU");
+}
+
+fn render_per_core_bars_localized(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens, lang: &str) {
     let core_count = snap.per_core.len().max(1);
     let bar_w = 5.0_f32;
     let gap = 2.0_f32;
@@ -132,8 +139,12 @@ pub fn render_per_core_bars(ui: &mut Ui, snap: &CpuSnapshot, tokens: &Tokens) {
         response.on_hover_ui(|ui| {
             ui.label(
                 RichText::new(format!(
-                    "Процессор: {:>4.1}% | Память: {:>5.1} МБ",
-                    snap.total_pct, snap.rss_mib
+                    "{}: {:>4.1}% | {}: {:>5.1} {}",
+                    tr("hud_cpu", lang),
+                    snap.total_pct,
+                    tr("hud_mem", lang),
+                    snap.rss_mib,
+                    tr("hud_mib", lang)
                 ))
                 .font(FontId::new(12.0, FontFamily::Monospace))
                 .color(tokens.text),
@@ -220,13 +231,18 @@ pub fn render_bottom_hud(ui: &mut Ui, data: &BottomHudData) {
         );
     }
     let avail_w = ui.available_width();
+    let lang = if data.lang_code.is_empty() {
+        "ru_RU"
+    } else {
+        data.lang_code.as_str()
+    };
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
 
         // Left: Phase status dot + label + optional progress bar + throughput metrics
         let (dot_color, phase_text) = match data.active_phase.as_deref() {
             Some(phase) if !phase.is_empty() => (tokens.accent, phase),
-            _ => (tokens.accent.gamma_multiply(0.75), "Готов к работе"),
+            _ => (tokens.accent.gamma_multiply(0.75), tr("status_ready", lang)),
         };
         status_dot(ui, dot_color, phase_text);
 
@@ -241,13 +257,22 @@ pub fn render_bottom_hud(ui: &mut Ui, data: &BottomHudData) {
         if avail_w >= 940.0 {
             ui.separator();
             let dag_label = if data.active_dag_tasks == 0 {
-                "Загрузки: нет активных".to_string()
+                tr("hud_downloads_none", lang).to_string()
             } else {
-                format!("Загрузки: {} активных", data.active_dag_tasks)
+                format!(
+                    "{}: {} {}",
+                    tr("hud_downloads_label", lang),
+                    data.active_dag_tasks,
+                    tr("hud_active_word", lang)
+                )
             };
             let metrics_text = format!(
-                "{:>3.0} файлов/с | {:>4.1} МБ/с | {}",
-                data.files_per_sec, data.mib_per_sec, dag_label
+                "{:>3.0} {} | {:>4.1} {} | {}",
+                data.files_per_sec,
+                tr("hud_files_per_sec", lang),
+                data.mib_per_sec,
+                tr("hud_mib_per_sec", lang),
+                dag_label
             );
             ui.label(
                 RichText::new(metrics_text)
@@ -257,13 +282,18 @@ pub fn render_bottom_hud(ui: &mut Ui, data: &BottomHudData) {
         } else if avail_w >= 760.0 {
             ui.separator();
             let dag_label = if data.active_dag_tasks == 0 {
-                "нет активных".to_string()
+                tr("hud_none_short", lang).to_string()
             } else {
-                format!("{} акт.", data.active_dag_tasks)
+                format!("{} {}", data.active_dag_tasks, tr("hud_active_short", lang))
             };
             let metrics_text = format!(
-                "{:>3.0} ф/с | {:>4.1} МБ/с | Загрузки: {}",
-                data.files_per_sec, data.mib_per_sec, dag_label
+                "{:>3.0} {} | {:>4.1} {} | {}: {}",
+                data.files_per_sec,
+                tr("hud_files_short", lang),
+                data.mib_per_sec,
+                tr("hud_mib_per_sec", lang),
+                tr("hud_downloads_label", lang),
+                dag_label
             );
             ui.label(
                 RichText::new(metrics_text)
@@ -286,16 +316,24 @@ pub fn render_bottom_hud(ui: &mut Ui, data: &BottomHudData) {
             }
 
             let rss_label = if avail_w < 550.0 {
-                format!("Процессор: {:>3.0}%", data.cpu_snapshot.total_pct)
+                format!(
+                    "{}: {:>3.0}%",
+                    tr("hud_cpu", lang),
+                    data.cpu_snapshot.total_pct
+                )
             } else {
                 format!(
-                    "Процессор: {:>3.0}% | Память: {:>5.1} МБ",
-                    data.cpu_snapshot.total_pct, data.cpu_snapshot.rss_mib
+                    "{}: {:>3.0}% | {}: {:>5.1} {}",
+                    tr("hud_cpu", lang),
+                    data.cpu_snapshot.total_pct,
+                    tr("hud_mem", lang),
+                    data.cpu_snapshot.rss_mib,
+                    tr("hud_mib", lang)
                 )
             };
             ui.label(RichText::new(rss_label).font(mono_font).color(tokens.text));
 
-            render_per_core_bars(ui, &data.cpu_snapshot, &tokens);
+            render_per_core_bars_localized(ui, &data.cpu_snapshot, &tokens, lang);
         });
     });
 }
@@ -377,6 +415,7 @@ mod tests {
                 rss_mib: 0.0,
             },
             watchdog_violations: 0,
+            lang_code: String::new(),
         };
 
         // Render with tiny 1.0 height to force max_bar_h < 1.5
@@ -413,6 +452,7 @@ mod tests {
                 rss_mib: 44.2,
             },
             watchdog_violations: 0,
+            lang_code: String::new(),
         };
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -451,6 +491,7 @@ mod tests {
                     rss_mib: 128.0,
                 },
                 watchdog_violations: 0,
+                lang_code: String::new(),
             };
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1180.0, 740.0))),

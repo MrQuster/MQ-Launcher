@@ -780,6 +780,17 @@ impl MsaClient {
 
         if !status.is_success() {
             let scrubbed = redact_text(&text, &[xsts_token.expose_secret(), &identity_token]);
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(MqError::Auth(format!(
+                    "Вход через Microsoft прошёл успешно, но Minecraft Services отклонил доступ (HTTP {}): \
+                     возможно, приложение ещё ожидает подтверждения в Mojang или доступ ограничен на Xbox-аккаунте. \
+                     Подробности: {}",
+                    status.as_u16(),
+                    scrubbed
+                )));
+            }
             return Err(MqError::Auth(format!(
                 "Minecraft Services login_with_xbox failed (HTTP {}): {}",
                 status.as_u16(),

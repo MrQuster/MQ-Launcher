@@ -3,6 +3,7 @@
 //! `EventBus` streaming.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,19 @@ impl Drop for ArgfileGuard {
             let _ = mq_core::fs_util::remove_file_with_retry(path);
         }
     }
+}
+
+fn resolve_java_major_for_command(program: &Path, args: &[String]) -> Option<u32> {
+    let java_path: PathBuf = if crate::command::is_java_launcher_binary(program) {
+        program.to_path_buf()
+    } else {
+        args.iter()
+            .map(Path::new)
+            .find(|p| crate::command::is_java_launcher_binary(p))?
+            .to_path_buf()
+    };
+    let clean_java = strip_windows_verbatim_prefix(&java_path);
+    crate::java::probe_java_binary(&clean_java).map(|rt| rt.major_version)
 }
 
 /// Spawns the configured Minecraft JVM (or wrapper) child process, streams `stdout` and `stderr`
@@ -67,7 +81,7 @@ pub async fn spawn_and_stream_game_with_pid(
         let seq = ARGFILE_SEQ.fetch_add(1, Ordering::Relaxed);
         let argfile_path =
             argfile_base.join(format!(".mq-args-{}-{seq}.argfile", std::process::id()));
-        let java_major = crate::java::probe_java_binary(&clean_program).map(|rt| rt.major_version);
+        let java_major = resolve_java_major_for_command(&clean_program, &cmd.args);
         let (rewritten, created) = crate::command::rewrite_args_for_windows_limit(
             &clean_program,
             &cmd.args,
@@ -92,8 +106,7 @@ pub async fn spawn_and_stream_game_with_pid(
             let seq = ARGFILE_SEQ.fetch_add(1, Ordering::Relaxed);
             let argfile_path =
                 argfile_base.join(format!(".mq-args-{}-{seq}.argfile", std::process::id()));
-            let java_major =
-                crate::java::probe_java_binary(&clean_program).map(|rt| rt.major_version);
+            let java_major = resolve_java_major_for_command(&clean_program, &cmd.args);
             let (rewritten, created) = crate::command::rewrite_args_for_windows_limit(
                 &clean_program,
                 &cmd.args,
@@ -390,5 +403,44 @@ mod tests {
         assert!(lines[1].contains("[REDACTED]"));
         assert!(!lines[1].ends_with('\r'));
         assert_eq!(lines[2], "[WARN] Third line survives");
+    }
+
+    #[test]
+    fn resolve_java_major_for_wrapped_java8_prevents_argfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let java_home = tmp.path().join("jre8");
+        let bin_dir = java_home.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let java_bin = bin_dir.join(if cfg!(windows) { "java.exe" } else { "java" });
+        fs::write(&java_bin, b"dummy").unwrap();
+        fs::write(java_home.join("release"), "JAVA_VERSION=\"1.8.0_412\"\n").unwrap();
+
+        let wrapper = Path::new("gamemoderun");
+        let huge_cp = (0..450)
+            .map(|i| format!("/opt/mq/libraries/org/example/modlib-{i:03}/1.0/modlib-{i:03}.jar"))
+            .collect::<Vec<_>>()
+            .join(":");
+        let args = vec![
+            java_bin.to_string_lossy().into_owned(),
+            "-cp".to_owned(),
+            huge_cp,
+            "net.minecraft.launchwrapper.Launch".to_owned(),
+        ];
+
+        let major = resolve_java_major_for_command(wrapper, &args);
+        assert_eq!(major, Some(8));
+
+        let argfile_path = tmp.path().join(".mq-args-wrapped-java8.argfile");
+        let (rewritten, created) = crate::command::rewrite_args_for_windows_limit(
+            wrapper,
+            &args,
+            tmp.path(),
+            major,
+            &argfile_path,
+        )
+        .unwrap();
+        assert!(created.is_none());
+        assert!(!argfile_path.exists());
+        assert!(!rewritten.iter().any(|a| a.starts_with('@')));
     }
 }

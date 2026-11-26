@@ -420,6 +420,65 @@ fn resolve_processor_arg(
     Ok(s)
 }
 
+const FORGE_PROCESSOR_ARGFILE_THRESHOLD: usize = 20_000;
+
+struct TempArgfileGuard(PathBuf);
+
+impl Drop for TempArgfileGuard {
+    fn drop(&mut self) {
+        let _ = mq_core::fs_util::remove_file_with_retry(&self.0);
+    }
+}
+
+fn is_java_9_or_newer_for_forge(java_major: Option<u32>, mc_version: &str) -> bool {
+    if let Some(major) = java_major {
+        return major >= 9;
+    }
+    let core = mc_version
+        .trim()
+        .split(['-', '+', ' '])
+        .next()
+        .unwrap_or("");
+    let nums: Vec<u32> = core.split('.').filter_map(|s| s.parse().ok()).collect();
+    match nums.as_slice() {
+        [major, ..] if *major >= 2 => true,
+        [1, minor, ..] => *minor > 12,
+        _ => false,
+    }
+}
+
+fn prepare_forge_processor_cp_args(
+    classpath: &str,
+    java_major: Option<u32>,
+    mc_version: &str,
+    argfile_dir: &Path,
+    proc_idx: usize,
+) -> MqResult<(Vec<String>, Option<TempArgfileGuard>)> {
+    if classpath.len() > FORGE_PROCESSOR_ARGFILE_THRESHOLD
+        && is_java_9_or_newer_for_forge(java_major, mc_version)
+    {
+        let base_dir = if argfile_dir.is_dir() {
+            strip_windows_verbatim_prefix(argfile_dir)
+        } else {
+            strip_windows_verbatim_prefix(&std::env::temp_dir())
+        };
+        let argfile_path = base_dir.join(format!(
+            ".mq-forge-proc-{}-{proc_idx}.argfile",
+            std::process::id()
+        ));
+        let content = format!(
+            "{}\n{}\n",
+            mq_launch::command::format_java_argfile_token("-cp"),
+            mq_launch::command::format_java_argfile_token(classpath)
+        );
+        fs::write(&argfile_path, content.as_bytes())?;
+        let argfile_flag = format!("@{}", argfile_path.display());
+        Ok((vec![argfile_flag], Some(TempArgfileGuard(argfile_path))))
+    } else {
+        Ok((vec!["-cp".to_owned(), classpath.to_owned()], None))
+    }
+}
+
 /// Runs all client-side Forge `install_profile.json` processors sequentially using `java_path`.
 pub async fn run_forge_processors(
     java_path: &Path,
@@ -430,6 +489,7 @@ pub async fn run_forge_processors(
     forge: &PreparedForge,
 ) -> MqResult<()> {
     let clean_java_path = strip_windows_verbatim_prefix(java_path);
+    let java_major = mq_launch::probe_java_binary(&clean_java_path).map(|rt| rt.major_version);
     let libs_dir = strip_windows_verbatim_prefix(&paths.libraries_dir());
     let clean_instance_dir = strip_windows_verbatim_prefix(instance_dir);
     let clean_mc_jar = strip_windows_verbatim_prefix(minecraft_jar);
@@ -481,6 +541,14 @@ pub async fn run_forge_processors(
             "running Forge installer processor"
         );
 
+        let (cp_args, _argfile_guard) = prepare_forge_processor_cp_args(
+            &classpath,
+            java_major,
+            mc_version,
+            &clean_instance_dir,
+            idx,
+        )?;
+
         let mut cmd = tokio::process::Command::new(&clean_java_path);
         cmd.stdin(std::process::Stdio::null());
         #[cfg(windows)]
@@ -490,8 +558,7 @@ pub async fn run_forge_processors(
             cmd.arg("-Dfile.encoding=UTF-8");
         }
         let output = cmd
-            .arg("-cp")
-            .arg(&classpath)
+            .args(&cp_args)
             .arg(&main_class)
             .args(&resolved_args)
             .output()
@@ -679,5 +746,49 @@ mod tests {
             read_jar_main_class(&jar_path).unwrap(),
             "net.minecraftforge.installertools.ConsoleTool"
         );
+    }
+
+    #[test]
+    fn forge_processor_uses_argfile_for_long_classpath_on_java9_plus_and_cleans_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long_cp = (0..400)
+            .map(|i| format!(r"C:\Users\Player\MQ\libraries\org\example\lib-{i:03}\lib-{i:03}.jar"))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(long_cp.len() > FORGE_PROCESSOR_ARGFILE_THRESHOLD);
+
+        // Java 17 -> uses @argfile and cleans it up on drop
+        let created_path = {
+            let (args, guard) =
+                prepare_forge_processor_cp_args(&long_cp, Some(17), "1.20.1", tmp.path(), 0)
+                    .unwrap();
+            assert_eq!(args.len(), 1);
+            assert!(args[0].starts_with('@'));
+            let p = PathBuf::from(args[0].trim_start_matches('@'));
+            assert!(p.is_file());
+            let content = fs::read_to_string(&p).unwrap();
+            assert!(content.contains("-cp"));
+            assert!(content.contains(r"C:\\Users\\Player\\MQ\\libraries"));
+            assert!(guard.is_some());
+            p
+        };
+        assert!(
+            !created_path.exists(),
+            "argfile must be deleted on guard drop"
+        );
+
+        // Java 8 -> keeps inline -cp
+        let (args8, guard8) =
+            prepare_forge_processor_cp_args(&long_cp, Some(8), "1.12.2", tmp.path(), 1).unwrap();
+        assert_eq!(args8[0], "-cp");
+        assert_eq!(args8[1], long_cp);
+        assert!(guard8.is_none());
+
+        // Short classpath -> keeps inline -cp
+        let (args_short, guard_short) =
+            prepare_forge_processor_cp_args("a.jar;b.jar", Some(21), "1.21.1", tmp.path(), 2)
+                .unwrap();
+        assert_eq!(args_short, vec!["-cp", "a.jar;b.jar"]);
+        assert!(guard_short.is_none());
     }
 }

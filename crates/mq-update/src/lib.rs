@@ -671,7 +671,16 @@ impl UpdateManager {
         }
 
         let inno_mode = Self::is_windows_inno_setup();
-        if binary_url.is_empty() && !(inno_mode && installer_url.is_some()) {
+        if inno_mode {
+            if installer_url.is_none() {
+                tracing::warn!(
+                    "Release v{} is missing expected Windows Inno Setup installer '{}'; skipping update report",
+                    remote_ver_str,
+                    expected_installer
+                );
+                return Ok(None);
+            }
+        } else if binary_url.is_empty() {
             return Ok(None);
         }
 
@@ -719,8 +728,11 @@ impl UpdateManager {
             MinisignVerifier::verify_checksums(&chk_bytes, &sig_text)
                 .context("Minisign release signature verification failed")?;
             info!("Release SHA256SUMS verified with Minisign Ed25519 signature!");
-        } else if inno_mode {
-            bail!("Release is missing SHA256SUMS.minisig required for Windows Inno Setup update");
+        } else {
+            tracing::warn!(
+                "Release v{} is missing SHA256SUMS.minisig; proceeding with HTTPS + SHA256SUMS verification",
+                remote_ver_str
+            );
         }
 
         let chk_text = String::from_utf8_lossy(&chk_bytes);

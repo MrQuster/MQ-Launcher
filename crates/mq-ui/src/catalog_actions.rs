@@ -404,6 +404,9 @@ impl UiState {
     pub fn cancel_job(&mut self, job_id: u64) {
         if let Some(j) = self.jobs.get_mut(job_id) {
             j.request_cancel();
+            if j.is_active() {
+                j.stage_label = Some("Отмена...".to_string());
+            }
         }
     }
 

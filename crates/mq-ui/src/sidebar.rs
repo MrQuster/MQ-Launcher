@@ -106,6 +106,15 @@ impl NavGroup {
         }
     }
 
+    /// Localized group heading for `lang`.
+    pub fn label_for(&self, lang: &str) -> &'static str {
+        match self {
+            Self::Library => tr("nav_group_library", lang),
+            Self::Activity => tr("nav_group_activity", lang),
+            Self::System => tr("nav_group_system", lang),
+        }
+    }
+
     /// Tabs belonging to this group in display order.
     pub const fn tabs(&self) -> &'static [NavTab] {
         match self {
@@ -218,8 +227,6 @@ pub enum SidebarAction {
     SwitchAccount(String),
     /// Navigate directly to the [`NavTab::Accounts`] management tab.
     OpenAccountsTab,
-    /// Switch the launcher interface language.
-    ChangeLanguage(String),
 }
 
 /// Maps `AccountKind` to the human-readable source label shown in the bottom account block.
@@ -228,6 +235,15 @@ pub const fn account_source_label(kind: AccountKind) -> &'static str {
         AccountKind::ElyBy => "Ely.by",
         AccountKind::Microsoft => "Microsoft",
         AccountKind::Offline => "Офлайн",
+    }
+}
+
+/// Localized variant of [`account_source_label`].
+pub fn account_source_label_for(kind: AccountKind, lang: &str) -> &'static str {
+    match kind {
+        AccountKind::ElyBy => "Ely.by",
+        AccountKind::Microsoft => "Microsoft",
+        AccountKind::Offline => tr("sidebar_offline", lang),
     }
 }
 
@@ -692,7 +708,7 @@ fn handle_keyboard_navigation(ui: &mut Ui) -> Option<NavTab> {
     None
 }
 
-fn render_header(ui: &mut Ui, is_compact: bool, tokens: &Tokens) {
+fn render_header(ui: &mut Ui, is_compact: bool, lang_code: &str, tokens: &Tokens) {
     let available_w = ui.available_width().max(40.0);
     let (header_rect, _) = ui.allocate_exact_size(
         Vec2::new(available_w, SIDEBAR_HEADER_HEIGHT),
@@ -734,16 +750,17 @@ fn render_header(ui: &mut Ui, is_compact: bool, tokens: &Tokens) {
                 },
             );
         }
+        let expand_tip = tr("sidebar_expand", lang_code);
         register_widget(
             ui,
             &toggle_resp,
             ElementMeta::new(ElementKind::IconButton)
                 .tech_name(icon_tech_name(VectorIcon::ChevronsRight))
-                .tooltip("Развернуть меню")
+                .tooltip(expand_tip)
                 .fg(tokens.text_muted)
                 .bg(tokens.bg_sidebar),
         );
-        if toggle_resp.on_hover_text("Развернуть меню").clicked() {
+        if toggle_resp.on_hover_text(expand_tip).clicked() {
             toggle_sidebar_compact(ui.ctx());
         }
     } else {
@@ -783,16 +800,17 @@ fn render_header(ui: &mut Ui, is_compact: bool, tokens: &Tokens) {
                 },
             );
         }
+        let collapse_tip = tr("sidebar_collapse", lang_code);
         register_widget(
             ui,
             &toggle_resp,
             ElementMeta::new(ElementKind::IconButton)
                 .tech_name(icon_tech_name(VectorIcon::ChevronsLeft))
-                .tooltip("Свернуть меню")
+                .tooltip(collapse_tip)
                 .fg(tokens.text_muted)
                 .bg(tokens.bg_sidebar),
         );
-        if toggle_resp.on_hover_text("Свернуть меню").clicked() {
+        if toggle_resp.on_hover_text(collapse_tip).clicked() {
             toggle_sidebar_compact(ui.ctx());
         }
 
@@ -825,6 +843,7 @@ fn render_bottom_account_profile(
     active_account_id: Option<&str>,
     is_compact: bool,
     update_available: bool,
+    lang_code: &str,
     tokens: &Tokens,
 ) -> Option<SidebarAction> {
     let mut action = None;
@@ -840,12 +859,17 @@ fn render_bottom_account_profile(
         Some(prof) => (
             prof.username.as_str(),
             prof.avatar_head.as_ref(),
-            account_source_label(prof.kind),
+            account_source_label_for(prof.kind, lang_code),
         ),
-        None => ("Гость", None, "Офлайн"),
+        None => (
+            tr("sidebar_guest", lang_code),
+            None,
+            tr("sidebar_offline", lang_code),
+        ),
     };
 
     if update_available {
+        let update_label = tr("sidebar_update_available", lang_code);
         let row_w = ui.available_width();
         let (upd_rect, upd_resp) = ui.allocate_exact_size(Vec2::new(row_w, 22.0), Sense::click());
         if ui.is_rect_visible(upd_rect) {
@@ -863,11 +887,7 @@ fn render_bottom_account_profile(
                 let dot_c = Pos2::new(upd_rect.left() + 10.0, upd_rect.center().y);
                 painter.circle_filled(dot_c, 3.0, tokens.text_muted);
                 let font = FontId::proportional(11.0);
-                let g = painter.layout_no_wrap(
-                    "Доступно обновление".to_owned(),
-                    font,
-                    tokens.text_muted,
-                );
+                let g = painter.layout_no_wrap(update_label.to_owned(), font, tokens.text_muted);
                 painter.galley(
                     Pos2::new(dot_c.x + 8.0, upd_rect.center().y - g.size().y * 0.5),
                     g,
@@ -876,7 +896,7 @@ fn render_bottom_account_profile(
             }
         }
         let upd_resp = if is_compact {
-            upd_resp.on_hover_text("Доступно обновление")
+            upd_resp.on_hover_text(update_label)
         } else {
             upd_resp
         };
@@ -1016,19 +1036,25 @@ fn render_bottom_account_profile(
     crate::animation::show_animated_dropdown_popup(ui, popup_id, &resp, 212.0, true, false, |ui| {
         ui.set_min_width(196.0);
         ui.label(
-            RichText::new("Аккаунты")
+            RichText::new(tr("tab_accounts", lang_code))
                 .color(tokens.text_muted)
                 .size(11.0),
         );
         ui.separator();
         if accounts.is_empty() {
-            ui.label(RichText::new("Гость (Офлайн)").color(tokens.text_muted));
+            ui.label(
+                RichText::new(tr("sidebar_guest_offline", lang_code)).color(tokens.text_muted),
+            );
         } else {
             for acc in accounts {
                 let is_current = active_profile
                     .map(|curr| curr.id == acc.id)
                     .unwrap_or(false);
-                let label = format!("{} ({})", acc.username, account_source_label(acc.kind));
+                let label = format!(
+                    "{} ({})",
+                    acc.username,
+                    account_source_label_for(acc.kind, lang_code)
+                );
                 if ui
                     .selectable_label(is_current, RichText::new(label).color(tokens.text))
                     .clicked()
@@ -1040,7 +1066,7 @@ fn render_bottom_account_profile(
         }
         ui.separator();
         if ui
-            .button(RichText::new("Управление аккаунтами").color(tokens.accent))
+            .button(RichText::new(tr("sidebar_manage_accounts", lang_code)).color(tokens.accent))
             .clicked()
         {
             action = Some(SidebarAction::OpenAccountsTab);
@@ -1097,7 +1123,7 @@ pub fn render_sidebar_with_state(
     let is_compact = ui.available_width() < 120.0;
 
     // 1. Brand Header (56 px)
-    render_header(ui, is_compact, tokens);
+    render_header(ui, is_compact, lang_code, tokens);
 
     let active_indicator_slot = ui.painter().add(Shape::Noop);
     let mut active_row_rect: Option<Rect> = None;
@@ -1106,7 +1132,7 @@ pub fn render_sidebar_with_state(
     for group in [NavGroup::Library, NavGroup::Activity] {
         ui.add_space(6.0);
         paint_horizontal_divider(ui, tokens.border);
-        render_group_heading(ui, group.label(), is_compact, tokens);
+        render_group_heading(ui, group.label_for(lang_code), is_compact, tokens);
         if is_compact {
             ui.add_space(6.0);
         }
@@ -1144,6 +1170,7 @@ pub fn render_sidebar_with_state(
                 active_account_id,
                 is_compact,
                 state.update_available,
+                lang_code,
                 tokens,
             ) {
                 action = Some(card_action);
@@ -1174,7 +1201,7 @@ pub fn render_sidebar_with_state(
                 ui.horizontal(|ui| {
                     ui.add_space(NAV_ROW_PADDING_X);
                     ui.label(
-                        RichText::new(NavGroup::System.label())
+                        RichText::new(NavGroup::System.label_for(lang_code))
                             .size(11.0)
                             .color(tokens.text_muted),
                     );
@@ -1192,7 +1219,12 @@ pub fn render_sidebar_with_state(
             .show(ui, |ui| {
                 ui.add_space(6.0);
                 paint_horizontal_divider(ui, tokens.border);
-                render_group_heading(ui, NavGroup::System.label(), is_compact, tokens);
+                render_group_heading(
+                    ui,
+                    NavGroup::System.label_for(lang_code),
+                    is_compact,
+                    tokens,
+                );
                 if is_compact {
                     ui.add_space(6.0);
                 }
@@ -1222,6 +1254,7 @@ pub fn render_sidebar_with_state(
                     active_account_id,
                     is_compact,
                     state.update_available,
+                    lang_code,
                     tokens,
                 ) {
                     action = Some(card_action);

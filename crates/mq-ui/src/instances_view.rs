@@ -361,61 +361,45 @@ impl InstancesView {
             && self.content_sub_mode == ContentSubMode::Catalog;
 
         if !state.instances.is_empty() {
-            // Row 1: Header + primary action buttons
-            ui.horizontal(|ui| {
-                ui.heading(
-                    RichText::new("Инстансы")
-                        .color(tokens.text)
-                        .size(20.0)
-                        .strong(),
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if button_primary(ui, &tokens, Some(VectorIcon::Plus), "Создать инстанс")
-                        .clicked()
-                    {
-                        state.show_create_instance_dialog = true;
-                    }
-                    ui.add_space(6.0);
-                    if in_embedded_catalog {
-                        let view_opts = [
-                            SegmentedOption::new(InstanceViewMode::Grid, "Сетка")
-                                .with_icon(VectorIcon::Layers)
-                                .with_tooltip("Отображение плитками"),
-                            SegmentedOption::new(InstanceViewMode::List, "Список")
-                                .with_icon(VectorIcon::Terminal)
-                                .with_tooltip("Отображение списком"),
-                        ];
-                        segmented_switch(ui, &tokens, &mut self.view_mode, &view_opts);
-                    } else {
-                        if button_secondary(
+            // Row 1: Header + primary action buttons (adapts cleanly at 720-960px widths)
+            let avail_w = ui.available_width();
+            let min_single_row_w = if in_embedded_catalog { 420.0 } else { 680.0 };
+            if avail_w >= min_single_row_w {
+                ui.horizontal(|ui| {
+                    ui.heading(
+                        RichText::new("Инстансы")
+                            .color(tokens.text)
+                            .size(20.0)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.render_header_action_buttons(
                             ui,
+                            state,
                             &tokens,
-                            Some(VectorIcon::Download),
-                            "Импорт сборки",
-                        )
-                        .clicked()
-                        {
-                            self.import_error = None;
-                            self.show_import_dialog = true;
-                        }
-                        ui.add_space(6.0);
-                        if button_secondary(
-                            ui,
-                            &tokens,
-                            Some(VectorIcon::Download),
-                            "Импорт из лаунчеров",
-                        )
-                        .clicked()
-                        {
-                            state.show_external_import_modal = true;
-                            let _ = state
-                                .cmd_sender
-                                .send(UiWorkerCommand::DiscoverExternalInstances);
-                        }
-                    }
+                            in_embedded_catalog,
+                            true,
+                        );
+                    });
                 });
-            });
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                    ui.heading(
+                        RichText::new("Инстансы")
+                            .color(tokens.text)
+                            .size(20.0)
+                            .strong(),
+                    );
+                    self.render_header_action_buttons(
+                        ui,
+                        state,
+                        &tokens,
+                        in_embedded_catalog,
+                        false,
+                    );
+                });
+            }
 
             if !in_embedded_catalog {
                 ui.add_space(8.0);
@@ -2462,10 +2446,11 @@ impl InstancesView {
                             } else {
                                 (ui.available_width() - 68.0).max(120.0)
                             };
-                            let search_resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.version_search)
-                                    .hint_text("Поиск версии (1.21.4, 25w09b)...")
-                                    .desired_width(search_w),
+                            let search_resp = version_search_input(
+                                ui,
+                                &mut self.version_search,
+                                search_w,
+                                tokens,
                             );
                             crate::components::registry::register_widget(
                                 ui,
@@ -3455,31 +3440,44 @@ impl InstancesView {
                                 if let Some(prof) =
                                     inst.mod_profiles.iter().find(|p| p.name == selected)
                                 {
-                                    if mq_instances::apply_mod_profile(&inst_dir, prof).is_ok() {
-                                        if let Some(inst_mut) =
-                                            state.instances.iter_mut().find(|i| i.id == *inst_id)
-                                        {
-                                            inst_mut.active_mod_profile = Some(selected.clone());
-                                            if let Err(e) =
-                                                state.instance_mgr.save_instance(inst_mut)
+                                    match mq_instances::apply_mod_profile(&inst_dir, prof) {
+                                        Ok(_) => {
+                                            let mut save_ok = true;
+                                            if let Some(inst_mut) = state
+                                                .instances
+                                                .iter_mut()
+                                                .find(|i| i.id == *inst_id)
                                             {
+                                                inst_mut.active_mod_profile =
+                                                    Some(selected.clone());
+                                                if let Err(e) =
+                                                    state.instance_mgr.save_instance(inst_mut)
+                                                {
+                                                    state.status_message = Some((
+                                                        format!("Ошибка сохранения профиля: {e}"),
+                                                        true,
+                                                    ));
+                                                    save_ok = false;
+                                                }
+                                            }
+                                            if save_ok {
                                                 state.status_message = Some((
-                                                    format!("Ошибка сохранения профиля: {e}"),
-                                                    true,
+                                                    format!("Профиль «{selected}» применен"),
+                                                    false,
                                                 ));
                                             }
+                                            let _ = state.cmd_sender.send(
+                                                UiWorkerCommand::ScanInstanceMods {
+                                                    instance_id: inst_id.clone(),
+                                                },
+                                            );
                                         }
-                                        if state.status_message.is_none() {
+                                        Err(e) => {
                                             state.status_message = Some((
-                                                format!("Профиль «{selected}» применен"),
-                                                false,
+                                                format!("Ошибка применения профиля: {e}"),
+                                                true,
                                             ));
                                         }
-                                        let _ = state.cmd_sender.send(
-                                            UiWorkerCommand::ScanInstanceMods {
-                                                instance_id: inst_id.clone(),
-                                            },
-                                        );
                                     }
                                 }
                             }
@@ -4210,6 +4208,7 @@ impl InstancesView {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if secondary_glass_button(ui, Some(VectorIcon::Trash), "")
+                                            .on_hover_text("Удалить мод")
                                             .clicked()
                                         {
                                             let _ =
@@ -4595,6 +4594,7 @@ impl InstancesView {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if secondary_glass_button(ui, Some(VectorIcon::Trash), "")
+                                        .on_hover_text("Удалить файл")
                                         .clicked()
                                     {
                                         match delete_pack_file(packs_dir, &name) {
@@ -5108,18 +5108,12 @@ impl InstancesView {
 
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                        if primary_emerald_button(ui, Some(VectorIcon::Play), "Войти").clicked()
-                        {
-                            let _ =
-                                state
-                                    .cmd_sender
-                                    .send(UiWorkerCommand::LaunchInstanceQuickPlay {
-                                        instance_id: inst_id.clone(),
-                                        quick_play: mq_launch::QuickPlayTarget::Singleplayer(
-                                            w.folder_name.clone(),
-                                        ),
-                                    });
-                        }
+                        Self::quick_play_enter_button(
+                            ui,
+                            state,
+                            inst_id,
+                            mq_launch::QuickPlayTarget::Singleplayer(w.folder_name.clone()),
+                        );
                         if secondary_glass_button(ui, Some(VectorIcon::Download), "Бэкап").clicked()
                         {
                             let _ = state.cmd_sender.send(UiWorkerCommand::BackupWorld {
@@ -5371,18 +5365,12 @@ impl InstancesView {
 
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-                        if primary_emerald_button(ui, Some(VectorIcon::Play), "Войти").clicked()
-                        {
-                            let _ =
-                                state
-                                    .cmd_sender
-                                    .send(UiWorkerCommand::LaunchInstanceQuickPlay {
-                                        instance_id: inst_id.clone(),
-                                        quick_play: mq_launch::QuickPlayTarget::Multiplayer(
-                                            s.ip.clone(),
-                                        ),
-                                    });
-                        }
+                        Self::quick_play_enter_button(
+                            ui,
+                            state,
+                            inst_id,
+                            mq_launch::QuickPlayTarget::Multiplayer(s.ip.clone()),
+                        );
                         let is_pinging = state.pinging_servers.contains(&s.ip);
                         let ping_label = if is_pinging {
                             "Пинг..."
@@ -5567,6 +5555,7 @@ impl InstancesView {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if secondary_glass_button(ui, Some(VectorIcon::Trash), "")
+                                            .on_hover_text("Удалить скриншот")
                                             .clicked()
                                         {
                                             file_to_delete = Some(s.path.clone());
@@ -5784,6 +5773,110 @@ impl InstancesView {
             }
         }
     }
+
+    fn render_header_action_buttons(
+        &mut self,
+        ui: &mut Ui,
+        state: &mut UiState,
+        tokens: &Tokens,
+        in_embedded_catalog: bool,
+        reverse_order: bool,
+    ) {
+        let render_create = |ui: &mut Ui, state: &mut UiState| {
+            if button_primary(ui, tokens, Some(VectorIcon::Plus), "Создать инстанс").clicked()
+            {
+                state.show_create_instance_dialog = true;
+            }
+        };
+        let render_mode_switch = |ui: &mut Ui, view_mode: &mut InstanceViewMode| {
+            let view_opts = [
+                SegmentedOption::new(InstanceViewMode::Grid, "Сетка")
+                    .with_icon(VectorIcon::Layers)
+                    .with_tooltip("Отображение плитками"),
+                SegmentedOption::new(InstanceViewMode::List, "Список")
+                    .with_icon(VectorIcon::Terminal)
+                    .with_tooltip("Отображение списком"),
+            ];
+            segmented_switch(ui, tokens, view_mode, &view_opts);
+        };
+        let render_import_pack = |this: &mut Self, ui: &mut Ui| {
+            if button_secondary(ui, tokens, Some(VectorIcon::Download), "Импорт сборки").clicked()
+            {
+                this.import_error = None;
+                this.show_import_dialog = true;
+            }
+        };
+        let render_import_ext = |ui: &mut Ui, state: &mut UiState| {
+            if button_secondary(
+                ui,
+                tokens,
+                Some(VectorIcon::Download),
+                "Импорт из лаунчеров",
+            )
+            .clicked()
+            {
+                state.show_external_import_modal = true;
+                let _ = state
+                    .cmd_sender
+                    .send(UiWorkerCommand::DiscoverExternalInstances);
+            }
+        };
+
+        if in_embedded_catalog {
+            if reverse_order {
+                render_create(ui, state);
+                ui.add_space(6.0);
+                render_mode_switch(ui, &mut self.view_mode);
+            } else {
+                render_mode_switch(ui, &mut self.view_mode);
+                render_create(ui, state);
+            }
+        } else if reverse_order {
+            render_create(ui, state);
+            ui.add_space(6.0);
+            render_import_pack(self, ui);
+            ui.add_space(6.0);
+            render_import_ext(ui, state);
+        } else {
+            render_create(ui, state);
+            render_import_pack(self, ui);
+            render_import_ext(ui, state);
+        }
+    }
+
+    fn quick_play_enter_button(
+        ui: &mut Ui,
+        state: &mut UiState,
+        inst_id: &mq_core::InstanceId,
+        target: mq_launch::QuickPlayTarget,
+    ) {
+        let is_running = state.running_instances.contains_key(inst_id);
+        let can_quick_play = !state.is_launching && !is_running;
+        let label = if state.is_launching {
+            "Запуск..."
+        } else {
+            "Войти"
+        };
+        let resp = ui
+            .add_enabled_ui(can_quick_play, |ui| {
+                primary_emerald_button(ui, Some(VectorIcon::Play), label)
+            })
+            .inner
+            .on_disabled_hover_text(if is_running {
+                "Инстанс уже запущен"
+            } else {
+                "Идет запуск игры..."
+            });
+        if can_quick_play && resp.clicked() {
+            state.is_launching = true;
+            let _ = state
+                .cmd_sender
+                .send(UiWorkerCommand::LaunchInstanceQuickPlay {
+                    instance_id: inst_id.clone(),
+                    quick_play: target,
+                });
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -5924,6 +6017,35 @@ fn install_local_content_file(
     std::fs::copy(src_path, &dst_path)
         .map_err(|e| format!("Не удалось скопировать файл {file_name}: {e}"))?;
     Ok(file_name)
+}
+
+fn version_search_input(
+    ui: &mut Ui,
+    query: &mut String,
+    width: f32,
+    tokens: &Tokens,
+) -> egui::Response {
+    let inner_w = (width - 16.0).max(80.0);
+    let frame_resp = egui::Frame::new()
+        .fill(tokens.bg_input)
+        .stroke(egui::Stroke::new(1.0_f32, tokens.border))
+        .corner_radius(6.0_f32)
+        .inner_margin(egui::Margin::symmetric(8, 7))
+        .show(ui, |ui| {
+            ui.set_min_width(inner_w);
+            ui.set_min_height(14.0);
+            ui.add(
+                egui::TextEdit::singleline(query)
+                    .frame(false)
+                    .hint_text("Поиск версии (1.21.4, 25w09b)...")
+                    .desired_width(inner_w)
+                    .vertical_align(egui::Align::Center),
+            )
+        });
+    if frame_resp.response.clicked() {
+        frame_resp.inner.request_focus();
+    }
+    frame_resp.response.union(frame_resp.inner)
 }
 
 #[cfg(test)]
@@ -6452,5 +6574,207 @@ mod tests {
             let _ = std::fs::remove_file(inst_dir.join("install_state.json"));
             state.invalidate_install_cache(Some(&inst_id));
         }
+    }
+
+    #[test]
+    fn quick_play_enter_button_blocks_while_launching_or_running_and_sets_is_launching() {
+        let (_tmp, mut state) = test_ui_state();
+        let inst = state
+            .instance_mgr
+            .create_instance("QP", "1.21.4", ModLoaderKind::Vanilla, None)
+            .expect("instance");
+        let inst_id = inst.id.clone();
+        state.instances.push(inst);
+
+        let ctx = egui::Context::default();
+        let make_input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(600.0, 200.0),
+            )),
+            events,
+            ..Default::default()
+        };
+
+        // 1. Enabled initially: clicking sets is_launching = true and sends LaunchInstanceQuickPlay.
+        let out = ctx.run(make_input(vec![]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                InstancesView::quick_play_enter_button(
+                    ui,
+                    &mut state,
+                    &inst_id,
+                    mq_launch::QuickPlayTarget::Singleplayer("world".into()),
+                );
+            });
+        });
+        let pos = find_text_center(&out.shapes, "Войти");
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                make_input(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        InstancesView::quick_play_enter_button(
+                            ui,
+                            &mut state,
+                            &inst_id,
+                            mq_launch::QuickPlayTarget::Singleplayer("world".into()),
+                        );
+                    });
+                },
+            );
+        }
+        assert!(state.is_launching);
+        assert!(matches!(
+            state.cmd_receiver.try_recv().unwrap(),
+            UiWorkerCommand::LaunchInstanceQuickPlay { .. }
+        ));
+
+        // 2. While is_launching = true, clicking does not send another command.
+        let out_launching = ctx.run(make_input(vec![]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                InstancesView::quick_play_enter_button(
+                    ui,
+                    &mut state,
+                    &inst_id,
+                    mq_launch::QuickPlayTarget::Multiplayer("play.example.org".into()),
+                );
+            });
+        });
+        let pos_launching = find_text_center(&out_launching.shapes, "Запуск...");
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                make_input(vec![
+                    egui::Event::PointerMoved(pos_launching),
+                    egui::Event::PointerButton {
+                        pos: pos_launching,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        InstancesView::quick_play_enter_button(
+                            ui,
+                            &mut state,
+                            &inst_id,
+                            mq_launch::QuickPlayTarget::Multiplayer("play.example.org".into()),
+                        );
+                    });
+                },
+            );
+        }
+        assert!(state.cmd_receiver.try_recv().is_err());
+
+        // 3. When instance is already running, clicking does not launch.
+        state.is_launching = false;
+        state.running_instances.insert(inst_id.clone(), Some(1234));
+        let out_running = ctx.run(make_input(vec![]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                InstancesView::quick_play_enter_button(
+                    ui,
+                    &mut state,
+                    &inst_id,
+                    mq_launch::QuickPlayTarget::Singleplayer("world".into()),
+                );
+            });
+        });
+        let pos_running = find_text_center(&out_running.shapes, "Войти");
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                make_input(vec![
+                    egui::Event::PointerMoved(pos_running),
+                    egui::Event::PointerButton {
+                        pos: pos_running,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        InstancesView::quick_play_enter_button(
+                            ui,
+                            &mut state,
+                            &inst_id,
+                            mq_launch::QuickPlayTarget::Singleplayer("world".into()),
+                        );
+                    });
+                },
+            );
+        }
+        assert!(!state.is_launching);
+        assert!(state.cmd_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn instances_header_and_version_search_meet_layout_constraints() {
+        let (_tmp, mut state) = test_ui_state();
+        let inst = state
+            .instance_mgr
+            .create_instance("Test", "1.21.4", ModLoaderKind::Fabric, None)
+            .expect("instance");
+        state.instances.push(inst);
+        state.show_create_instance_dialog = true;
+
+        let mut view = InstancesView::default();
+        let ctx = egui::Context::default();
+        // Central panel widths corresponding to 720px and 960px window widths.
+        for central_w in [500.0_f32, 720.0_f32] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(central_w, 720.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    view.ui(ui, &mut state);
+                });
+            });
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    view.ui(ui, &mut state);
+                });
+            });
+            let title_pos = find_text_center(&out.shapes, "Инстансы");
+            let create_pos = find_text_center(&out.shapes, "Создать инстанс");
+            assert!(
+                title_pos.x < create_pos.x || title_pos.y < create_pos.y,
+                "at width {central_w}, Инстансы ({title_pos:?}) must not overlap Создать инстанс ({create_pos:?})"
+            );
+        }
+
+        // Verify the version search TextEdit respects >= 28.0px minimum height.
+        let mut search_height = 0.0_f32;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(480.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                let tokens = Tokens::active(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let resp = version_search_input(ui, &mut view.version_search, 240.0, &tokens);
+                    search_height = resp.rect.height();
+                });
+            },
+        );
+        assert!(
+            search_height >= 28.0,
+            "expected Поиск версии height >= 28.0, got {search_height}"
+        );
     }
 }

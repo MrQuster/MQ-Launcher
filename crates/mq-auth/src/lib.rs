@@ -14,6 +14,7 @@ pub mod store;
 
 #[allow(unused_imports)]
 pub use elyby::*;
+pub use elyby::{ElyByLoopbackServer, PkcePair};
 pub use models::*;
 #[allow(unused_imports)]
 pub use msa::*;

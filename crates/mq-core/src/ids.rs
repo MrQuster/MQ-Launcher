@@ -324,12 +324,18 @@ impl InstanceId {
 
     /// Converts an arbitrary display name into a deterministic, filesystem-safe slug.
     pub fn sanitize_slug(display_name: &str) -> Self {
-        let mut slug = String::with_capacity(display_name.len());
+        let trimmed = display_name.trim();
+        let mut slug = String::with_capacity(trimmed.len());
         let mut prev_dash = false;
-        for ch in display_name.trim().chars() {
+        for ch in trimmed.chars() {
             if ch.is_ascii_alphanumeric() {
                 slug.push(ch.to_ascii_lowercase());
                 prev_dash = false;
+            } else if let Some(translit) = transliterate_cyrillic(ch) {
+                if !translit.is_empty() {
+                    slug.push_str(translit);
+                    prev_dash = false;
+                }
             } else if matches!(ch, '-' | '_' | '.') && !slug.is_empty() {
                 slug.push(ch);
                 prev_dash = ch == '-';
@@ -342,7 +348,17 @@ impl InstanceId {
             slug.pop();
         }
         if slug.is_empty() || slug == "." || slug == ".." {
-            slug = "instance".to_owned();
+            if !trimmed.is_empty() && !trimmed.is_ascii() {
+                let mut h: u32 = 0x811c_9dc5;
+                for &b in trimmed.as_bytes() {
+                    h ^= u32::from(b);
+                    h = h.wrapping_mul(0x0100_0193);
+                }
+                let hash = h & 0x00ff_ffff;
+                slug = format!("instance-{hash:06x}");
+            } else {
+                slug = "instance".to_owned();
+            }
         }
         Self(slug)
     }
@@ -442,6 +458,47 @@ impl FromStr for AccountId {
     }
 }
 
+fn transliterate_cyrillic(ch: char) -> Option<&'static str> {
+    let lower = ch.to_lowercase().next().unwrap_or(ch);
+    match lower {
+        'а' => Some("a"),
+        'б' => Some("b"),
+        'в' => Some("v"),
+        'г' => Some("g"),
+        'д' => Some("d"),
+        'е' | 'ё' => Some("e"),
+        'ж' => Some("zh"),
+        'з' => Some("z"),
+        'и' | 'й' => Some("i"),
+        'к' => Some("k"),
+        'л' => Some("l"),
+        'м' => Some("m"),
+        'н' => Some("n"),
+        'о' => Some("o"),
+        'п' => Some("p"),
+        'р' => Some("r"),
+        'с' => Some("s"),
+        'т' => Some("t"),
+        'у' => Some("u"),
+        'ф' => Some("f"),
+        'х' => Some("kh"),
+        'ц' => Some("ts"),
+        'ч' => Some("ch"),
+        'ш' => Some("sh"),
+        'щ' => Some("shch"),
+        'ъ' | 'ь' => Some(""),
+        'ы' => Some("y"),
+        'э' => Some("e"),
+        'ю' => Some("yu"),
+        'я' => Some("ya"),
+        'і' => Some("i"),
+        'ї' => Some("yi"),
+        'є' => Some("ye"),
+        'ґ' => Some("g"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,5 +579,27 @@ mod tests {
 
         let slug = InstanceId::sanitize_slug("  Fabulously Optimized 1.21!  ");
         assert_eq!(slug.as_str(), "fabulously-optimized-1.21");
+
+        assert_eq!(
+            InstanceId::sanitize_slug("Моя Сборка 1.21").as_str(),
+            "moya-sborka-1.21"
+        );
+        assert_eq!(
+            InstanceId::sanitize_slug("Щука ёжик съезд день").as_str(),
+            "shchuka-ezhik-sezd-den"
+        );
+        assert_eq!(
+            InstanceId::sanitize_slug("Українська єдність їжа ґрунт").as_str(),
+            "ukrayinska-yednist-yizha-grunt"
+        );
+        assert_eq!(InstanceId::sanitize_slug("   ").as_str(), "instance");
+        assert_eq!(InstanceId::sanitize_slug("..").as_str(), "instance");
+
+        let cjk1 = InstanceId::sanitize_slug("日本語パック");
+        let cjk2 = InstanceId::sanitize_slug("中文整合包");
+        assert!(cjk1.as_str().starts_with("instance-"));
+        assert_eq!(cjk1.as_str().len(), "instance-".len() + 6);
+        assert!(InstanceId::is_valid_slug(cjk1.as_str()));
+        assert_ne!(cjk1, cjk2);
     }
 }

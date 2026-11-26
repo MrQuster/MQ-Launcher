@@ -732,18 +732,21 @@ impl JobQueue {
         }
     }
 
-    /// Final state of a job; a cancel request wins over a generic error.
+    /// Final state of a job; a cancel request wins over completion or generic error.
     pub fn finish(&mut self, id: u64, result: Result<(), String>) {
         if let Some(j) = self.get_mut(id) {
             j.mib_per_sec = 0.0;
             j.stage_label = None;
-            j.status = match result {
-                Ok(()) => {
-                    j.done_files = j.total_files;
-                    JobStatus::Done
+            j.status = if j.is_cancel_requested() {
+                JobStatus::Cancelled
+            } else {
+                match result {
+                    Ok(()) => {
+                        j.done_files = j.total_files;
+                        JobStatus::Done
+                    }
+                    Err(e) => JobStatus::Failed(e),
                 }
-                Err(_) if j.is_cancel_requested() => JobStatus::Cancelled,
-                Err(e) => JobStatus::Failed(e),
             };
         }
     }
@@ -976,10 +979,21 @@ mod tests {
         assert!(cancel_b.load(Ordering::SeqCst));
         q.finish(b, Err("aborted".into()));
         assert_eq!(q.jobs[1].status, JobStatus::Cancelled);
+        let (b2, _) = q.push("B2".into(), "inst".into(), 1, None);
+        q.get_mut(b2).unwrap().request_cancel();
+        q.finish(b2, Ok(()));
+        assert_eq!(
+            q.get_mut(b2).unwrap().status,
+            JobStatus::Cancelled,
+            "cancel request must win even if Ok(()) races in"
+        );
         assert_eq!(q.active_count(), 0);
         let (c, _) = q.push("C".into(), "i".into(), 1, None);
         q.finish(c, Err("net".into()));
-        assert_eq!(q.jobs[2].status, JobStatus::Failed("net".into()));
+        assert_eq!(
+            q.get_mut(c).unwrap().status,
+            JobStatus::Failed("net".into())
+        );
         let spec = RetrySpec::Modpack {
             instance_name: "N".into(),
             preview: ModpackPreview {

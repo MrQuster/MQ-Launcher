@@ -353,7 +353,7 @@ main() {
     fi
     dry_run=0
     skip_deps=0
-    MQ_RELEASE_PUBLIC_KEY="RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"
+    MQ_RELEASE_PUBLIC_KEY="RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt"
     minisign_pubkey="${MQ_MINISIGN_PUBKEY:-${MQ_RELEASE_PUBLIC_KEY}}"
     repo_user="${MQ_REPO_USER:-MrQuster}"
     repo_name="${MQ_REPO_NAME:-MQ-Launcher}"

@@ -737,15 +737,22 @@ async fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     attach_parent_console_if_cli();
 
-    // Initialize structured logging with token redaction
+    let cli = Cli::parse();
+    let is_doctor_json = matches!(&cli.command, Some(Commands::Doctor(d)) if d.json);
+
+    // Initialize structured logging with token redaction on stderr so stdout stays clean for JSON output
+    let default_filter = if is_doctor_json {
+        "error"
+    } else {
+        "info,mq=info"
+    };
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,mq=info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .init();
-
-    let cli = Cli::parse();
     if cli.after_update {
         mq_update::UpdateManager::clean_old_binary_backups();
         tracing::info!("Started after self-update; cleaned previous binary backup if present");
@@ -1256,6 +1263,29 @@ async fn cmd_launch(args: LaunchArgs, paths: MqPaths) -> Result<()> {
     let target_locale = inst.mc_locale.as_deref().unwrap_or("ru_ru");
     let _ = sync_minecraft_options_lang(&inst_dir, target_locale);
 
+    let config = AppConfig::load_or_default(&paths).unwrap_or_default();
+    let mut discord_rpc = if config.discord_rpc_enabled {
+        let inst_name = inst.name.clone();
+        let inst_mc = inst.mc_version.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(mut rpc) = mq_launch::DiscordRpcClient::connect_default() {
+                rpc.set_playing_activity(
+                    &inst_name,
+                    &format!("Minecraft {inst_mc}"),
+                    chrono::Utc::now().timestamp() as u64,
+                );
+                Some(rpc)
+            } else {
+                None
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
     println!(
         "[MQ] Запуск Minecraft ({}) с помощью Java {}...",
         inst.name, selected_java.full_version
@@ -1270,13 +1300,17 @@ async fn cmd_launch(args: LaunchArgs, paths: MqPaths) -> Result<()> {
         }
     });
 
-    let exit_status = spawn_and_stream_game(
+    let exit_res = spawn_and_stream_game(
         &built_cmd,
         inst.id.as_str(),
         launch_secrets,
         Some(event_bus),
     )
-    .await?;
+    .await;
+    if let Some(rpc) = discord_rpc.take() {
+        let _ = tokio::task::spawn_blocking(move || drop(rpc)).await;
+    }
+    let exit_status = exit_res?;
     println!("[MQ] Игра завершилась с кодом выхода: {}", exit_status);
     if !exit_status.success() {
         bail!("Процесс игры завершился с ошибкой ({})", exit_status);
@@ -2851,24 +2885,32 @@ async fn cmd_accounts(args: AccountsArgs, paths: MqPaths) -> Result<()> {
                 };
 
                 let state_str = uuid::Uuid::new_v4().to_string();
-                let port = oauth_cfg.redirect_port;
-                let auth_url =
-                    mq_auth::ElyByOAuthFlow::generate_auth_url(&client_id, port, &state_str);
+                let pkce = mq_auth::PkcePair::generate();
+                let srv =
+                    mq_auth::ElyByOAuthFlow::bind_loopback_server(oauth_cfg.redirect_port).await?;
+                let actual_port = srv.port;
+                let auth_url = mq_auth::ElyByOAuthFlow::generate_auth_url_pkce(
+                    &client_id,
+                    actual_port,
+                    &state_str,
+                    &pkce.challenge,
+                );
                 println!("[MQ] Откройте следующую ссылку в браузере для авторизации:");
                 println!("     {auth_url}");
                 let _ = mq_core::platform::open_url(&auth_url);
-                println!("[MQ] Ожидание завершения авторизации в браузере (порт {port})...");
+                println!("[MQ] Ожидание завершения авторизации в браузере (порт {actual_port})...");
 
                 let code =
-                    mq_auth::ElyByOAuthFlow::start_loopback_listener(port, &state_str).await?;
+                    mq_auth::ElyByOAuthFlow::wait_for_callback(srv, &state_str, None).await?;
                 let http = reqwest::Client::new();
-                let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-                let token_resp = mq_auth::ElyByOAuthFlow::exchange_code_for_token(
+                let redirect_uri = format!("http://127.0.0.1:{actual_port}/callback");
+                let token_resp = mq_auth::ElyByOAuthFlow::exchange_code_pkce(
                     &http,
                     &client_id,
-                    oauth_cfg.client_secret.as_deref(),
                     &code,
+                    Some(&pkce.verifier),
                     &redirect_uri,
+                    oauth_cfg.client_secret.as_deref(),
                 )
                 .await?;
                 let info =
@@ -3133,27 +3175,37 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
         return cmd_doctor_install(version, &args, &paths).await;
     }
 
-    println!("================================================================================");
-    println!(
-        "                   MQ LAUNCHER v{} — СИСТЕМНЫЙ ДИАГНОСТ (DOCTOR)",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("================================================================================");
+    if !args.json {
+        println!(
+            "================================================================================"
+        );
+        println!(
+            "                   MQ LAUNCHER v{} — СИСТЕМНЫЙ ДИАГНОСТ (DOCTOR)",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!(
+            "================================================================================"
+        );
+    }
 
     // 1. OS & Architecture
     let os_name = detect_os_pretty_name();
     let arch = std::env::consts::ARCH;
-    println!("[СИСТЕМА]   ОС: {} | Архитектура: {}", os_name, arch);
+    if !args.json {
+        println!("[СИСТЕМА]   ОС: {} | Архитектура: {}", os_name, arch);
+    }
 
     // 2. CPU
     let num_cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
     let cpu_model = detect_cpu_model();
-    println!(
-        "[ПРОЦЕССОР] Модель: {} (Логических ядер: {})",
-        cpu_model, num_cpus
-    );
+    if !args.json {
+        println!(
+            "[ПРОЦЕССОР] Модель: {} (Логических ядер: {})",
+            cpu_model, num_cpus
+        );
+    }
 
     // 3. GPU & Drivers via wgpu
     let instance = wgpu::Instance::default();
@@ -3164,39 +3216,43 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
             force_fallback_adapter: false,
         })
         .await;
-    match adapter {
-        Some(ref a) => {
-            let info = a.get_info();
-            println!(
-                "[ГРАФИКА]   Устройство: {} (Поставщик: 0x{:04x}, Бэкенд: {:?}, Драйвер: {})",
-                info.name, info.vendor, info.backend, info.driver
-            );
-        }
-        None => {
-            println!(
-                "[ГРАФИКА]   Предупреждение: Аппаратный адаптер Vulkan/DX12/OpenGL не обнаружен."
-            );
+    if !args.json {
+        match adapter {
+            Some(ref a) => {
+                let info = a.get_info();
+                println!(
+                    "[ГРАФИКА]   Устройство: {} (Поставщик: 0x{:04x}, Бэкенд: {:?}, Драйвер: {})",
+                    info.name, info.vendor, info.backend, info.driver
+                );
+            }
+            None => {
+                println!(
+                    "[ГРАФИКА]   Предупреждение: Аппаратный адаптер Vulkan/DX12/OpenGL не обнаружен."
+                );
+            }
         }
     }
 
     // 4. Java Runtimes
     let runtimes = discover_java_runtimes();
-    println!("[JAVA]      Обнаружено сред исполнения: {}", runtimes.len());
-    for rt in &runtimes {
-        println!(
-            "            * Java {:<2} ({} - {}) -> {}",
-            rt.major_version,
-            rt.full_version,
-            rt.vendor,
-            rt.path.display()
-        );
-    }
-    if runtimes.is_empty() {
-        println!("            [!] Рекомендуется загрузить JRE: mq java download --version 21");
-    }
+    if !args.json {
+        println!("[JAVA]      Обнаружено сред исполнения: {}", runtimes.len());
+        for rt in &runtimes {
+            println!(
+                "            * Java {:<2} ({} - {}) -> {}",
+                rt.major_version,
+                rt.full_version,
+                rt.vendor,
+                rt.path.display()
+            );
+        }
+        if runtimes.is_empty() {
+            println!("            [!] Рекомендуется загрузить JRE: mq java download --version 21");
+        }
 
-    // 5. Network Connectivity Checks
-    println!("[СЕТЬ]      Проверка доступности игровых сервисов:");
+        // 5. Network Connectivity Checks
+        println!("[СЕТЬ]      Проверка доступности игровых сервисов:");
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(6))
         .build()

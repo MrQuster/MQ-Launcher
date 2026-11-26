@@ -703,6 +703,12 @@ impl Default for ElyByOAuthConfig {
     }
 }
 
+pub struct ElyByLoopbackServer {
+    v4_listener: tokio::net::TcpListener,
+    v6_listener: Option<tokio::net::TcpListener>,
+    pub port: u16,
+}
+
 pub struct ElyByOAuthFlow;
 
 impl ElyByOAuthFlow {
@@ -721,19 +727,22 @@ impl ElyByOAuthFlow {
         oauth2_browser_authorize_url_pkce(client_id, &redirect_uri, state, challenge)
     }
 
-    pub async fn start_loopback_listener(port: u16, expected_state: &str) -> MqResult<String> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    pub async fn bind_loopback_server(preferred_port: u16) -> MqResult<ElyByLoopbackServer> {
         use tokio::net::TcpListener;
 
         let mut candidate_ports = Vec::with_capacity(6);
-        candidate_ports.push(port);
-        if let Some(p1) = port.checked_add(1) {
+        candidate_ports.push(preferred_port);
+        if let Some(p1) = preferred_port.checked_add(1) {
             candidate_ports.push(p1);
         }
-        if let Some(p2) = port.checked_add(2) {
+        if let Some(p2) = preferred_port.checked_add(2) {
             candidate_ports.push(p2);
         }
-        candidate_ports.extend_from_slice(&[25585, 25586, 0]);
+        for fallback in [25585, 25586, 0] {
+            if !candidate_ports.contains(&fallback) {
+                candidate_ports.push(fallback);
+            }
+        }
 
         let mut bound_listener = None;
         for p in candidate_ports {
@@ -746,12 +755,25 @@ impl ElyByOAuthFlow {
         let v4_listener = bound_listener.ok_or_else(|| {
             MqError::Auth("Failed to bind loopback TCP server for Ely.by OAuth callback".into())
         })?;
+        let port = v4_listener.local_addr()?.port();
         // Also opportunistically bind IPv6 loopback `[::1]` on the same port in case Windows
         // resolves `localhost` to `::1`; ignore failures if IPv6 is unavailable.
-        let v6_listener = match v4_listener.local_addr() {
-            Ok(addr) => TcpListener::bind(("::1", addr.port())).await.ok(),
-            Err(_) => None,
-        };
+        let v6_listener = TcpListener::bind(("::1", port)).await.ok();
+
+        Ok(ElyByLoopbackServer {
+            v4_listener,
+            v6_listener,
+            port,
+        })
+    }
+
+    pub async fn wait_for_callback(
+        server: ElyByLoopbackServer,
+        expected_state: &str,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> MqResult<String> {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let html_success = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>MQ Launcher</title><style>body{background:#121316;color:#e1e4ea;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.card{background:#1a1c23;padding:36px 48px;border-radius:8px;border:1px solid #2e323b;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.45);}h2{margin-top:0;color:#10b981;}p{color:#9ca3af;font-size:14px;}</style></head><body><div class=\"card\"><h2>Вход выполнен</h2><p>Можно закрыть эту вкладку и вернуться в лаунчер MQ.</p></div></body></html>";
 
@@ -760,20 +782,33 @@ impl ElyByOAuthFlow {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
 
         loop {
+            if cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
+                drop(server);
+                return Err(MqError::Auth("Вход через Ely.by отменён".into()));
+            }
+
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
+                drop(server);
                 return Err(MqError::Auth(
                     "Таймаут ожидания входа в браузере (5 минут)".into(),
                 ));
             }
 
-            let mut socket = tokio::time::timeout(
-                remaining,
-                accept_loopback(&v4_listener, v6_listener.as_ref()),
+            let step = remaining.min(Duration::from_millis(150));
+            let mut socket = match tokio::time::timeout(
+                step,
+                accept_loopback(&server.v4_listener, server.v6_listener.as_ref()),
             )
             .await
-            .map_err(|_| MqError::Auth("Таймаут ожидания входа в браузере (5 минут)".into()))?
-            .map_err(|e| MqError::Network(format!("Ошибка loopback соединения: {e}")))?;
+            {
+                Err(_) => continue,
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    drop(server);
+                    return Err(MqError::Network(format!("Ошибка loopback соединения: {e}")));
+                }
+            };
 
             let mut raw = Vec::with_capacity(2048);
             let mut chunk = [0u8; 1024];
@@ -843,6 +878,8 @@ impl ElyByOAuthFlow {
                 let _ = socket.write_all(resp.as_bytes()).await;
                 let _ = socket.flush().await;
                 let _ = socket.shutdown().await;
+                drop(socket);
+                drop(server);
                 return Err(MqError::Auth(format!(
                     "Ely.by вернул ошибку авторизации: {err}"
                 )));
@@ -857,6 +894,8 @@ impl ElyByOAuthFlow {
                 let _ = socket.write_all(resp.as_bytes()).await;
                 let _ = socket.flush().await;
                 let _ = socket.shutdown().await;
+                drop(socket);
+                drop(server);
                 return Err(MqError::Auth(
                     "CSRF проверка не прошла: параметр state не совпадает".into(),
                 ));
@@ -871,6 +910,8 @@ impl ElyByOAuthFlow {
                 let _ = socket.write_all(resp.as_bytes()).await;
                 let _ = socket.flush().await;
                 let _ = socket.shutdown().await;
+                drop(socket);
+                drop(server);
                 return Err(MqError::Auth(
                     "В ответе Ely.by отсутствует параметр authorization code".into(),
                 ));
@@ -884,9 +925,16 @@ impl ElyByOAuthFlow {
             let _ = socket.write_all(resp.as_bytes()).await;
             let _ = socket.flush().await;
             let _ = socket.shutdown().await;
+            drop(socket);
+            drop(server);
 
             return Ok(code);
         }
+    }
+
+    pub async fn start_loopback_listener(port: u16, expected_state: &str) -> MqResult<String> {
+        let server = Self::bind_loopback_server(port).await?;
+        Self::wait_for_callback(server, expected_state, None).await
     }
 
     pub async fn exchange_code_for_token(
@@ -1685,5 +1733,32 @@ mod tests {
             args[0],
             r"-javaagent:C:\Users\Иван Петров\AppData\Local\MQ\cache\authlib-injector.jar=https://account.ely.by/api/authlib-injector"
         );
+    }
+
+    #[tokio::test]
+    async fn bind_loopback_server_and_wait_for_callback_cancel() {
+        use std::sync::atomic::AtomicBool;
+
+        let server = ElyByOAuthFlow::bind_loopback_server(0)
+            .await
+            .expect("bind ephemeral loopback server");
+        let port = server.port;
+        assert!(port > 0);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = Arc::clone(&cancel);
+        let waiter = tokio::spawn(async move {
+            ElyByOAuthFlow::wait_for_callback(server, "cancel_state", Some(cancel_clone)).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel.store(true, Ordering::SeqCst);
+
+        let err = waiter.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("Вход через Ely.by отменён"));
+
+        // Port must be freed once wait_for_callback returns and drops the server.
+        let rebound = TcpListener::bind(("127.0.0.1", port)).await;
+        assert!(rebound.is_ok(), "loopback socket must be dropped on cancel");
     }
 }

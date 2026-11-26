@@ -118,6 +118,7 @@ pub enum UiWorkerResponse {
         mods: Vec<InstalledModEntry>,
         conflicts: Vec<ModConflict>,
     },
+    ScanModsFailed(String),
     UnusedDepsCleaned {
         removed: usize,
         error: Option<String>,
@@ -131,6 +132,7 @@ pub enum UiWorkerResponse {
         instance_id: InstanceId,
         report: mq_mods::PreflightReport,
     },
+    PreflightFailed(String),
     VersionManifestFetched {
         latest_release: Option<String>,
         versions: Vec<(String, String)>,
@@ -150,6 +152,8 @@ pub enum UiWorkerResponse {
         instance_id: InstanceId,
         exit_code: i32,
     },
+    DryRunFinished(InstanceId),
+    LaunchAborted(InstanceId),
     ImportArchivePicked(Option<std::path::PathBuf>),
     MclogsUploaded(Result<String, String>),
     ServerPingReady {
@@ -157,7 +161,9 @@ pub enum UiWorkerResponse {
         result: Result<mq_instances::ServerPingResult, String>,
     },
     JavaRuntimesDiscovered(Vec<mq_launch::JavaRuntime>),
+    JavaDownloadFinished,
     UpdateCheckFinished(Result<Option<mq_update::ReleaseAssetInfo>, String>),
+    UpdateDownloadProgress(f32),
     UpdateDownloadFailed(String),
     InstanceExported(Result<std::path::PathBuf, String>),
     InstanceDeleted {
@@ -169,6 +175,7 @@ pub enum UiWorkerResponse {
         instance_id: InstanceId,
         analysis: mq_launch::CrashAnalysis,
     },
+    ElyByAuthUrlReady(String),
     ElyByLoginFinished(Result<String, String>),
     GameRssSamples(Vec<(InstanceId, f32)>),
     AutoFixDepsDone {
@@ -194,7 +201,7 @@ pub enum UiWorkerResponse {
         user_code: String,
     },
     MsaLoginFinished(Result<String, String>),
-    DiscordRpcConnected(mq_launch::DiscordRpcClient),
+    DiscordRpcFinished(Option<mq_launch::DiscordRpcClient>),
     WorldBackedUp {
         instance_id: InstanceId,
         result: Result<std::path::PathBuf, String>,
@@ -515,10 +522,13 @@ pub struct UiState {
     // Cached Java runtime discovery (offloaded from UI thread)
     pub discovered_java_runtimes: Option<Vec<mq_launch::JavaRuntime>>,
     pub is_discovering_java: bool,
+    pub is_downloading_java: bool,
 
     // Pending async results consumed by Settings / Accounts views
     pub pending_update_check: Option<Result<Option<mq_update::ReleaseAssetInfo>, String>>,
+    pub pending_update_progress: Option<f32>,
     pub pending_update_error: Option<String>,
+    pub ely_auth_url: Option<String>,
     pub ely_login_done: Option<Result<String, String>>,
     pub msa_device_code: Option<(String, String)>,
     pub msa_login_done: Option<Result<String, String>>,
@@ -562,7 +572,10 @@ pub struct UiState {
         std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<mq_core::InstanceId, u32>>>,
     pub pending_game_started: Vec<InstanceId>,
     pub pending_game_exited: Vec<(InstanceId, i32)>,
+    pub launch_cancel_flags: HashMap<InstanceId, Arc<std::sync::atomic::AtomicBool>>,
     pub pending_discord_rpc: Option<mq_launch::DiscordRpcClient>,
+    pub discord_rpc_busy: bool,
+    pub discord_rpc_dirty: bool,
     pub worlds_cache_gen: u64,
     pub world_sizes: HashMap<(InstanceId, String), u64>,
     pub computing_world_sizes: HashSet<InstanceId>,
@@ -679,8 +692,11 @@ impl UiState {
             pinging_servers: HashSet::new(),
             discovered_java_runtimes: None,
             is_discovering_java: false,
+            is_downloading_java: false,
             pending_update_check: None,
+            pending_update_progress: None,
             pending_update_error: None,
+            ely_auth_url: None,
             ely_login_done: None,
             msa_device_code: None,
             msa_login_done: None,
@@ -710,7 +726,10 @@ impl UiState {
             running_pids: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_game_started: Vec::new(),
             pending_game_exited: Vec::new(),
+            launch_cancel_flags: HashMap::new(),
             pending_discord_rpc: None,
+            discord_rpc_busy: false,
+            discord_rpc_dirty: false,
             worlds_cache_gen: 0,
             world_sizes: HashMap::new(),
             computing_world_sizes: HashSet::new(),
@@ -765,22 +784,35 @@ impl UiState {
 
     /// Human-readable localized phase label for the bottom HUD and Downloads summary.
     pub fn active_hud_phase_label(&self) -> Option<String> {
+        let is_en = self.config.launcher_locale.starts_with("en");
         if let Some(phase) = self.active_phase.as_deref() {
             let trimmed = phase.trim();
             if !trimmed.is_empty() {
-                let localized = match trimmed {
-                    "install_mods" => "Скачивание модов",
-                    "install_cfpack" | "install_mrpack" => "Установка сборки",
-                    "verify" => "Проверка файлов",
-                    "verify_and_repair" => "Проверка и починка",
-                    "install_game" => "Установка Minecraft",
-                    "reinstall" => "Переустановка инстанса",
-                    "manifest" => "Манифест версии",
-                    "assets" => "Загрузка ассетов",
-                    "libraries" => "Загрузка библиотек",
-                    "natives" => "Нативные библиотеки",
-                    "java" => "Установка Java",
-                    "client" => "Загрузка клиента",
+                let localized = match (trimmed, is_en) {
+                    ("install_mods", false) => "Скачивание модов",
+                    ("install_mods", true) => "Downloading mods",
+                    ("install_cfpack" | "install_mrpack", false) => "Установка сборки",
+                    ("install_cfpack" | "install_mrpack", true) => "Installing modpack",
+                    ("verify", false) => "Проверка файлов",
+                    ("verify", true) => "Verifying files",
+                    ("verify_and_repair", false) => "Проверка и починка",
+                    ("verify_and_repair", true) => "Verifying & repairing",
+                    ("install_game", false) => "Установка Minecraft",
+                    ("install_game", true) => "Installing Minecraft",
+                    ("reinstall", false) => "Переустановка инстанса",
+                    ("reinstall", true) => "Reinstalling instance",
+                    ("manifest", false) => "Манифест версии",
+                    ("manifest", true) => "Version manifest",
+                    ("assets", false) => "Загрузка ассетов",
+                    ("assets", true) => "Downloading assets",
+                    ("libraries", false) => "Загрузка библиотек",
+                    ("libraries", true) => "Downloading libraries",
+                    ("natives", false) => "Нативные библиотеки",
+                    ("natives", true) => "Native libraries",
+                    ("java", false) => "Установка Java",
+                    ("java", true) => "Installing Java",
+                    ("client", false) => "Загрузка клиента",
+                    ("client", true) => "Downloading client",
                     _ => return Some(self.current_install_stage.full_localized_name().to_string()),
                 };
                 return Some(localized.to_string());
@@ -792,10 +824,18 @@ impl UiState {
                 .iter()
                 .find(|i| &i.id == inst_id)
                 .map_or_else(|| inst_id.as_str(), |i| i.name.as_str());
-            return Some(format!("Установка: {name}"));
+            return Some(if is_en {
+                format!("Installing: {name}")
+            } else {
+                format!("Установка: {name}")
+            });
         }
         if let Some(job) = self.jobs.jobs.iter().find(|j| j.is_active()) {
-            return Some(format!("Загрузка: {}", job.title));
+            return Some(if is_en {
+                format!("Downloading: {}", job.title)
+            } else {
+                format!("Загрузка: {}", job.title)
+            });
         }
         None
     }
@@ -1012,6 +1052,10 @@ impl UiState {
                     self.mod_conflicts = conflicts;
                     self.is_scanning_mods = false;
                 }
+                UiWorkerResponse::ScanModsFailed(err) => {
+                    self.is_scanning_mods = false;
+                    self.status_message = Some((format!("Ошибка сканирования модов: {err}"), true));
+                }
                 UiWorkerResponse::UnusedDepsCleaned { removed, error } => {
                     self.status_message = Some(match error {
                         Some(e) => (format!("Не удалось очистить зависимости: {e}"), true),
@@ -1046,6 +1090,10 @@ impl UiState {
                     } else {
                         self.preflight_report = Some((instance_id, report));
                     }
+                }
+                UiWorkerResponse::PreflightFailed(err) => {
+                    self.status_message =
+                        Some((format!("Ошибка проверки зависимостей: {err}"), true));
                 }
                 UiWorkerResponse::VersionManifestFetched {
                     latest_release,
@@ -1132,6 +1180,13 @@ impl UiState {
                 }
                 UiWorkerResponse::GameStarted(id) => {
                     self.is_launching = false;
+                    if self
+                        .launch_cancel_flags
+                        .get(&id)
+                        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                    {
+                        continue;
+                    }
                     self.game_running = true;
                     self.running_instances.entry(id.clone()).or_insert(None);
                     self.running_instance = Some(id.clone());
@@ -1144,6 +1199,16 @@ impl UiState {
                     }
                 }
                 UiWorkerResponse::GamePid { instance_id, pid } => {
+                    if self
+                        .launch_cancel_flags
+                        .get(&instance_id)
+                        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                    {
+                        std::thread::spawn(move || {
+                            let _ = mq_launch::kill_process_tree(pid);
+                        });
+                        continue;
+                    }
                     self.running_instances
                         .insert(instance_id.clone(), Some(pid));
                     self.running_pids.lock().insert(instance_id, pid);
@@ -1152,6 +1217,8 @@ impl UiState {
                     instance_id,
                     exit_code,
                 } => {
+                    self.launch_cancel_flags.remove(&instance_id);
+                    self.is_launching = false;
                     self.pending_game_exited
                         .push((instance_id.clone(), exit_code));
                     self.running_instances.remove(&instance_id);
@@ -1200,6 +1267,22 @@ impl UiState {
                         }
                     }
                 }
+                UiWorkerResponse::DryRunFinished(_) => {
+                    self.is_launching = false;
+                }
+                UiWorkerResponse::LaunchAborted(instance_id) => {
+                    self.launch_cancel_flags.remove(&instance_id);
+                    self.is_launching = false;
+                    self.running_instances.remove(&instance_id);
+                    self.running_pids.lock().remove(&instance_id);
+                    self.game_session_starts.remove(&instance_id);
+                    self.stopped_by_user.remove(&instance_id);
+                    self.game_running = !self.running_instances.is_empty();
+                    self.running_instance = self.running_instances.keys().next().cloned();
+                    self.pending_game_exited.push((instance_id, 0));
+                    self.status_message =
+                        Some(("Запуск игры отменён пользователем".to_string(), false));
+                }
                 UiWorkerResponse::MclogsUploaded(res) => {
                     self.is_uploading_mclogs = false;
                     match res {
@@ -1230,8 +1313,14 @@ impl UiState {
                     self.discovered_java_runtimes = Some(runtimes);
                     self.is_discovering_java = false;
                 }
+                UiWorkerResponse::JavaDownloadFinished => {
+                    self.is_downloading_java = false;
+                }
                 UiWorkerResponse::UpdateCheckFinished(result) => {
                     self.pending_update_check = Some(result);
+                }
+                UiWorkerResponse::UpdateDownloadProgress(frac) => {
+                    self.pending_update_progress = Some(safe_progress_clamp(frac));
                 }
                 UiWorkerResponse::UpdateDownloadFailed(err) => {
                     self.pending_update_error = Some(err.clone());
@@ -1268,6 +1357,9 @@ impl UiState {
                 } => {
                     self.crash_analysis = Some(analysis);
                     self.crash_analysis_instance = Some(instance_id);
+                }
+                UiWorkerResponse::ElyByAuthUrlReady(url) => {
+                    self.ely_auth_url = Some(url);
                 }
                 UiWorkerResponse::ElyByLoginFinished(result) => {
                     match &result {
@@ -1410,8 +1502,9 @@ impl UiState {
                     }
                     self.msa_login_done = Some(result);
                 }
-                UiWorkerResponse::DiscordRpcConnected(rpc) => {
-                    self.pending_discord_rpc = Some(rpc);
+                UiWorkerResponse::DiscordRpcFinished(rpc_opt) => {
+                    self.discord_rpc_busy = false;
+                    self.pending_discord_rpc = rpc_opt;
                 }
                 UiWorkerResponse::WorldBackedUp {
                     instance_id: _,

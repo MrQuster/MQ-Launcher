@@ -255,7 +255,7 @@ jobs:
           )
 
           # Verify signature with official public key
-          minisign -Vm release-assets/SHA256SUMS -x release-assets/SHA256SUMS.minisig -P RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3
+          minisign -Vm release-assets/SHA256SUMS -x release-assets/SHA256SUMS.minisig -P RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@9d57eef8c06cd9d6b433effeeb7a6a77b3ff94ad
@@ -296,11 +296,11 @@ jobs:
             
             Official Public Key:
             ```
-            RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3
+            RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt
             ```
             
             Verify signature:
             ```bash
-            minisign -Vm SHA256SUMS -P RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3
+            minisign -Vm SHA256SUMS -P RWRlxrUOJgeLq7AIndJRG9ZhsdT5QiHy9usykXvxt1C49a1h/km3h9lt
             sha256sum -c SHA256SUMS
             ```

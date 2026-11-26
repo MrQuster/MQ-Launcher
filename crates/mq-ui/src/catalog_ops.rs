@@ -176,10 +176,32 @@ pub struct PlanOutcome {
     pub sources: HashMap<String, CatalogSource>,
 }
 
-/// Project ids/slugs recorded in the instance lockfile (blocking file read).
+fn load_merged_lock(instance_dir: &Path, kind: ProjectKind) -> mq_mods::ModLockFile {
+    let target_dir = mq_mods::content_target_dir(instance_dir, kind);
+    let mut merged = mq_mods::ModLockFile::load_or_default(&target_dir);
+    let root_lock_path = instance_dir.join(mq_mods::LOCKFILE_NAME);
+    if let Ok(content) = std::fs::read_to_string(&root_lock_path) {
+        if let Ok(root_lock) = serde_json::from_str::<mq_mods::ModLockFile>(&content) {
+            for (slug, mut entry) in root_lock.entries {
+                entry.normalize();
+                let dup_project = !entry.project_id.is_empty()
+                    && merged
+                        .entries
+                        .values()
+                        .any(|e| e.project_id == entry.project_id && e.kind == entry.kind);
+                if !dup_project {
+                    merged.entries.entry(slug).or_insert(entry);
+                }
+            }
+        }
+    }
+    merged
+}
+
+/// Project ids/slugs recorded in both `instance_dir/.mq-lock.json` and
+/// `content_target_dir(instance_dir, kind)/.mq-lock.json` (blocking file read).
 pub fn installed_project_ids(instance_dir: &Path, kind: ProjectKind) -> BTreeSet<String> {
-    let lock =
-        mq_mods::ModLockFile::load_or_default(&mq_mods::content_target_dir(instance_dir, kind));
+    let lock = load_merged_lock(instance_dir, kind);
     lock.entries
         .into_iter()
         .flat_map(|(slug, e)| [slug, e.project_id])
@@ -394,7 +416,60 @@ pub const fn lock_source(source: CatalogSource) -> LockSource {
     }
 }
 
-/// Installs resolved downloads one file at a time so progress and cancellation are per file.
+/// Drives an async job future while watching its per-job `cancel` flag.
+/// When `cancel` flips to `true`, advances `job_epoch` immediately to abort active HTTP streams
+/// without cancelling the shared instance epoch.
+async fn drive_with_cancel<F, T>(
+    cancel: &AtomicBool,
+    job_epoch: &CancelEpoch,
+    fut: F,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    tokio::pin!(fut);
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut cancelled_at: Option<tokio::time::Instant> = None;
+
+    loop {
+        if cancel.load(Ordering::SeqCst) && cancelled_at.is_none() {
+            job_epoch.cancel_and_advance();
+            cancelled_at = Some(tokio::time::Instant::now());
+        }
+        if let Some(t) = cancelled_at {
+            let remaining = std::time::Duration::from_millis(300).saturating_sub(t.elapsed());
+            if remaining.is_zero() {
+                return Err("Отменено".to_string());
+            }
+            tokio::select! {
+                biased;
+                res = &mut fut => {
+                    let _ = res;
+                    return Err("Отменено".to_string());
+                }
+                _ = tokio::time::sleep(remaining) => {
+                    return Err("Отменено".to_string());
+                }
+            }
+        }
+        tokio::select! {
+            biased;
+            res = &mut fut => {
+                return if cancel.load(Ordering::SeqCst) {
+                    Err("Отменено".to_string())
+                } else {
+                    res
+                };
+            }
+            _ = interval.tick() => {}
+        }
+    }
+}
+
+/// Installs resolved downloads for a catalog job with an isolated per-job cancel epoch so
+/// per-job cancellation aborts active HTTP streams immediately and instance `CancelDownload`
+/// does not cancel independent catalog queue jobs.
 /// Blocked (URL-less) downloads must already be filtered out by the caller.
 pub async fn run_content_job(
     ctx: &OpsCtx,
@@ -411,18 +486,24 @@ pub async fn run_content_job(
     if cancel.load(Ordering::SeqCst) {
         return Err("Отменено".to_string());
     }
-    let guard = ctx.epoch.snapshot();
-    mq_mods::install_resolved_content(
-        downloads,
-        &instance_dir,
-        kind,
-        lock_source(source),
-        &ctx.paths,
-        &ctx.net,
-        &guard,
-    )
-    .await
-    .map_err(|e| err_text(&ctx.config, &e))?;
+    let job_epoch = Arc::new(CancelEpoch::new());
+    let job_net = (*ctx.net).clone().with_cancel_epoch(job_epoch.clone());
+    let guard = job_epoch.snapshot();
+    drive_with_cancel(cancel, &job_epoch, async {
+        mq_mods::install_resolved_content(
+            downloads,
+            &instance_dir,
+            kind,
+            lock_source(source),
+            &ctx.paths,
+            &job_net,
+            &guard,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| err_text(&ctx.config, &e))
+    })
+    .await?;
     progress(total, total);
     Ok(())
 }
@@ -442,18 +523,20 @@ pub async fn check_updates(
         ProjectKind::Shader,
     ] {
         let dir = instance_dir.to_path_buf();
-        let lock = tokio::task::spawn_blocking(move || {
-            mq_mods::ModLockFile::load_or_default(&mq_mods::content_target_dir(&dir, kind))
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+        let lock = tokio::task::spawn_blocking(move || load_merged_lock(&dir, kind))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut seen_projects = std::collections::HashSet::new();
         for entry in lock.entries.values().take(200) {
             let source = match entry.source {
                 LockSource::Modrinth => CatalogSource::Modrinth,
                 LockSource::CurseForge => CatalogSource::CurseForge,
                 LockSource::Manual => continue,
             };
-            if entry.project_id.is_empty() || entry.kind != kind {
+            if entry.project_id.is_empty()
+                || entry.kind != kind
+                || !seen_projects.insert(entry.project_id.clone())
+            {
                 continue;
             }
             let req = PlanRequest {
@@ -630,7 +713,9 @@ pub async fn run_modpack_job(
         .map_err(|e| e.to_string())?;
     let id = manifest.id.clone();
     let dir = ctx.paths.instance_dir(id.as_str());
-    let guard = ctx.epoch.snapshot();
+    let job_epoch = Arc::new(CancelEpoch::new());
+    let job_net = (*ctx.net).clone().with_cancel_epoch(job_epoch.clone());
+    let guard = job_epoch.snapshot();
     let archive = preview.archive_path.clone();
     let name = archive
         .file_name()
@@ -638,70 +723,71 @@ pub async fn run_modpack_job(
         .unwrap_or_default()
         .to_string();
 
-    let result: Result<Vec<BlockedDownload>, String> = async {
-        on_stage("Скачивание файлов сборки");
-        let blocked = if is_mrpack(&name) {
-            mq_mods::install_mrpack(
-                &archive,
-                &dir,
+    let result: Result<Vec<BlockedDownload>, String> =
+        drive_with_cancel(cancel, &job_epoch, async {
+            on_stage("Скачивание файлов сборки");
+            let blocked = if is_mrpack(&name) {
+                mq_mods::install_mrpack(
+                    &archive,
+                    &dir,
+                    &ctx.paths,
+                    &job_net,
+                    &ctx.pool,
+                    &guard,
+                    Some(&ctx.bus),
+                )
+                .await
+                .map(|_| Vec::new())
+                .map_err(|e| err_text(&ctx.config, &e))?
+            } else {
+                let cf = CurseForgeClient::from_config(&ctx.config).ok();
+                mq_mods::install_curseforge_modpack(
+                    &archive,
+                    &dir,
+                    &ctx.paths,
+                    &job_net,
+                    cf.as_ref(),
+                    &ctx.pool,
+                    &guard,
+                )
+                .await
+                .map(|o| o.blocked_downloads)
+                .map_err(|e| err_text(&ctx.config, &e))?
+            };
+
+            if cancel.load(Ordering::SeqCst) {
+                return Err("Отменено".to_string());
+            }
+
+            on_stage("Установка Minecraft и загрузчика");
+            // Install Minecraft, mod loader (Fabric/Quilt/Forge/NeoForge), and compatible Java runtime.
+            let req = mq_install::InstallRequest {
+                mc_version: preview.mc_version.clone(),
+                loader: preview.loader,
+                loader_version: preview.loader_version.clone(),
+                instance_dir: dir.clone(),
+                mock_base_url: ctx.mock_base_url.clone(),
+            };
+            let summary = mq_install::install_game(
+                &req,
                 &ctx.paths,
-                &ctx.net,
+                &job_net,
+                &ctx.cas,
                 &ctx.pool,
                 &guard,
                 Some(&ctx.bus),
             )
             .await
-            .map(|_| Vec::new())
-            .map_err(|e| err_text(&ctx.config, &e))?
-        } else {
-            let cf = CurseForgeClient::from_config(&ctx.config).ok();
-            mq_mods::install_curseforge_modpack(
-                &archive,
-                &dir,
-                &ctx.paths,
-                &ctx.net,
-                cf.as_ref(),
-                &ctx.pool,
-                &guard,
-            )
-            .await
-            .map(|o| o.blocked_downloads)
-            .map_err(|e| err_text(&ctx.config, &e))?
-        };
+            .map_err(|e| err_text(&ctx.config, &e))?;
 
-        if cancel.load(Ordering::SeqCst) {
-            return Err("Отменено".to_string());
-        }
+            ctx.bus.publish(mq_core::Event::PhaseCompleted {
+                phase: "install_game".to_string(),
+                elapsed_ms: summary.elapsed_ms,
+            });
 
-        on_stage("Установка Minecraft и загрузчика");
-        // Install Minecraft, mod loader (Fabric/Quilt/Forge/NeoForge), and compatible Java runtime.
-        let req = mq_install::InstallRequest {
-            mc_version: preview.mc_version.clone(),
-            loader: preview.loader,
-            loader_version: preview.loader_version.clone(),
-            instance_dir: dir.clone(),
-            mock_base_url: ctx.mock_base_url.clone(),
-        };
-        let summary = mq_install::install_game(
-            &req,
-            &ctx.paths,
-            &ctx.net,
-            &ctx.cas,
-            &ctx.pool,
-            &guard,
-            Some(&ctx.bus),
-        )
-        .await
-        .map_err(|e| err_text(&ctx.config, &e))?;
-
-        ctx.bus.publish(mq_core::Event::PhaseCompleted {
-            phase: "install_game".to_string(),
-            elapsed_ms: summary.elapsed_ms,
-        });
-
-        Ok(blocked)
-    }
-    .await;
+            Ok(blocked)
+        })
+        .await;
 
     match result {
         Ok(blocked) if !cancel.load(Ordering::SeqCst) => {
@@ -894,5 +980,220 @@ mod tests {
             .filter_map(|o| o.project_id.as_deref())
             .collect();
         assert_eq!(opt_ids, ["extra-opt"]);
+    }
+
+    #[test]
+    fn installed_project_ids_merges_instance_root_and_kind_lockfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let inst_dir = dir.path();
+
+        let mut root_lock = mq_mods::ModLockFile::default();
+        root_lock.record_install(
+            "sodium-slug",
+            mq_mods::ModLockEntry::new(LockSource::Modrinth, "AANobbMI", "v1", "sodium.jar")
+                .with_kind(ProjectKind::Mod),
+        );
+        root_lock.record_install(
+            "pack-root",
+            mq_mods::ModLockEntry::new(LockSource::Modrinth, "rp-from-pack", "v1", "pack-root.zip")
+                .with_kind(ProjectKind::ResourcePack),
+        );
+        root_lock.save(inst_dir).unwrap();
+
+        let mut mods_lock = mq_mods::ModLockFile::default();
+        mods_lock.record_install(
+            "lithium-slug",
+            mq_mods::ModLockEntry::new(LockSource::Modrinth, "gvQqBUqZ", "v2", "lithium.jar")
+                .with_kind(ProjectKind::Mod),
+        );
+        mods_lock
+            .save(&mq_mods::content_target_dir(inst_dir, ProjectKind::Mod))
+            .unwrap();
+
+        let mut rp_lock = mq_mods::ModLockFile::default();
+        rp_lock.record_install(
+            "faithful-slug",
+            mq_mods::ModLockEntry::new(
+                LockSource::Modrinth,
+                "rp-from-catalog",
+                "v3",
+                "faithful.zip",
+            )
+            .with_kind(ProjectKind::ResourcePack),
+        );
+        rp_lock
+            .save(&mq_mods::content_target_dir(
+                inst_dir,
+                ProjectKind::ResourcePack,
+            ))
+            .unwrap();
+
+        let mod_ids = installed_project_ids(inst_dir, ProjectKind::Mod);
+        assert!(mod_ids.contains("AANobbMI"));
+        assert!(mod_ids.contains("sodium-slug"));
+        assert!(mod_ids.contains("gvQqBUqZ"));
+        assert!(mod_ids.contains("lithium-slug"));
+
+        let rp_ids = installed_project_ids(inst_dir, ProjectKind::ResourcePack);
+        assert!(rp_ids.contains("rp-from-pack"));
+        assert!(rp_ids.contains("pack-root"));
+        assert!(rp_ids.contains("rp-from-catalog"));
+        assert!(rp_ids.contains("faithful-slug"));
+
+        // Prefer content_target_dir entry over stale instance_dir entry for the same project_id.
+        let mut stale_root = mq_mods::ModLockFile::default();
+        stale_root.record_install(
+            "lithium-old-key",
+            mq_mods::ModLockEntry::new(LockSource::Modrinth, "gvQqBUqZ", "v1", "lithium-v1.jar")
+                .with_kind(ProjectKind::Mod),
+        );
+        stale_root.save(inst_dir).unwrap();
+        let merged = load_merged_lock(inst_dir, ProjectKind::Mod);
+        let lithium_entries: Vec<_> = merged
+            .entries
+            .values()
+            .filter(|e| e.project_id == "gvQqBUqZ")
+            .collect();
+        assert_eq!(lithium_entries.len(), 1);
+        assert_eq!(lithium_entries[0].version_id, "v2");
+    }
+
+    #[tokio::test]
+    async fn per_job_cancel_aborts_stream_and_ignores_instance_epoch_cancel() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = MqPaths::with_root(tmp.path().to_path_buf());
+        let mgr = mq_instances::InstanceManager::new(paths.clone());
+        let inst = mgr
+            .create_instance("CancelTest", "1.21.4", ModLoaderKind::Fabric, None)
+            .unwrap();
+
+        let epoch = Arc::new(CancelEpoch::new());
+        let bus = EventBus::new();
+        let net = Arc::new(
+            NetEngine::with_components(
+                mq_net::NetConfig::default(),
+                Arc::new(mq_sched::BufferPool::new()),
+                epoch.clone(),
+                Some(bus.clone()),
+            )
+            .unwrap(),
+        );
+        let ctx = OpsCtx {
+            config: AppConfig::default(),
+            paths: paths.clone(),
+            net,
+            cas: mq_install::CasStore::new(paths),
+            epoch: epoch.clone(),
+            pool: Arc::new(ComputePool::new(1)),
+            bus,
+            mock_base_url: None,
+        };
+
+        // 1. Stalled stream is aborted promptly by per-job cancel flag.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut req_buf = [0u8; 512];
+                let _ = sock.read(&mut req_buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\npart",
+                    )
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let dl_stalled = ResolvedModDownload {
+            project_id: "stalled".into(),
+            version_id: "v1".into(),
+            filename: "stalled.jar".into(),
+            url: format!("http://{addr}/stalled.jar"),
+            size: 1_000_000,
+            sha1: None,
+            sha512: None,
+            is_dependency: false,
+        };
+
+        let cancel_trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            cancel_trigger.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let res = run_content_job(
+            &ctx,
+            &cancel,
+            &inst.id,
+            ProjectKind::Mod,
+            CatalogSource::Modrinth,
+            &[dl_stalled],
+            |_, _| {},
+        )
+        .await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "Отменено");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "per-job cancel must abort active stream promptly"
+        );
+        server.abort();
+
+        // 2. Advancing ctx.epoch (instance CancelDownload) does NOT break an independent catalog job.
+        let ok_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ok_addr = ok_listener.local_addr().unwrap();
+        let payload = b"ok-mod-bytes";
+        let ok_server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = ok_listener.accept().await {
+                let mut req_buf = [0u8; 512];
+                let _ = sock.read(&mut req_buf).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                let _ = sock.write_all(payload).await;
+            }
+        });
+
+        let cancel_ok = Arc::new(AtomicBool::new(false));
+        let dl_ok = ResolvedModDownload {
+            project_id: "ok-mod".into(),
+            version_id: "v1".into(),
+            filename: "ok-mod.jar".into(),
+            url: format!("http://{ok_addr}/ok-mod.jar"),
+            size: payload.len() as u64,
+            sha1: None,
+            sha512: None,
+            is_dependency: false,
+        };
+
+        let instance_epoch = ctx.epoch.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            instance_epoch.cancel_and_advance();
+        });
+
+        let ok_res = run_content_job(
+            &ctx,
+            &cancel_ok,
+            &inst.id,
+            ProjectKind::Mod,
+            CatalogSource::Modrinth,
+            &[dl_ok],
+            |_, _| {},
+        )
+        .await;
+        assert!(
+            ok_res.is_ok(),
+            "instance CancelDownload must not abort independent catalog job: {ok_res:?}"
+        );
+        let _ = ok_server.await;
     }
 }
