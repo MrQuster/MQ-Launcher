@@ -81,7 +81,7 @@ Requires Rust toolchain `1.80+` (pinned in `rust-toolchain.toml`).
 ```bash
 # 1. Clone repository
 git clone https://github.com/MrQuster/MQ-Launcher.git
-cd mq
+cd MQ-Launcher
 
 # 2. Run desktop UI
 cargo run -p mq-cli -- ui

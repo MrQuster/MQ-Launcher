@@ -81,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/MrQuster/MQ-Launcher/main/install.s
 ```bash
 # 1. Клонирование репозитория
 git clone https://github.com/MrQuster/MQ-Launcher.git
-cd mq
+cd MQ-Launcher
 
 # 2. Запуск GUI из исходников
 cargo run -p mq-cli -- ui

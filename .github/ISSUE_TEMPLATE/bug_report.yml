@@ -8,7 +8,7 @@ body:
       value: |
         Спасибо за обратную связь! Перед созданием обращения:
         1. Убедитесь, что используете последнюю версию MQ (`mq --version`).
-        2. Проверьте [FAQ](https://github.com/MrQuster/mq/blob/main/docs/FAQ.md) и открытые issues.
+        2. Проверьте [FAQ](https://github.com/MrQuster/MQ-Launcher/blob/main/docs/FAQ.md) и открытые issues.
 
         > **ВНИМАНИЕ ПО БЕЗОПАСНОСТИ:**
         > **НЕ вставляйте токены, пароли, логины и приватные ключи!**
