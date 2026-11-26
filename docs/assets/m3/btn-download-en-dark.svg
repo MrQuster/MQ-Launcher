@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 48" width="220" height="48" role="img" aria-label="Download v2.8.4">
+  <rect x="0.5" y="0.5" width="219" height="47" rx="23.5" fill="#abc7ff"/>
+  <g transform="translate(32 13) scale(0.92)"><path d="M12 4v11m0 0l-4.2-4.2M12 15l4.2-4.2M5 19h14" stroke="#142e5c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g>
+  <text x="123.0" y="29" text-anchor="middle" font-family="Google Sans, Inter, Segoe UI, system-ui, sans-serif" font-size="14" font-weight="600" fill="#142e5c">Download v2.8.4</text>
+</svg>
