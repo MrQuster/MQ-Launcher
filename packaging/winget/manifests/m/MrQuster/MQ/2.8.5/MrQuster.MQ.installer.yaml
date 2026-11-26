@@ -27,6 +27,6 @@ AppsAndFeaturesEntries:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.5/MQ-Setup-2.8.5-x64.exe
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000 # Calculated at release
+    InstallerSha256: 9F68768B50903258382E90FF82BCFDBBC158E79F625EDCB82EECC0251C74E706 # Calculated at release
 ManifestType: installer
 ManifestVersion: 1.6.0
