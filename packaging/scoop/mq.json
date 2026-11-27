@@ -10,7 +10,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.6/mq-windows-x86_64-portable.zip",
-            "hash": "3da04f563ff1b887cf750c2989b1e548a5c1127d34b693191e889eeca664f953"
+            "hash": "e85fac3a88108d28d7aae1c9e254f67b5f70fbed8174e35024ce6228e7ea44f6"
         }
     },
     "bin": "mq.exe",

@@ -35,7 +35,7 @@ Installers:
     InstallerType: inno
     Scope: user
     InstallerUrl: https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.6/MQ-Setup-2.8.6-x64.exe
-    InstallerSha256: 9F68768B50903258382E90FF82BCFDBBC158E79F625EDCB82EECC0251C74E706
+    InstallerSha256: 916CC316B710549C795454F56DA62DEDD4F022C544BAC2B5593A1B4931092681
     InstallerSwitches:
       Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
       SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART /SP-
