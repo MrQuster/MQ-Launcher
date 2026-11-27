@@ -21,10 +21,11 @@ pub use command::{
 pub use crash_analyzer::{analyze_crash, upload_to_mclogs, CrashAnalysis};
 pub use discord_rpc::DiscordRpcClient;
 pub use java::{
-    discover_java_runtimes, discover_java_runtimes_from_sources, download_adoptium_java,
-    download_zulu_java, ensure_java_runtime, parse_java_release_file, parse_java_version_output,
-    parse_java_version_str, probe_java_binary, required_java_major_for_mc, select_java_runtime,
-    verify_java_executable, JavaRuntime, JavaSource, SelectedJava, SYSTEM_JVM_DIRS,
+    discover_java_runtimes, discover_java_runtimes_from_sources, discover_java_runtimes_with_extra,
+    download_adoptium_java, download_zulu_java, ensure_java_runtime, parse_java_release_file,
+    parse_java_version_output, parse_java_version_str, probe_java_binary,
+    required_java_major_for_mc, select_java_runtime, verify_java_executable, JavaRuntime,
+    JavaSource, SelectedJava, SYSTEM_JVM_DIRS,
 };
 pub use mojang_java::{
     component_for_major_version, current_mojang_platform, ensure_mojang_java_runtime,
@@ -248,11 +249,31 @@ IMPLEMENTOR="Oracle Corporation"
         let sel_8 = select_java_runtime(&discovered, 8, None).expect("select Java 8");
         assert_eq!(sel_8.major_version, 8);
 
-        // When Java 8 is not installed, requesting 8 picks closest newer (Java 17).
+        // When Java 8 is not installed, requesting Java 8 must fail instead of selecting Java 17
+        // (legacy Forge 1.12.2 / 1.16.5 crashes with ClassCastException on Java 9+).
         let only_17_and_21 = &discovered[1..];
-        let fallback_for_8 =
-            select_java_runtime(only_17_and_21, 8, None).expect("fallback Java 8 -> 17");
-        assert_eq!(fallback_for_8.major_version, 17);
+        let legacy_err =
+            select_java_runtime(only_17_and_21, 8, None).expect_err("must reject Java 17 for 8");
+        assert!(matches!(
+            legacy_err,
+            MqError::JavaNotFound {
+                required_major: 8,
+                ..
+            }
+        ));
+
+        // When only Java 8 is installed, requesting Java 21 must never fall back to Java 8
+        // (guarantees UnsupportedClassVersionError).
+        let only_8 = &discovered[..1];
+        let newer_err =
+            select_java_runtime(only_8, 21, None).expect_err("must reject Java 8 for 21");
+        assert!(matches!(
+            newer_err,
+            MqError::JavaNotFound {
+                required_major: 21,
+                ..
+            }
+        ));
 
         // Empty runtime list returns MqError::JavaNotFound.
         let empty_err = select_java_runtime(&[], 21, None).expect_err("empty must fail");

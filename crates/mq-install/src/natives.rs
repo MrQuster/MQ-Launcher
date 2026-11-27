@@ -104,8 +104,9 @@ pub async fn extract_natives_archives(
                         return Err(MqError::ZipSlip { entry: raw_name });
                     }
 
-                    // Exclude META-INF and user/profile-specified prefixes (separator-normalized)
+                    // Exclude META-INF, foreign-architecture nested natives, and profile-specified prefixes
                     if normalized_name.starts_with("META-INF/")
+                        || !nested_native_matches_host_arch(&normalized_name)
                         || excludes
                             .iter()
                             .any(|ex| normalized_name.starts_with(&ex.replace('\\', "/")))
@@ -155,11 +156,14 @@ pub async fn extract_natives_archives(
                     {
                         if let Some(file_name) = dest_path.file_name() {
                             let root_target = target_dir.join(file_name);
-                            if root_target != dest_path
-                                && !root_target.exists()
-                                && fs::hard_link(&dest_path, &root_target).is_err()
-                            {
-                                let _ = crate::cas::copy_chunked_atomic(&dest_path, &root_target);
+                            if root_target != dest_path {
+                                if root_target.exists() {
+                                    let _ = remove_file_with_retry(&root_target);
+                                }
+                                if fs::hard_link(&dest_path, &root_target).is_err() {
+                                    let _ =
+                                        crate::cas::copy_chunked_atomic(&dest_path, &root_target);
+                                }
                             }
                         }
                     }

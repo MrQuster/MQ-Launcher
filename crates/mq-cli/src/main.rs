@@ -32,7 +32,7 @@ use mq_install::{
 };
 use mq_instances::{InstanceManager, InstanceManifest};
 use mq_launch::{
-    build_launch_command, discover_java_runtimes, ensure_prelaunch_assets,
+    build_launch_command, discover_java_runtimes_with_extra, ensure_prelaunch_assets,
     required_java_major_for_mc, select_java_runtime, spawn_and_stream_game,
     sync_minecraft_options_lang, LaunchContext,
 };
@@ -48,7 +48,7 @@ use mq_sched::{
     compute_speedup, estimate_serial_fraction, read_peak_rss_mib, thread_ladder, BufferPool,
     CancelEpoch, ComputePool, CpuSampler,
 };
-use mq_ui::{run_gui, UiState};
+use mq_ui::{run_gui_with_factory, UiState};
 use testsupport::{MockConfig, MockServer};
 
 pub mod doctor;
@@ -64,15 +64,15 @@ use doctor::{cmd_doctor_install, DoctorArgs};
                   Created by MrQuster (https://github.com/MrQuster).\n\
                   Supports Offline mode, Ely.by browser OAuth2 with authlib-injector, Modrinth, and CurseForge.\n\
                   Run 'mq' without arguments to start the GUI, or use subcommands for CLI operations.",
-    args_conflicts_with_subcommands = true
+    subcommand_precedence_over_arg = true
 )]
 struct Cli {
     /// Graphical rendering backend for the UI.
-    #[arg(long, value_enum, default_value = "auto")]
+    #[arg(long, value_enum, default_value = "auto", global = true)]
     backend: BackendChoice,
 
     /// Number of worker threads for Rayon CPU pool (defaults to logical core count).
-    #[arg(short = 't', long)]
+    #[arg(short = 't', long, global = true)]
     threads: Option<usize>,
 
     /// Internal restart flag after a self-update.
@@ -738,13 +738,19 @@ async fn main() -> Result<()> {
     attach_parent_console_if_cli();
 
     let cli = Cli::parse();
+    if let (Some(_), Some(pack)) = (&cli.command, &cli.open_pack) {
+        anyhow::bail!(
+            "Нельзя одновременно передавать путь к файлу ({}) и подкоманду",
+            pack.display()
+        );
+    }
     let is_doctor_json = matches!(&cli.command, Some(Commands::Doctor(d)) if d.json);
 
     // Initialize structured logging with token redaction on stderr so stdout stays clean for JSON output
     let default_filter = if is_doctor_json {
         "error"
     } else {
-        "info,mq=info"
+        "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,mq=info"
     };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -1122,11 +1128,8 @@ fn run_desktop_gui(
     let num_t = threads.unwrap_or_else(default_cpu_threads);
     let pool = Arc::new(ComputePool::new(num_t));
 
-    let mut state = UiState::new(paths.clone(), config.clone(), pool.clone())
-        .context("Failed to initialize UI state")?;
     let ipc_listener = start_mrpack_ipc_listener(&paths);
-    state.pending_mrpack_path = pending_mrpack.clone();
-    state.mrpack_ipc_receiver = ipc_listener.as_ref().map(|(rx, _)| rx.clone());
+    let ipc_rx = ipc_listener.as_ref().map(|(rx, _)| rx.clone());
     let gui_backend = match backend {
         BackendChoice::Auto => GuiBackend::Auto,
         BackendChoice::Vulkan => GuiBackend::Vulkan,
@@ -1137,22 +1140,17 @@ fn run_desktop_gui(
         "[MQ] Запуск графического интерфейса MQ Launcher (Backend: {:?})...",
         gui_backend
     );
-    let result = match run_gui(state, gui_backend) {
-        Ok(()) => Ok(()),
-        Err(e) if gui_backend != GuiBackend::Gl => {
-            eprintln!(
-                "Не удалось инициализировать графический бэкенд {:?} ({e}). Переключение на запасной рендерер OpenGL (Glow)...",
-                gui_backend
-            );
-            let mut fallback_state = UiState::new(paths, config, pool)
-                .context("Failed to initialize UI state for OpenGL fallback")?;
-            fallback_state.pending_mrpack_path = pending_mrpack;
-            fallback_state.mrpack_ipc_receiver = ipc_listener.as_ref().map(|(rx, _)| rx.clone());
-            run_gui(fallback_state, GuiBackend::Gl)
-                .map_err(|err| anyhow::anyhow!("eframe error: {err}"))
-        }
-        Err(e) => Err(anyhow::anyhow!("eframe error: {e}")),
-    };
+    let result = run_gui_with_factory(
+        || {
+            let mut state = UiState::new(paths.clone(), config.clone(), pool.clone())
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            state.pending_mrpack_path = pending_mrpack.clone();
+            state.mrpack_ipc_receiver = ipc_rx.clone();
+            Ok(state)
+        },
+        gui_backend,
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {e}"));
     if let Some((_, port_file)) = ipc_listener {
         let _ = std::fs::remove_file(port_file);
     }
@@ -1197,13 +1195,46 @@ async fn cmd_launch(args: LaunchArgs, paths: MqPaths) -> Result<()> {
         create_offline_account("Player")?
     };
 
-    let java_runtimes = discover_java_runtimes();
+    let managed_java_dir = paths.java_dir();
+    let java_runtimes = discover_java_runtimes_with_extra(Some(&managed_java_dir));
     let req_major = required_java_major_for_mc(
         &inst.mc_version,
         Some(resolved_ver.java_version.major_version),
     );
-    let selected_java = select_java_runtime(&java_runtimes, req_major, inst.java_path.as_deref())
-        .context("Подходящая версия Java не найдена")?;
+    let local_java = select_java_runtime(&java_runtimes, req_major, inst.java_path.as_deref())
+        .ok()
+        .filter(|rt| mq_launch::verify_java_executable(&rt.path).is_ok());
+
+    let selected_java = match local_java {
+        Some(rt) => rt,
+        None if !args.dry_run => {
+            println!(
+                "[MQ] Подходящая Java {req_major} не найдена локально — автоматическая загрузка..."
+            );
+            let net = NetEngine::new(NetConfig::default())
+                .context("Не удалось инициализировать HTTP-клиент для загрузки Java")?;
+            let comp_hint = (!resolved_ver.java_version.component.trim().is_empty())
+                .then_some(resolved_ver.java_version.component.as_str());
+            let ensured = mq_launch::ensure_java_runtime(
+                net.client(),
+                &managed_java_dir,
+                req_major,
+                comp_hint,
+                inst.java_path.as_deref(),
+            )
+            .await
+            .with_context(|| format!("Подходящая версия Java {req_major} не найдена"))?;
+            println!(
+                "[MQ] Java {} ({}) готова: {}",
+                ensured.runtime.major_version,
+                ensured.runtime.vendor,
+                ensured.runtime.path.display()
+            );
+            ensured.runtime
+        }
+        None => select_java_runtime(&java_runtimes, req_major, inst.java_path.as_deref())
+            .context("Подходящая версия Java не найдена")?,
+    };
 
     let authlib_path = if account.kind == AccountKind::ElyBy {
         let client = ElyByClient::new();
@@ -2779,7 +2810,7 @@ async fn cmd_instances(args: InstancesArgs, paths: MqPaths) -> Result<()> {
 async fn cmd_java(args: JavaArgs, paths: MqPaths) -> Result<()> {
     match args.action {
         JavaSubcommand::List => {
-            let runtimes = discover_java_runtimes();
+            let runtimes = discover_java_runtimes_with_extra(Some(&paths.java_dir()));
             if runtimes.is_empty() {
                 println!("Java не обнаружена в системе.");
                 println!("Установите JRE автоматически: mq java download --version 21");
@@ -3234,7 +3265,7 @@ async fn cmd_doctor(args: DoctorArgs, paths: MqPaths) -> Result<()> {
     }
 
     // 4. Java Runtimes
-    let runtimes = discover_java_runtimes();
+    let runtimes = discover_java_runtimes_with_extra(Some(&paths.java_dir()));
     if !args.json {
         println!("[JAVA]      Обнаружено сред исполнения: {}", runtimes.len());
         for rt in &runtimes {
@@ -4201,6 +4232,45 @@ mod mrpack_cli_tests {
             strip_windows_verbatim_prefix(PathBuf::from("/tmp/pack.mrpack")),
             PathBuf::from("/tmp/pack.mrpack")
         );
+    }
+
+    #[test]
+    fn parses_global_flags_before_and_after_subcommands() {
+        let bare = Cli::try_parse_from(["mq"]).expect("bare mq");
+        assert!(bare.command.is_none());
+        assert!(bare.open_pack.is_none());
+        assert_eq!(bare.backend, BackendChoice::Auto);
+        assert_eq!(bare.threads, None);
+
+        let pack = Cli::try_parse_from(["mq", "pack.mrpack"]).expect("pack.mrpack");
+        assert!(pack.command.is_none());
+        assert_eq!(
+            pack.open_pack.as_deref(),
+            Some(std::path::Path::new("pack.mrpack"))
+        );
+
+        let glow = Cli::try_parse_from(["mq", "--backend", "glow"]).expect("--backend glow");
+        assert!(glow.command.is_none());
+        assert!(glow.open_pack.is_none());
+        assert_eq!(glow.backend, BackendChoice::Glow);
+
+        let before = Cli::try_parse_from(["mq", "--threads", "8", "install", "1.21.1"])
+            .expect("--threads before subcommand");
+        assert_eq!(before.threads, Some(8));
+        assert!(before.open_pack.is_none());
+        match before.command {
+            Some(Commands::Install(args)) => assert_eq!(args.version, "1.21.1"),
+            other => panic!("expected Install subcommand, got {other:?}"),
+        }
+
+        let after = Cli::try_parse_from(["mq", "install", "1.21.1", "--threads", "8"])
+            .expect("--threads after subcommand");
+        assert_eq!(after.threads, Some(8));
+        assert!(after.open_pack.is_none());
+        match after.command {
+            Some(Commands::Install(args)) => assert_eq!(args.version, "1.21.1"),
+            other => panic!("expected Install subcommand, got {other:?}"),
+        }
     }
 
     #[test]

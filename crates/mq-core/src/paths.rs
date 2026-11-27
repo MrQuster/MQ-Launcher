@@ -226,10 +226,18 @@ impl MqPaths {
         self.data_dir.join("libraries")
     }
 
-    /// Launcher-managed Java runtimes directory (`<data_dir>/java`).
+    /// Launcher-managed Java runtimes directory (`<data_dir>/java`, or an ASCII-safe directory
+    /// on Windows when `data_dir` contains non-ASCII characters that break OpenJDK `GetModuleFileNameA`).
     #[inline]
     pub fn java_dir(&self) -> PathBuf {
-        self.data_dir.join("java")
+        let preferred = self.data_dir.join("java");
+        #[cfg(target_os = "windows")]
+        {
+            if env::var_os("MQ_TEST_SANDBOX").is_none() {
+                return resolve_ascii_safe_windows_java_dir(&preferred);
+            }
+        }
+        preferred
     }
 
     /// World backups directory (`<data_dir>/backups`).
@@ -347,6 +355,53 @@ fn resolve_xdg_dir(
         MqError::Internal("unable to resolve XDG paths: $HOME is not set".to_owned())
     })?;
     Ok(home.join(home_rel_fallback).join(APP_DIR_NAME))
+}
+
+/// Returns `preferred` when it is pure 7-bit ASCII (or none of `candidates` can be created),
+/// otherwise selects the first ASCII candidate path that is created successfully.
+pub fn select_ascii_safe_java_dir(preferred: &Path, candidates: &[PathBuf]) -> PathBuf {
+    if preferred.to_str().is_some_and(|s| s.is_ascii()) {
+        return preferred.to_path_buf();
+    }
+    for cand in candidates {
+        if cand.to_str().is_some_and(|s| s.is_ascii()) && fs::create_dir_all(cand).is_ok() {
+            return cand.clone();
+        }
+    }
+    preferred.to_path_buf()
+}
+
+/// On Windows, OpenJDK's `java.exe` launcher fails with `Error: could not find java.dll`
+/// when its installation path contains non-ACP / Cyrillic characters (`JDK-8124977`).
+/// When `preferred` contains non-ASCII characters, selects a shared ASCII-safe Java directory.
+pub fn resolve_ascii_safe_windows_java_dir(preferred: &Path) -> PathBuf {
+    if preferred.to_str().is_some_and(|s| s.is_ascii()) {
+        return preferred.to_path_buf();
+    }
+    let mut candidates = Vec::new();
+    if let Some(custom) = env::var_os("MQ_JAVA_DIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(custom));
+    }
+    if let Some(public_dir) = env::var_os("PUBLIC").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(public_dir).join("MQ").join("java"));
+    }
+    if let Some(program_data) = env::var_os("ProgramData").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(program_data).join("MQ").join("java"));
+    }
+    if let Some(sys_drive) = env::var_os("SystemDrive").filter(|v| !v.is_empty()) {
+        let drive = sys_drive.to_string_lossy();
+        let trimmed = drive.trim_end_matches(['\\', '/']);
+        if !trimmed.is_empty() {
+            candidates.push(
+                PathBuf::from(format!("{trimmed}\\"))
+                    .join("Users")
+                    .join("Public")
+                    .join("MQ")
+                    .join("java"),
+            );
+        }
+    }
+    select_ascii_safe_java_dir(preferred, &candidates)
 }
 
 /// Resolves an untrusted archive or manifest relative path strictly inside `base`,
@@ -686,5 +741,37 @@ mod tests {
         assert!(!paths.data_dir.to_string_lossy().starts_with(r"\\?\"));
         assert!(!paths.config_dir.to_string_lossy().starts_with(r"\\?\"));
         assert!(!paths.cache_dir.to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn select_ascii_safe_java_dir_keeps_ascii_and_redirects_non_ascii() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ascii_candidate = tmp
+            .path()
+            .join("Users")
+            .join("Public")
+            .join("MQ")
+            .join("java");
+        assert!(ascii_candidate.to_str().is_some_and(|s| s.is_ascii()));
+
+        let ascii_preferred = Path::new(r"C:\Users\Player\AppData\Local\MQ\java");
+        assert_eq!(
+            select_ascii_safe_java_dir(ascii_preferred, std::slice::from_ref(&ascii_candidate)),
+            ascii_preferred
+        );
+        assert!(
+            !ascii_candidate.exists(),
+            "ASCII preferred path must not create fallback candidate"
+        );
+
+        let non_ascii_preferred = Path::new(r"C:\Users\Кирилл Игрок\AppData\Local\MQ\java");
+        let non_ascii_candidate = tmp.path().join("Игрок").join("java");
+        let selected = select_ascii_safe_java_dir(
+            non_ascii_preferred,
+            &[non_ascii_candidate.clone(), ascii_candidate.clone()],
+        );
+        assert_eq!(selected, ascii_candidate);
+        assert!(ascii_candidate.is_dir());
+        assert!(!non_ascii_candidate.exists());
     }
 }

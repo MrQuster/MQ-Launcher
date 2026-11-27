@@ -5,7 +5,7 @@
 #  Advanced:
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Portable
 #    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Uninstall
-#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Version 2.8.5 -Silent
+#    & ([scriptblock]::Create((irm https://github.com/MrQuster/MQ-Launcher/releases/latest/download/install.ps1))) -Version 2.8.6 -Silent
 # ==============================================================================
 
 function Invoke-MqInstaller {
@@ -710,6 +710,10 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
             Write-Host "[OK] SHA-256 verified: $computedHash" -ForegroundColor Green
         }
 
+        if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {
+            Unblock-File -LiteralPath $downloadFile -ErrorAction SilentlyContinue
+        }
+
         # Step 4: Install
         if ($Portable) {
             if (-not $Silent) {
@@ -752,6 +756,10 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
             $installedExe = Join-Path $targetDir "mq.exe"
             if (-not (Test-Path -LiteralPath $installedExe)) {
                 throw "Portable package did not contain mq.exe after extraction to $targetDir"
+            }
+
+            if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {
+                Unblock-File -LiteralPath $installedExe -ErrorAction SilentlyContinue
             }
 
             Add-UserPathEntry -DirPath $targetDir

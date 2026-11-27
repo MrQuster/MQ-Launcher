@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use mq_core::MqPaths;
-use mq_launch::java::{discover_java_runtimes, required_java_major_for_mc};
+use mq_launch::java::{discover_java_runtimes_with_extra, required_java_major_for_mc};
 use mq_meta::{
     find_version_entry, parse_asset_index, parse_vanilla_version, ResolvedLibrary, RuleContext,
     VersionManifest, MOJANG_RESOURCES_BASE_URL, MOJANG_VERSION_MANIFEST_URL,
@@ -902,7 +902,10 @@ pub async fn run_install_doctor(
     let num_cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let runtimes = discover_java_runtimes();
+    let managed_java_dir = mq_core::MqPaths::platform_default()
+        .ok()
+        .map(|p| p.java_dir());
+    let runtimes = discover_java_runtimes_with_extra(managed_java_dir.as_deref());
     let runtime_summaries: Vec<String> = runtimes
         .iter()
         .map(|r| {

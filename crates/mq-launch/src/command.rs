@@ -247,8 +247,24 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
     }
 
     // 2. Heap memory flags (-Xms / -Xmx).
-    let min_mb = ctx.instance.memory_min_mb.max(256);
-    let max_mb = ctx.instance.memory_max_mb.max(min_mb);
+    let mut min_mb = ctx.instance.memory_min_mb.max(256);
+    let mut max_mb = ctx.instance.memory_max_mb.max(min_mb);
+    if cfg!(target_pointer_width = "64")
+        && crate::java::probe_java_binary(&clean_java_bin).is_some_and(|rt| !rt.is_64bit)
+    {
+        let clamped_max = max_mb.min(1408);
+        if clamped_max != max_mb || min_mb > clamped_max {
+            tracing::warn!(
+                java_bin = %clean_java_bin.display(),
+                original_min_mb = min_mb,
+                original_max_mb = max_mb,
+                clamped_mb = clamped_max,
+                "32-bit JVM detected on 64-bit host; clamping heap size to 1408 MB"
+            );
+        }
+        max_mb = clamped_max;
+        min_mb = min_mb.min(max_mb);
+    }
     jvm_flags.push(format!("-Xms{min_mb}M"));
     jvm_flags.push(format!("-Xmx{max_mb}M"));
 
@@ -305,9 +321,10 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
         ctx.version.loader,
     );
     for custom_arg in &sanitized_custom_args {
-        let mut expanded = expand_and_sanitize_arg(custom_arg, &jvm_subs)
-            .trim()
-            .to_owned();
+        let mut expanded =
+            expand_jvm_arg_with_windows_lib_sep(custom_arg, &jvm_subs, libs_str.as_ref())
+                .trim()
+                .to_owned();
         if expanded.is_empty() {
             continue;
         }
@@ -336,7 +353,8 @@ pub fn build_launch_command(ctx: &LaunchContext) -> MqResult<BuiltLaunchCommand>
 
     // 4. Expanded version JVM arguments.
     for raw_jvm_arg in &ctx.version.jvm_arguments {
-        let mut expanded = expand_and_sanitize_arg(raw_jvm_arg, &jvm_subs);
+        let mut expanded =
+            expand_jvm_arg_with_windows_lib_sep(raw_jvm_arg, &jvm_subs, libs_str.as_ref());
         if expanded.starts_with("-DignoreList=") {
             expanded = ensure_ignore_list_covers_client_jar(
                 &expanded,
@@ -822,6 +840,45 @@ pub fn expand_and_sanitize_arg(template: &str, substitutions: &[(&str, &str)]) -
     result
 }
 
+fn normalize_library_directory_slashes(expanded: &str, libs_str: &str) -> String {
+    if !libs_str.contains('\\') || libs_str.is_empty() || !expanded.contains(libs_str) {
+        return expanded.to_owned();
+    }
+    let mut out = String::with_capacity(expanded.len());
+    let mut rest = expanded;
+    while let Some(idx) = rest.find(libs_str) {
+        let after_idx = idx + libs_str.len();
+        out.push_str(&rest[..after_idx]);
+        let tail = &rest[after_idx..];
+        let mut consumed = 0usize;
+        if tail.starts_with('/') || tail.starts_with('\\') {
+            for (offset, ch) in tail.char_indices() {
+                if matches!(ch, ';' | ',' | '"' | '\'' | '\n' | '\r' | '\t' | ' ') {
+                    break;
+                }
+                out.push(if ch == '/' { '\\' } else { ch });
+                consumed = offset + ch.len_utf8();
+            }
+        }
+        rest = &tail[consumed..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn expand_jvm_arg_with_windows_lib_sep(
+    template: &str,
+    jvm_subs: &[(&str, &str)],
+    libs_str: &str,
+) -> String {
+    let expanded = expand_and_sanitize_arg(template, jvm_subs);
+    if template.contains("${library_directory}") {
+        normalize_library_directory_slashes(&expanded, libs_str)
+    } else {
+        expanded
+    }
+}
+
 pub fn expand_jvm_placeholder(
     template: &str,
     natives_dir: &str,
@@ -840,7 +897,7 @@ pub fn expand_jvm_placeholder(
         ("classpath_separator", cp_sep),
         ("version_name", version_name),
     ];
-    expand_and_sanitize_arg(template, &subs)
+    expand_jvm_arg_with_windows_lib_sep(template, &subs, libraries_dir)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1240,8 +1297,23 @@ pub fn rewrite_args_for_windows_limit(
         }
     }
 
+    let clean_working_dir = strip_windows_verbatim_prefix(working_dir);
     let clean_argfile = strip_windows_verbatim_prefix(argfile_path);
-    let argfile_flag = format!("@{}", clean_argfile.display());
+    let argfile_flag = if !clean_working_dir.as_os_str().is_empty()
+        && clean_argfile.parent() == Some(clean_working_dir.as_path())
+    {
+        if let Some(fname) = clean_argfile
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| s.is_ascii() && !s.contains(' '))
+        {
+            format!("@{fname}")
+        } else {
+            format!("@{}", clean_argfile.display())
+        }
+    } else {
+        format!("@{}", clean_argfile.display())
+    };
 
     // If remaining args are still too long (e.g., giant Forge/NeoForge --add-opens list),
     // move non-javaagent JVM args before `main_class` into the argfile too.
@@ -2113,6 +2185,87 @@ mod tests {
                 "-XX:+UnlockExperimentalVMOptions".to_owned(),
                 "-XX:G1NewSizePercent=20".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn rewrite_args_for_windows_limit_emits_relative_argfile_in_cyrillic_space_workdir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir = tmp
+            .path()
+            .join("Кирилл Игрок")
+            .join("AppData")
+            .join("Local")
+            .join("MQ")
+            .join("instances")
+            .join("pack1");
+        std::fs::create_dir_all(&workdir).expect("create cyrillic workdir");
+        let argfile_path = workdir.join(".mq-args-1234-1.argfile");
+
+        let program = Path::new(r"C:\Program Files\Java\jdk-21\bin\java.exe");
+        let cp: String = (0..450)
+            .map(|i| {
+                format!(
+                    r"C:\Users\Кирилл Игрок\AppData\Local\MQ\libraries\org\example\modlib-{i:03}\1.0.{i}\modlib-{i:03}-1.0.{i}.jar"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(cp.len() > WINDOWS_ARGFILE_THRESHOLD_CHARS);
+
+        let args = vec![
+            "-Xms1024M".to_owned(),
+            "-Xmx4096M".to_owned(),
+            "-cp".to_owned(),
+            cp,
+            "cpw.mods.bootstraplauncher.BootstrapLauncher".to_owned(),
+            "--username".to_owned(),
+            "Steve".to_owned(),
+        ];
+
+        let (rewritten, created) =
+            rewrite_args_for_windows_limit(program, &args, &workdir, Some(21), &argfile_path)
+                .expect("rewrite args");
+        assert_eq!(created, Some(argfile_path.clone()));
+        assert!(argfile_path.is_file());
+        assert!(
+            rewritten.iter().any(|a| a == "@.mq-args-1234-1.argfile"),
+            "expected relative @.mq-args-1234-1.argfile, got: {rewritten:?}"
+        );
+        assert!(
+            !rewritten
+                .iter()
+                .any(|a| a.starts_with('@') && a.contains("Кирилл")),
+            "argfile flag must not include non-ASCII working_dir path"
+        );
+    }
+
+    #[test]
+    fn windows_library_directory_placeholder_normalizes_subpath_slashes() {
+        let win_libs = r"C:\Users\Player\AppData\Local\MQ\libraries";
+        let expanded = expand_jvm_placeholder(
+            "${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar;${library_directory}/org/ow2/asm/asm/9.5/asm-9.5.jar",
+            r"C:\Users\Player\AppData\Local\MQ\natives",
+            win_libs,
+            "",
+            "1.20.1",
+        );
+        assert_eq!(
+            expanded,
+            r"C:\Users\Player\AppData\Local\MQ\libraries\cpw\mods\bootstraplauncher\1.1.2\bootstraplauncher-1.1.2.jar;C:\Users\Player\AppData\Local\MQ\libraries\org\ow2\asm\asm\9.5\asm-9.5.jar"
+        );
+
+        let linux_libs = "/home/player/.local/share/mq/libraries";
+        let linux_expanded = expand_jvm_placeholder(
+            "${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar",
+            "/home/player/.local/share/mq/natives",
+            linux_libs,
+            "",
+            "1.20.1",
+        );
+        assert_eq!(
+            linux_expanded,
+            "/home/player/.local/share/mq/libraries/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar"
         );
     }
 }

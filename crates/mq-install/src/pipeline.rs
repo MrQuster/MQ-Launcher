@@ -634,7 +634,7 @@ async fn install_game_transactional(
         });
     }
 
-    let java_dir = paths.data_dir.join("java");
+    let java_dir = paths.java_dir();
     let req_major = resolved_ver.java_version.major_version;
     let comp_hint = Some(resolved_ver.java_version.component.as_str());
     let mut java_exec_path = PathBuf::from(if cfg!(target_os = "windows") {
@@ -1094,6 +1094,41 @@ async fn install_game_transactional(
         )
         .await
         .map_err(|e| (current_stage, e))?;
+
+        // Validate and index any processor-generated local libraries (where `url == ""` in Forge/NeoForge metadata).
+        for lib in &resolved_ver.libraries {
+            if let Some(art) = &lib.artifact {
+                if art.url.trim().is_empty() {
+                    let target = mq_core::resolve_safe_path(&lib_base, &art.path)
+                        .map_err(|e| (current_stage, e))?;
+                    if !target.is_file() {
+                        return Err((
+                            current_stage,
+                            MqError::Archive(format!(
+                                "Forge processor did not produce expected library '{}'",
+                                target.display()
+                            )),
+                        ));
+                    }
+                    if let Some(expected) = art.sha1 {
+                        let actual =
+                            compute_file_sha1_streaming(&target).map_err(|e| (current_stage, e))?;
+                        if actual != expected {
+                            return Err((
+                                current_stage,
+                                MqError::HashMismatch {
+                                    target: target.to_string_lossy().into_owned(),
+                                    algo: "SHA-1",
+                                    expected: expected.to_hex(),
+                                    actual: actual.to_hex(),
+                                },
+                            ));
+                        }
+                        let _ = cas.store_verified_file(&target, expected);
+                    }
+                }
+            }
+        }
     }
 
     // 9. Extract Natives into `<instance_dir>/.installing/natives`

@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
 
 PackageIdentifier: MrQuster.MQ
-PackageVersion: 2.8.5
+PackageVersion: 2.8.6
 PackageName: MQ Launcher
 Publisher: MrQuster
 PublisherUrl: https://github.com/MrQuster/MQ-Launcher
@@ -34,7 +34,7 @@ Installers:
   - Architecture: x64
     InstallerType: inno
     Scope: user
-    InstallerUrl: https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.5/MQ-Setup-2.8.5-x64.exe
+    InstallerUrl: https://github.com/MrQuster/MQ-Launcher/releases/download/v2.8.6/MQ-Setup-2.8.6-x64.exe
     InstallerSha256: 9F68768B50903258382E90FF82BCFDBBC158E79F625EDCB82EECC0251C74E706
     InstallerSwitches:
       Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-

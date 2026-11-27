@@ -395,6 +395,46 @@ pub fn maven_coord_to_artifact(
     })
 }
 
+/// Checks whether a standalone Maven classifier (`natives-...`) matches the target OS and CPU architecture.
+/// Returns `None` when the coordinate does not carry a `natives-*` classifier.
+pub(crate) fn standalone_native_classifier_matches(
+    coord: &str,
+    target_os: &str,
+    os_arch: &str,
+) -> Option<bool> {
+    let clean = coord.split('@').next().unwrap_or(coord).trim();
+    let parts: Vec<&str> = clean.split(':').collect();
+    let clf = parts.get(3).copied()?;
+    if !clf.starts_with("natives-") {
+        return None;
+    }
+
+    let norm_os = normalize_os_name(target_os);
+    let norm_arch = normalize_arch(os_arch);
+    let allowed: &[&str] = match (norm_os, norm_arch) {
+        ("windows", "x86_64") => &[
+            "natives-windows-x64",
+            "natives-windows-64",
+            "natives-windows",
+        ],
+        ("windows", "x86") => &["natives-windows-x86", "natives-windows-32"],
+        ("windows", "aarch64") => &["natives-windows-arm64"],
+        ("osx", "aarch64") => &[
+            "natives-macos-arm64",
+            "natives-osx-arm64",
+            "natives-macos",
+            "natives-osx",
+        ],
+        ("osx", _) => &["natives-macos", "natives-osx"],
+        (_, "x86_64") => &["natives-linux-x64", "natives-linux-64", "natives-linux"],
+        (_, "aarch64") => &["natives-linux-arm64", "natives-linux-aarch64"],
+        (_, "arm") => &["natives-linux-arm32", "natives-linux-arm"],
+        (_, "x86") => &["natives-linux-x86", "natives-linux-32"],
+        _ => &["natives-linux"],
+    };
+    Some(allowed.contains(&clf))
+}
+
 impl RawLoaderLibrary {
     /// Returns `(group, artifact, classifier)` key matching [`ResolvedLibrary::module_key`].
     pub fn module_key(&self) -> (String, String, Option<String>) {
@@ -427,7 +467,24 @@ impl RawLoaderLibrary {
         loader: ModLoaderKind,
         ctx: &RuleContext,
     ) -> MqResult<ResolvedLibrary> {
+        let target_os = normalize_os_name(&ctx.os_name);
+        let standalone_match = if self.natives.is_none() {
+            standalone_native_classifier_matches(&self.name, target_os, &ctx.os_arch)
+        } else {
+            None
+        };
+        if standalone_match == Some(false) {
+            return Ok(ResolvedLibrary {
+                name: self.name.trim().to_owned(),
+                artifact: None,
+                native_linux: None,
+                extract_exclude: Vec::new(),
+                include_in_classpath: false,
+            });
+        }
+
         let default_repo = default_repo_for_coordinate(&self.name, loader);
+        let explicit_outer_repo = self.url.as_deref().map(str::trim).filter(|u| !u.is_empty());
         let effective_repo = match self.url.as_deref().map(str::trim) {
             Some(u) if !u.is_empty() => Some(u),
             Some(_) => None, // preserve empty URL for processor artifacts
@@ -441,19 +498,7 @@ impl RawLoaderLibrary {
             self.size.unwrap_or(0),
         )?;
 
-        let target_os = normalize_os_name(&ctx.os_name);
-        let is_native_for_target_os = match target_os {
-            "windows" => {
-                self.name.contains(":natives-windows") || self.name.contains("natives-windows@")
-            }
-            "osx" => {
-                self.name.contains(":natives-macos")
-                    || self.name.contains("natives-macos@")
-                    || self.name.contains(":natives-osx")
-                    || self.name.contains("natives-osx@")
-            }
-            _ => self.name.contains(":natives-linux") || self.name.contains("natives-linux@"),
-        };
+        let is_native_for_target_os = standalone_match == Some(true);
 
         let native_template_for_os = self.natives.as_ref().and_then(|m| {
             m.iter()
@@ -467,7 +512,7 @@ impl RawLoaderLibrary {
                     Some(resolve_raw_artifact(
                         raw_art,
                         &coord_artifact,
-                        effective_repo,
+                        explicit_outer_repo,
                         self.sha1,
                         self.size,
                     )?)
@@ -486,15 +531,27 @@ impl RawLoaderLibrary {
                             &ctx.os_arch,
                         )
                         .into_iter()
-                        .chain(std::iter::once("natives-windows".to_string()))
+                        .chain(
+                            (normalize_arch(&ctx.os_arch) == "x86_64")
+                                .then(|| "natives-windows".to_string()),
+                        )
                         .collect(),
-                        "osx" => vec!["natives-macos".to_string(), "natives-osx".to_string()],
+                        "osx" => expand_native_classifier_candidates(
+                            "natives-macos-${arch}",
+                            &ctx.os_arch,
+                        )
+                        .into_iter()
+                        .chain(["natives-macos".to_string(), "natives-osx".to_string()])
+                        .collect(),
                         _ => expand_native_classifier_candidates(
                             "natives-linux-${arch}",
                             &ctx.os_arch,
                         )
                         .into_iter()
-                        .chain(std::iter::once("natives-linux".to_string()))
+                        .chain(
+                            (normalize_arch(&ctx.os_arch) == "x86_64")
+                                .then(|| "natives-linux".to_string()),
+                        )
                         .collect(),
                     },
                 };
@@ -2040,5 +2097,84 @@ mod tests {
             "https://maven.neoforged.net/releases/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-installer.jar"
         );
         assert!(neoforge_installer_url(None, "../bad").is_err());
+    }
+
+    #[test]
+    fn windows_x86_64_filters_standalone_native_classifiers_and_preserves_empty_forge_url() {
+        let win64_ctx = RuleContext::windows_x86_64();
+
+        let profile_json = r#"{
+            "id": "neoforge-21.1.72",
+            "inheritsFrom": "1.21.1",
+            "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "libraries": [
+                { "name": "org.lwjgl:lwjgl:3.3.3:natives-windows" },
+                { "name": "org.lwjgl:lwjgl:3.3.3:natives-windows-x86" },
+                { "name": "org.lwjgl:lwjgl:3.3.3:natives-windows-arm64" },
+                { "name": "org.lwjgl:lwjgl:3.3.3:natives-linux" },
+                { "name": "org.lwjgl:lwjgl:3.3.3:natives-macos" },
+                {
+                    "name": "net.minecraftforge:forge:1.21.1-52.0.0:client",
+                    "downloads": {
+                        "artifact": {
+                            "path": "net/minecraftforge/forge/1.21.1-52.0.0/forge-1.21.1-52.0.0-client.jar",
+                            "url": "",
+                            "size": 12345
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let profile = parse_loader_profile_for_context(
+            profile_json,
+            ModLoaderKind::Forge,
+            Some("52.0.0".to_owned()),
+            &win64_ctx,
+        )
+        .expect("parse forge 1.21.1 profile on windows x86_64");
+
+        assert_eq!(profile.libraries.len(), 2);
+
+        let win_native = &profile.libraries[0];
+        assert_eq!(win_native.name, "org.lwjgl:lwjgl:3.3.3:natives-windows");
+        assert!(win_native.native_linux.is_some());
+
+        for rejected in [
+            "org.lwjgl:lwjgl:3.3.3:natives-windows-x86",
+            "org.lwjgl:lwjgl:3.3.3:natives-windows-arm64",
+            "org.lwjgl:lwjgl:3.3.3:natives-linux",
+            "org.lwjgl:lwjgl:3.3.3:natives-macos",
+        ] {
+            let raw = RawLoaderLibrary {
+                name: rejected.to_owned(),
+                url: None,
+                sha1: None,
+                size: None,
+                downloads: None,
+                rules: None,
+                extract: None,
+                natives: None,
+            };
+            let resolved = raw
+                .to_resolved_library_for_context(ModLoaderKind::NeoForge, &win64_ctx)
+                .expect("resolve rejected native");
+            assert!(
+                resolved.artifact.is_none(),
+                "{rejected} must be rejected from classpath"
+            );
+            assert!(
+                resolved.native_linux.is_none(),
+                "{rejected} must be rejected from natives"
+            );
+            assert!(!resolved.include_in_classpath);
+        }
+
+        let local_forge_client = &profile.libraries[1];
+        let art = local_forge_client
+            .artifact
+            .as_ref()
+            .expect("forge client artifact");
+        assert_eq!(art.url, "");
     }
 }

@@ -707,33 +707,97 @@ impl MqApp {
                     return;
                 }
 
-                // 5. Discover and select compatible Java Virtual Machine
-                let java_runtimes = mq_launch::discover_java_runtimes();
+                // 5. Discover and select compatible Java Virtual Machine (auto-downloading if needed)
                 let req_major = mq_launch::required_java_major_for_mc(
                     &ver.mc_version,
                     Some(ver.java_version.major_version),
                 );
+                let managed_java_dir = paths.java_dir();
+                let java_runtimes =
+                    mq_launch::discover_java_runtimes_with_extra(Some(&managed_java_dir));
 
-                let selected_java = match mq_launch::select_java_runtime(
+                let mut selected_java = mq_launch::select_java_runtime(
                     &java_runtimes,
                     req_major,
                     inst.java_path.as_deref(),
-                ) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        let err_msg = format!(
-                            "Подходящая версия Java не найдена (требуется Java {req_major}): {e}"
-                        );
-                        bus.publish(mq_core::Event::TaskError {
-                            context: "Поиск Java".to_string(),
-                            message: err_msg.clone(),
-                        });
-                        let _ = resp_tx.send(UiWorkerResponse::InstanceError {
-                            instance_id,
-                            error: err_msg,
-                        });
-                        return;
+                )
+                .ok()
+                .filter(|rt| mq_launch::verify_java_executable(&rt.path).is_ok());
+
+                if selected_java.is_none() && !dry_run {
+                    bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
+                        instance: instance_id.to_string(),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                        level: mq_core::GameLogLevel::Info,
+                        line: format!(
+                            "[MQ] Подходящая Java {req_major} не найдена — автоматическая загрузка среды выполнения..."
+                        ),
+                    }));
+                    let comp_hint = (!ver.java_version.component.trim().is_empty())
+                        .then_some(ver.java_version.component.as_str());
+                    match mq_launch::ensure_java_runtime(
+                        net.client(),
+                        &managed_java_dir,
+                        req_major,
+                        comp_hint,
+                        inst.java_path.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(ensured) => {
+                            bus.publish(mq_core::Event::GameLog(mq_core::GameLogEntry {
+                                instance: instance_id.to_string(),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                                level: mq_core::GameLogLevel::Info,
+                                line: format!(
+                                    "[MQ] Java {} ({}) готова: {}",
+                                    ensured.runtime.major_version,
+                                    ensured.runtime.vendor,
+                                    ensured.runtime.path.display()
+                                ),
+                            }));
+                            selected_java = Some(ensured.runtime);
+                        }
+                        Err(e) => {
+                            let err_msg = format!(
+                                "Подходящая версия Java не найдена (требуется Java {req_major}): {e}"
+                            );
+                            bus.publish(mq_core::Event::TaskError {
+                                context: "Поиск и загрузка Java".to_string(),
+                                message: err_msg.clone(),
+                            });
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                instance_id,
+                                error: err_msg,
+                            });
+                            return;
+                        }
                     }
+                }
+
+                let selected_java = match selected_java {
+                    Some(j) => j,
+                    None => match mq_launch::select_java_runtime(
+                        &java_runtimes,
+                        req_major,
+                        inst.java_path.as_deref(),
+                    ) {
+                        Ok(j) => j,
+                        Err(e) => {
+                            let err_msg = format!(
+                                "Подходящая версия Java не найдена (требуется Java {req_major}): {e}"
+                            );
+                            bus.publish(mq_core::Event::TaskError {
+                                context: "Поиск Java".to_string(),
+                                message: err_msg.clone(),
+                            });
+                            let _ = resp_tx.send(UiWorkerResponse::InstanceError {
+                                instance_id,
+                                error: err_msg,
+                            });
+                            return;
+                        }
+                    },
                 };
 
                 // 6. Construct launch context and arguments
@@ -1820,11 +1884,13 @@ impl MqApp {
                 }
                 UiWorkerCommand::DiscoverJavaRuntimes => {
                     let resp_tx = self.state.resp_sender.clone();
+                    let java_dir = self.state.paths.java_dir();
                     tokio::spawn(async move {
-                        let runtimes =
-                            tokio::task::spawn_blocking(mq_launch::discover_java_runtimes)
-                                .await
-                                .unwrap_or_default();
+                        let runtimes = tokio::task::spawn_blocking(move || {
+                            mq_launch::discover_java_runtimes_with_extra(Some(&java_dir))
+                        })
+                        .await
+                        .unwrap_or_default();
                         let _ = resp_tx.send(UiWorkerResponse::JavaRuntimesDiscovered(runtimes));
                     });
                 }
@@ -3245,6 +3311,7 @@ impl eframe::App for MqApp {
 
 fn build_wgpu_configuration() -> egui_wgpu::WgpuConfiguration {
     let setup = egui_wgpu::WgpuSetupCreateNew {
+        power_preference: wgpu::PowerPreference::HighPerformance,
         device_descriptor: std::sync::Arc::new(|adapter| {
             let adapter_limits = adapter.limits();
             let mut required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
@@ -3335,11 +3402,24 @@ fn run_native_attempt(
     )
 }
 
-/// Launches the desktop GUI window, automatically falling back from `wgpu` to OpenGL (`glow`)
-/// in `GuiBackend::Auto` when DX12/Vulkan initialization fails (e.g., Windows VMs, RDP, legacy GPUs).
-pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error> {
-    let want_transparent = should_enable_window_transparency(&state.config.theme);
-    let state_slot = std::cell::RefCell::new(Some(state));
+/// Launches the desktop GUI window using a state factory so fallback attempts
+/// (e.g. `wgpu` -> opaque `glow`) can cleanly reconstruct `UiState` even when
+/// initialization fails after `eframe` enters the app-creator closure.
+pub fn run_gui_with_factory<F>(mut make_state: F, backend: GuiBackend) -> Result<(), eframe::Error>
+where
+    F: FnMut() -> Result<UiState, Box<dyn std::error::Error + Send + Sync>>,
+{
+    let initial_state = make_state().map_err(eframe::Error::AppCreation)?;
+    let want_transparent = should_enable_window_transparency(&initial_state.config.theme);
+    let state_slot = std::cell::RefCell::new(Some(initial_state));
+
+    let ensure_state = |make_state: &mut F| -> Result<(), eframe::Error> {
+        if state_slot.borrow().is_none() {
+            let fresh_state = make_state().map_err(eframe::Error::AppCreation)?;
+            *state_slot.borrow_mut() = Some(fresh_state);
+        }
+        Ok(())
+    };
 
     match backend {
         GuiBackend::Vulkan => {
@@ -3348,10 +3428,16 @@ pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error>
         GuiBackend::Gl => {
             match run_native_attempt(&state_slot, eframe::Renderer::Glow, want_transparent) {
                 Ok(()) => Ok(()),
-                Err(err) if want_transparent && state_slot.borrow().is_some() => {
+                Err(err) if want_transparent => {
                     tracing::warn!(
                         "OpenGL (glow) failed with transparent surface ({err}); retrying opaque surface"
                     );
+                    if let Err(rebuild_err) = ensure_state(&mut make_state) {
+                        tracing::error!(
+                            "Failed to reconstruct UI state for opaque OpenGL retry: {rebuild_err}"
+                        );
+                        return Err(err);
+                    }
                     run_native_attempt(&state_slot, eframe::Renderer::Glow, false)
                 }
                 Err(err) => Err(err),
@@ -3360,10 +3446,16 @@ pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error>
         GuiBackend::Auto => {
             match run_native_attempt(&state_slot, eframe::Renderer::Wgpu, want_transparent) {
                 Ok(()) => Ok(()),
-                Err(wgpu_err) if state_slot.borrow().is_some() => {
+                Err(wgpu_err) => {
                     tracing::warn!(
                         "WGPU backend initialization failed ({wgpu_err}); falling back to OpenGL (glow)"
                     );
+                    if let Err(rebuild_err) = ensure_state(&mut make_state) {
+                        tracing::error!(
+                            "Failed to reconstruct UI state for OpenGL fallback: {rebuild_err}"
+                        );
+                        return Err(wgpu_err);
+                    }
                     match run_native_attempt(&state_slot, eframe::Renderer::Glow, false) {
                         Ok(()) => Ok(()),
                         Err(glow_err) => {
@@ -3374,10 +3466,25 @@ pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error>
                         }
                     }
                 }
-                Err(wgpu_err) => Err(wgpu_err),
             }
         }
     }
+}
+
+/// Launches the desktop GUI window, automatically falling back from `wgpu` to OpenGL (`glow`)
+/// in `GuiBackend::Auto` when DX12/Vulkan initialization fails (e.g., Windows VMs, RDP, legacy GPUs).
+pub fn run_gui(state: UiState, backend: GuiBackend) -> Result<(), eframe::Error> {
+    let mut state_opt = Some(state);
+    run_gui_with_factory(
+        move || {
+            state_opt
+                .take()
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                    "UI state already consumed by an earlier backend attempt".into()
+                })
+        },
+        backend,
+    )
 }
 
 #[cfg(test)]

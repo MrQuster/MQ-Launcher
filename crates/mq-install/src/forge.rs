@@ -457,22 +457,25 @@ fn prepare_forge_processor_cp_args(
     if classpath.len() > FORGE_PROCESSOR_ARGFILE_THRESHOLD
         && is_java_9_or_newer_for_forge(java_major, mc_version)
     {
-        let base_dir = if argfile_dir.is_dir() {
+        let use_relative = argfile_dir.is_dir();
+        let base_dir = if use_relative {
             strip_windows_verbatim_prefix(argfile_dir)
         } else {
             strip_windows_verbatim_prefix(&std::env::temp_dir())
         };
-        let argfile_path = base_dir.join(format!(
-            ".mq-forge-proc-{}-{proc_idx}.argfile",
-            std::process::id()
-        ));
+        let file_name = format!(".mq-forge-proc-{}-{proc_idx}.argfile", std::process::id());
+        let argfile_path = base_dir.join(&file_name);
         let content = format!(
             "{}\n{}\n",
             mq_launch::command::format_java_argfile_token("-cp"),
             mq_launch::command::format_java_argfile_token(classpath)
         );
         fs::write(&argfile_path, content.as_bytes())?;
-        let argfile_flag = format!("@{}", argfile_path.display());
+        let argfile_flag = if use_relative && file_name.is_ascii() && !file_name.contains(' ') {
+            format!("@{file_name}")
+        } else {
+            format!("@{}", argfile_path.display())
+        };
         Ok((vec![argfile_flag], Some(TempArgfileGuard(argfile_path))))
     } else {
         Ok((vec!["-cp".to_owned(), classpath.to_owned()], None))
@@ -551,6 +554,9 @@ pub async fn run_forge_processors(
 
         let mut cmd = tokio::process::Command::new(&clean_java_path);
         cmd.stdin(std::process::Stdio::null());
+        if clean_instance_dir.is_dir() {
+            cmd.current_dir(&clean_instance_dir);
+        }
         #[cfg(windows)]
         {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -757,14 +763,17 @@ mod tests {
             .join(";");
         assert!(long_cp.len() > FORGE_PROCESSOR_ARGFILE_THRESHOLD);
 
-        // Java 17 -> uses @argfile and cleans it up on drop
+        // Java 17 with existing argfile_dir -> uses relative @argfile and cleans it up on drop
         let created_path = {
             let (args, guard) =
                 prepare_forge_processor_cp_args(&long_cp, Some(17), "1.20.1", tmp.path(), 0)
                     .unwrap();
             assert_eq!(args.len(), 1);
-            assert!(args[0].starts_with('@'));
-            let p = PathBuf::from(args[0].trim_start_matches('@'));
+            assert_eq!(
+                args[0],
+                format!("@.mq-forge-proc-{}-0.argfile", std::process::id())
+            );
+            let p = tmp.path().join(args[0].trim_start_matches('@'));
             assert!(p.is_file());
             let content = fs::read_to_string(&p).unwrap();
             assert!(content.contains("-cp"));
@@ -775,6 +784,24 @@ mod tests {
         assert!(
             !created_path.exists(),
             "argfile must be deleted on guard drop"
+        );
+
+        // Missing argfile_dir -> falls back to temp_dir with full @path and cleans up
+        let missing_dir = tmp.path().join("nonexistent-instance-dir");
+        let fallback_path = {
+            let (args_fb, guard_fb) =
+                prepare_forge_processor_cp_args(&long_cp, Some(17), "1.20.1", &missing_dir, 3)
+                    .unwrap();
+            assert_eq!(args_fb.len(), 1);
+            assert!(args_fb[0].starts_with('@'));
+            let p = PathBuf::from(args_fb[0].trim_start_matches('@'));
+            assert!(p.is_file());
+            assert!(guard_fb.is_some());
+            p
+        };
+        assert!(
+            !fallback_path.exists(),
+            "fallback argfile must be deleted on guard drop"
         );
 
         // Java 8 -> keeps inline -cp

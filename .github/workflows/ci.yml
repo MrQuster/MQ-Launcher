@@ -211,3 +211,62 @@ jobs:
       - name: Test install.ps1
         shell: pwsh
         run: pwsh -NoProfile -File scripts\ci\test-install-ps1.ps1
+
+      - name: Windows E2E install, PE64 DLL & dry-run check (Cyrillic path)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $mq = ".\target\debug\mq.exe"
+          if (-not (Test-Path $mq)) {
+            cargo build -p mq-cli --bin mq --locked
+            if ($LASTEXITCODE -ne 0) { throw "cargo build -p mq-cli --bin mq failed" }
+          }
+          $dataDir = Join-Path $env:RUNNER_TEMP "Кирилл Игрок\MQ"
+          $prevDataDir = $env:MQ_DATA_DIR
+          try {
+            $env:MQ_DATA_DIR = $dataDir
+            New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+
+            & $mq --threads 4 doctor
+            if ($LASTEXITCODE -ne 0) { throw "mq doctor failed (exit=$LASTEXITCODE)" }
+
+            & $mq --threads 4 install 1.21.1 --loader fabric --name "Тест Windows"
+            if ($LASTEXITCODE -ne 0) { throw "mq install failed (exit=$LASTEXITCODE)" }
+
+            & $mq verify "Тест Windows"
+            if ($LASTEXITCODE -ne 0) { throw "mq verify failed (exit=$LASTEXITCODE)" }
+
+            $dlls = @(Get-ChildItem -Path (Join-Path $dataDir "instances\*\natives\*.dll") -File -ErrorAction SilentlyContinue)
+            if ($dlls.Count -lt 6) {
+              throw "Expected at least 6 native DLLs under $dataDir\instances\*\natives, found $($dlls.Count)"
+            }
+            foreach ($dll in $dlls) {
+              $bytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+              if ($bytes.Length -lt 0x40) {
+                throw "Invalid PE file (too small): $($dll.FullName)"
+              }
+              $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+              if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length) {
+                throw "Invalid PE header offset in $($dll.FullName): $peOffset"
+              }
+              $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+              if ($machine -eq 0x014C) {
+                throw "Found 32-bit x86 (0x014C) native DLL: $($dll.FullName)"
+              }
+              if ($machine -eq 0xAA64) {
+                throw "Found ARM64 (0xAA64) native DLL: $($dll.FullName)"
+              }
+              if ($machine -ne 0x8664) {
+                throw ("Unexpected PE Machine 0x{0:X4} (expected 0x8664 AMD64) in {1}" -f $machine, $dll.FullName)
+              }
+            }
+            Write-Host "Verified $($dlls.Count) native DLLs are PE64 (0x8664 AMD64)"
+
+            & $mq launch "Тест Windows" --dry-run
+            if ($LASTEXITCODE -ne 0) { throw "mq launch --dry-run failed (exit=$LASTEXITCODE)" }
+          } finally {
+            $env:MQ_DATA_DIR = $prevDataDir
+            if (Test-Path -LiteralPath $dataDir) {
+              Remove-Item -Recurse -Force -LiteralPath $dataDir -ErrorAction SilentlyContinue
+            }
+          }

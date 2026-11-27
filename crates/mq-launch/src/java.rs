@@ -117,6 +117,28 @@ fn collect_java_bins_under_root(
     }
 }
 
+fn default_is_64bit() -> bool {
+    cfg!(target_pointer_width = "64")
+}
+
+fn infer_default_is_64bit_for_path(path: &Path) -> bool {
+    if cfg!(target_os = "windows") {
+        let lower = path.to_string_lossy().to_ascii_lowercase();
+        if lower.contains("\\program files (x86)\\") || lower.contains("/program files (x86)/") {
+            return false;
+        }
+    }
+    cfg!(target_pointer_width = "64")
+}
+
+fn os_arch_is_64bit(arch: &str) -> Option<bool> {
+    match arch.trim().to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" | "x64" | "aarch64" | "arm64" | "ppc64le" | "riscv64" => Some(true),
+        "x86" | "i386" | "i486" | "i586" | "i686" | "arm" | "arm32" => Some(false),
+        _ => None,
+    }
+}
+
 /// Discovered Java Virtual Machine installation on the local system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JavaRuntime {
@@ -130,15 +152,33 @@ pub struct JavaRuntime {
     pub full_version: String,
     /// Implementor or vendor label (e.g. `"Arch Linux"`, `"Eclipse Adoptium"`, `"OpenJDK"`).
     pub vendor: String,
+    /// `true` for 64-bit JVMs, `false` for 32-bit x86 JVMs (which cannot allocate `>= 2 GB` heaps).
+    #[serde(default = "default_is_64bit")]
+    pub is_64bit: bool,
 }
 
-/// Discovers all installed Java runtimes across system directories, `~/.local/share/mq/java/*`
-/// (or Windows `%LOCALAPPDATA%\MQ\java`), `$JAVA_HOME`, and `$PATH`.
+/// Discovers all installed Java runtimes across system directories, launcher Java storage,
+/// `$JAVA_HOME`, and `$PATH`.
+pub fn discover_java_runtimes() -> Vec<JavaRuntime> {
+    discover_java_runtimes_with_extra(None)
+}
+
+/// Discovers installed Java runtimes, additionally scanning `extra_java_dir` (e.g. `paths.java_dir()`
+/// in Windows Portable mode or ASCII-safe public fallback).
 ///
 /// Deduplicates runtimes by canonical binary path and sorts deterministically by
 /// `(major_version, path)`.
-pub fn discover_java_runtimes() -> Vec<JavaRuntime> {
+pub fn discover_java_runtimes_with_extra(extra_java_dir: Option<&Path>) -> Vec<JavaRuntime> {
     let mut jvm_roots: Vec<PathBuf> = Vec::new();
+    if let Some(extra) = extra_java_dir.filter(|p| !p.as_os_str().is_empty() && p.exists()) {
+        jvm_roots.push(extra.to_path_buf());
+    }
+    if let Ok(paths) = mq_core::MqPaths::platform_default() {
+        let managed_java = paths.java_dir();
+        if managed_java.exists() {
+            jvm_roots.push(managed_java);
+        }
+    }
 
     #[cfg(target_os = "windows")]
     {
@@ -201,8 +241,18 @@ pub fn discover_java_runtimes() -> Vec<JavaRuntime> {
         }
         if let Ok(program_data) = env::var("ProgramData") {
             let pd = PathBuf::from(program_data);
+            let mq_pd_java = pd.join("MQ").join("java");
+            if mq_pd_java.exists() {
+                jvm_roots.push(mq_pd_java);
+            }
             jvm_roots.push(pd.join("Oracle").join("Java").join("javapath"));
             jvm_roots.push(pd.join("chocolatey").join("lib"));
+        }
+        if let Ok(public_dir) = env::var("PUBLIC") {
+            let mq_pub_java = PathBuf::from(public_dir).join("MQ").join("java");
+            if mq_pub_java.exists() {
+                jvm_roots.push(mq_pub_java);
+            }
         }
 
         if let Ok(mq_data) = env::var("MQ_DATA_DIR") {
@@ -336,17 +386,21 @@ pub fn probe_java_binary(java_bin_or_home: &Path) -> Option<JavaRuntime> {
 
     for rel_path in release_candidates {
         if let Ok(content) = fs::read_to_string(&rel_path) {
-            if let Some((major_version, full_version, vendor)) = parse_java_release_file(&content) {
+            if let Some((major_version, full_version, vendor, os_64)) =
+                parse_java_release_file_ext(&content)
+            {
                 let effective_home = rel_path
                     .parent()
                     .map(strip_windows_verbatim_prefix)
                     .unwrap_or_else(|| home_dir.clone());
+                let is_64bit = os_64.unwrap_or_else(|| infer_default_is_64bit_for_path(&canon_bin));
                 return Some(JavaRuntime {
                     path: canon_bin,
                     home_dir: effective_home,
                     major_version,
                     full_version,
                     vendor,
+                    is_64bit,
                 });
             }
         }
@@ -384,13 +438,17 @@ pub fn probe_java_binary(java_bin_or_home: &Path) -> Option<JavaRuntime> {
             format!("{stderr}\n{stdout}")
         };
 
-        if let Some((major_version, full_version, vendor)) = parse_java_version_output(&combined) {
+        if let Some((major_version, full_version, vendor, out_64)) =
+            parse_java_version_output_with_arch(&combined)
+        {
+            let is_64bit = out_64.unwrap_or_else(|| infer_default_is_64bit_for_path(&canon_bin));
             return Some(JavaRuntime {
                 path: canon_bin,
                 home_dir,
                 major_version,
                 full_version,
                 vendor,
+                is_64bit,
             });
         }
     }
@@ -403,8 +461,14 @@ pub fn probe_java_binary(java_bin_or_home: &Path) -> Option<JavaRuntime> {
 /// Supports both modern versions (`JAVA_VERSION="21.0.13"`, `JAVA_VERSION="17.0.21"`) and
 /// legacy Java 8 versions (`JAVA_VERSION="1.8.0_412"`).
 pub fn parse_java_release_file(content: &str) -> Option<(u32, String, String)> {
+    let (major, full, vendor, _) = parse_java_release_file_ext(content)?;
+    Some((major, full, vendor))
+}
+
+fn parse_java_release_file_ext(content: &str) -> Option<(u32, String, String, Option<bool>)> {
     let mut raw_version: Option<String> = None;
     let mut implementor: Option<String> = None;
+    let mut is_64bit: Option<bool> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -424,6 +488,7 @@ pub fn parse_java_release_file(content: &str) -> Option<(u32, String, String)> {
             "JAVA_VERSION" => raw_version = Some(clean_val.to_owned()),
             "IMPLEMENTOR" => implementor = Some(clean_val.to_owned()),
             "VENDOR" if implementor.is_none() => implementor = Some(clean_val.to_owned()),
+            "OS_ARCH" => is_64bit = os_arch_is_64bit(clean_val),
             _ => {}
         }
     }
@@ -431,42 +496,73 @@ pub fn parse_java_release_file(content: &str) -> Option<(u32, String, String)> {
     let version_str = raw_version?;
     let (major, full) = parse_java_version_str(&version_str)?;
     let vendor = implementor.unwrap_or_else(|| "OpenJDK".to_owned());
-    Some((major, full, vendor))
+    Some((major, full, vendor, is_64bit))
 }
 
 /// Parses `java -version` stderr/stdout output into `(major_version, full_version, vendor)`.
 pub fn parse_java_version_output(output: &str) -> Option<(u32, String, String)> {
+    let (major, full, vendor, _) = parse_java_version_output_with_arch(output)?;
+    Some((major, full, vendor))
+}
+
+/// Parses `java -version` stderr/stdout output into
+/// `(major_version, full_version, vendor, is_64bit_hint)`.
+pub fn parse_java_version_output_with_arch(
+    output: &str,
+) -> Option<(u32, String, String, Option<bool>)> {
     let mut version_tuple: Option<(u32, String)> = None;
     let mut vendor = "OpenJDK".to_owned();
+    let mut is_64bit: Option<bool> = None;
 
+    // Pass 1: quoted version string on non-warning lines (e.g. `openjdk version "21.0.5"`).
     for line in output.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.to_ascii_lowercase().contains("warning:") {
             continue;
         }
-
-        if version_tuple.is_none() {
-            // Standard format: `openjdk version "21.0.5" 2024-10-15` or `java version "1.8.0_412"`
-            if let Some(first_quote) = trimmed.find('"') {
-                let rest = &trimmed[first_quote + 1..];
-                if let Some(end_quote) = rest.find('"') {
-                    let quoted = &rest[..end_quote];
-                    version_tuple = parse_java_version_str(quoted);
+        if let Some(first_quote) = trimmed.find('"') {
+            let rest = &trimmed[first_quote + 1..];
+            if let Some(end_quote) = rest.find('"') {
+                if let Some(parsed) = parse_java_version_str(&rest[..end_quote]) {
+                    version_tuple = Some(parsed);
+                    break;
                 }
             }
-            if version_tuple.is_none() {
-                for token in trimmed.split_whitespace() {
-                    if token.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                        if let Some(parsed) = parse_java_version_str(token) {
-                            version_tuple = Some(parsed);
-                            break;
-                        }
+        }
+    }
+
+    // Pass 2: unquoted version token fallback on non-warning lines, ignoring `"64-Bit"` / `"32-Bit"`.
+    if version_tuple.is_none() {
+        'outer: for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.to_ascii_lowercase().contains("warning:") {
+                continue;
+            }
+            for token in trimmed.split_whitespace() {
+                if token.to_ascii_lowercase().contains("bit") {
+                    continue;
+                }
+                if token.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    if let Some(parsed) = parse_java_version_str(token) {
+                        version_tuple = Some(parsed);
+                        break 'outer;
                     }
                 }
             }
         }
+    }
 
-        let lower = trimmed.to_ascii_lowercase();
+    for line in output.lines() {
+        let lower = line.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+        if lower.contains("64-bit") {
+            is_64bit = Some(true);
+        } else if lower.contains("32-bit") || (lower.contains("client vm") && is_64bit.is_none()) {
+            is_64bit = Some(false);
+        }
+
         if lower.contains("temurin") || lower.contains("adoptium") {
             vendor = "Eclipse Adoptium".to_owned();
         } else if lower.contains("zulu") {
@@ -489,7 +585,7 @@ pub fn parse_java_version_output(output: &str) -> Option<(u32, String, String)> 
     }
 
     let (major, full) = version_tuple?;
-    Some((major, full, vendor))
+    Some((major, full, vendor, is_64bit))
 }
 
 /// Parses a Java version string (such as `"21.0.13"`, `"17.0.21"`, `"1.8.0_412"`, `"21-ea"`)
@@ -611,6 +707,7 @@ pub fn select_java_runtime(
                 major_version: required_major,
                 full_version: format!("{required_major}.0.0"),
                 vendor: "Custom".to_owned(),
+                is_64bit: infer_default_is_64bit_for_path(&canon_custom),
             });
         }
 
@@ -623,15 +720,19 @@ pub fn select_java_runtime(
         });
     }
 
-    if runtimes.is_empty() {
+    // On 64-bit hosts, exclude 32-bit x86 JVMs from automatic selection (they cannot allocate >= 2 GB heaps).
+    let eligible: Vec<&JavaRuntime> = runtimes
+        .iter()
+        .filter(|r| !cfg!(target_pointer_width = "64") || r.is_64bit)
+        .collect();
+
+    if eligible.is_empty() {
         let hint = if cfg!(target_os = "windows") {
             format!(
-                "no Java runtime found in %ProgramFiles%\\Java, %JAVA_HOME%, or %PATH%; install Temurin/OpenJDK {required_major}"
+                "no 64-bit Java {required_major} runtime found in %ProgramFiles%\\Java, %JAVA_HOME%, or %PATH%"
             )
         } else {
-            format!(
-                "no Java runtime found in /usr/lib/jvm, $JAVA_HOME, or $PATH; install jdk{required_major}-openjdk"
-            )
+            format!("no Java {required_major} runtime found in /usr/lib/jvm, $JAVA_HOME, or $PATH")
         };
         return Err(MqError::JavaNotFound {
             required_major,
@@ -640,56 +741,45 @@ pub fn select_java_runtime(
     }
 
     // 1. Exact major_version match (prefer the last/newest path among identical majors).
-    if let Some(exact) = runtimes
+    if let Some(exact) = eligible
         .iter()
         .rev()
         .find(|r| r.major_version == required_major)
     {
-        return Ok(exact.clone());
+        return Ok((*exact).clone());
     }
 
-    // 2. Closest installed major_version > required_major.
-    if let Some(compatible_higher) = runtimes
-        .iter()
-        .filter(|r| r.major_version > required_major)
-        .min_by(|a, b| {
-            a.major_version
-                .cmp(&b.major_version)
-                .then_with(|| a.path.cmp(&b.path))
-        })
-    {
-        tracing::info!(
-            required_major,
-            selected_major = compatible_higher.major_version,
-            path = %compatible_higher.path.display(),
-            "exact Java major version not installed; selected closest newer compatible JVM"
-        );
-        return Ok(compatible_higher.clone());
+    // 2. For Java 17+, allow the closest installed newer JVM (`major_version > required_major`).
+    // Never upgrade Java 8 / 16 requests to Java 17+, as Legacy Forge crashes on URLClassLoader removal.
+    if required_major >= 17 {
+        if let Some(compatible_higher) = eligible
+            .iter()
+            .filter(|r| r.major_version > required_major)
+            .min_by(|a, b| {
+                a.major_version
+                    .cmp(&b.major_version)
+                    .then_with(|| a.path.cmp(&b.path))
+            })
+        {
+            tracing::info!(
+                required_major,
+                selected_major = compatible_higher.major_version,
+                path = %compatible_higher.path.display(),
+                "exact Java major version not installed; selected closest newer compatible JVM"
+            );
+            return Ok((*compatible_higher).clone());
+        }
     }
 
-    // 3. Fallback to highest installed major_version < required_major.
-    if let Some(fallback_lower) = runtimes.iter().max_by(|a, b| {
-        a.major_version
-            .cmp(&b.major_version)
-            .then_with(|| a.path.cmp(&b.path))
-    }) {
-        tracing::warn!(
-            required_major,
-            selected_major = fallback_lower.major_version,
-            path = %fallback_lower.path.display(),
-            "Java {}+ not found; falling back to closest installed JVM (Java {})",
-            required_major,
-            fallback_lower.major_version
-        );
-        return Ok(fallback_lower.clone());
-    }
-
+    // Never fall back to `major_version < required_major`, which guarantees UnsupportedClassVersionError.
     Err(MqError::JavaNotFound {
         required_major,
         hint: if cfg!(target_os = "windows") {
-            format!("install Temurin/OpenJDK {required_major} on Windows")
+            format!(
+                "no compatible 64-bit Java {required_major} runtime found; auto-download required"
+            )
         } else {
-            format!("install jdk{required_major}-openjdk under /usr/lib/jvm")
+            format!("no compatible Java {required_major} runtime found under /usr/lib/jvm")
         },
     })
 }
@@ -780,14 +870,25 @@ pub fn verify_java_executable(java_bin: &Path) -> MqResult<JavaRuntime> {
         format!("{stderr}\n{stdout}")
     };
 
-    if let Some((major_version, full_version, vendor)) = parse_java_version_output(&combined) {
+    if let Some((major_version, full_version, vendor, out_64)) =
+        parse_java_version_output_with_arch(&combined)
+    {
         let home_dir = infer_jvm_home(&canon_bin);
+        let release_64 = [home_dir.join("release")]
+            .into_iter()
+            .filter_map(|p| fs::read_to_string(p).ok())
+            .find_map(|c| parse_java_release_file_ext(&c))
+            .and_then(|(_, _, _, b)| b);
+        let is_64bit = out_64
+            .or(release_64)
+            .unwrap_or_else(|| infer_default_is_64bit_for_path(&canon_bin));
         Ok(JavaRuntime {
             path: canon_bin,
             home_dir,
             major_version,
             full_version,
             vendor,
+            is_64bit,
         })
     } else {
         Err(MqError::Internal(format!(
@@ -859,14 +960,20 @@ pub async fn ensure_java_runtime(
         });
     }
 
-    // 1. Priority (1): System Java matching or compatible with required_major
-    let system_runtimes = discover_java_runtimes();
+    let effective_java_dir =
+        if cfg!(target_os = "windows") && std::env::var_os("MQ_TEST_SANDBOX").is_none() {
+            mq_core::paths::resolve_ascii_safe_windows_java_dir(java_dir)
+        } else {
+            java_dir.to_path_buf()
+        };
 
-    // Check exact match first
-    if let Some(exact) = system_runtimes
-        .iter()
-        .find(|r| r.major_version == required_major)
-    {
+    // 1. Priority (1): System or launcher-managed Java matching or compatible with required_major
+    let system_runtimes = discover_java_runtimes_with_extra(Some(&effective_java_dir));
+
+    // Check exact 64-bit (when on 64-bit host) match first
+    if let Some(exact) = system_runtimes.iter().find(|r| {
+        r.major_version == required_major && (!cfg!(target_pointer_width = "64") || r.is_64bit)
+    }) {
         if let Ok(verified) = verify_java_executable(&exact.path) {
             return Ok(SelectedJava {
                 runtime: verified,
@@ -880,7 +987,10 @@ pub async fn ensure_java_runtime(
     if required_major >= 17 {
         if let Some(compatible) = system_runtimes
             .iter()
-            .filter(|r| r.major_version > required_major)
+            .filter(|r| {
+                r.major_version > required_major
+                    && (!cfg!(target_pointer_width = "64") || r.is_64bit)
+            })
             .min_by_key(|r| r.major_version)
         {
             if let Ok(verified) = verify_java_executable(&compatible.path) {
@@ -903,7 +1013,15 @@ pub async fn ensure_java_runtime(
     let comp = component_hint
         .unwrap_or_else(|| crate::mojang_java::component_for_major_version(required_major));
 
-    match crate::mojang_java::ensure_mojang_java_runtime(client, java_dir, comp, None, None).await {
+    match crate::mojang_java::ensure_mojang_java_runtime(
+        client,
+        &effective_java_dir,
+        comp,
+        None,
+        None,
+    )
+    .await
+    {
         Ok(mojang_rt) => {
             return Ok(SelectedJava {
                 runtime: mojang_rt,
@@ -921,7 +1039,7 @@ pub async fn ensure_java_runtime(
     }
 
     // 3. Priority (3): Adoptium Temurin or Zulu JRE (8, 17, 21, 25)
-    match download_adoptium_java(client, required_major, java_dir).await {
+    match download_adoptium_java(client, required_major, &effective_java_dir).await {
         Ok(adoptium_rt) => {
             return Ok(SelectedJava {
                 runtime: adoptium_rt,
@@ -938,7 +1056,7 @@ pub async fn ensure_java_runtime(
         }
     }
 
-    match download_zulu_java(client, required_major, java_dir).await {
+    match download_zulu_java(client, required_major, &effective_java_dir).await {
         Ok(zulu_rt) => {
             return Ok(SelectedJava {
                 runtime: zulu_rt,
@@ -1109,21 +1227,25 @@ pub async fn download_adoptium_java(
     } else {
         "java"
     };
+    let effective_parent_dir =
+        if cfg!(target_os = "windows") && std::env::var_os("MQ_TEST_SANDBOX").is_none() {
+            mq_core::paths::resolve_ascii_safe_windows_java_dir(target_parent_dir)
+        } else {
+            target_parent_dir.to_path_buf()
+        };
     let dest_dir_name = format!("temurin-{feature_version}-{arch}");
-    let dest_dir = target_parent_dir.join(&dest_dir_name);
+    let dest_dir = effective_parent_dir.join(&dest_dir_name);
     let bin_java = dest_dir.join("bin").join(bin_name);
 
-    // If already installed and probeable, return existing
+    // Reuse existing runtime only if `<java> -version` executes cleanly.
     if bin_java.is_file() {
         if let Ok(rt) = verify_java_executable(&bin_java) {
             return Ok(rt);
         }
-        if let Some(rt) = probe_java_binary(&bin_java) {
-            return Ok(rt);
-        }
+        let _ = remove_dir_all_with_retry(&dest_dir);
     }
 
-    fs::create_dir_all(target_parent_dir)?;
+    fs::create_dir_all(&effective_parent_dir)?;
 
     // 1. Fetch checksum if available
     let checksum_url = format!(
@@ -1186,7 +1308,7 @@ pub async fn download_adoptium_java(
     }
 
     // 4. Safely extract archive
-    let temp_extract = target_parent_dir.join(format!(
+    let temp_extract = effective_parent_dir.join(format!(
         ".tmp_extract_{feature_version}_{}",
         std::process::id()
     ));
@@ -1231,14 +1353,13 @@ pub async fn download_adoptium_java(
         }
     }
 
-    // Verify or probe the runtime
-    verify_java_executable(&final_bin).or_else(|_| {
-        probe_java_binary(&final_bin).ok_or_else(|| {
-            MqError::Internal(format!(
-                "installed Adoptium Java {feature_version} could not be probed at {}",
-                final_bin.display()
-            ))
-        })
+    // Verify the installed JVM executes cleanly; remove broken runtime if it fails.
+    verify_java_executable(&final_bin).map_err(|e| {
+        let _ = remove_dir_all_with_retry(&dest_dir);
+        MqError::Internal(format!(
+            "installed Adoptium Java {feature_version} at {} failed verification: {e}",
+            final_bin.display()
+        ))
     })
 }
 
@@ -1272,16 +1393,20 @@ pub async fn download_zulu_java(
         ("linux", "tar.gz", "java")
     };
 
-    let dest_dir = target_parent_dir.join(format!("zulu-{feature_version}-{arch}"));
+    let effective_parent_dir =
+        if cfg!(target_os = "windows") && std::env::var_os("MQ_TEST_SANDBOX").is_none() {
+            mq_core::paths::resolve_ascii_safe_windows_java_dir(target_parent_dir)
+        } else {
+            target_parent_dir.to_path_buf()
+        };
+    let dest_dir = effective_parent_dir.join(format!("zulu-{feature_version}-{arch}"));
     let bin_java = dest_dir.join("bin").join(bin_name);
 
     if bin_java.is_file() {
         if let Ok(rt) = verify_java_executable(&bin_java) {
             return Ok(rt);
         }
-        if let Some(rt) = probe_java_binary(&bin_java) {
-            return Ok(rt);
-        }
+        let _ = remove_dir_all_with_retry(&dest_dir);
     }
 
     // Query Azul Zulu packages metadata API
@@ -1357,8 +1482,8 @@ pub async fn download_zulu_java(
         }
     }
 
-    fs::create_dir_all(target_parent_dir)?;
-    let temp_extract = target_parent_dir.join(format!(
+    fs::create_dir_all(&effective_parent_dir)?;
+    let temp_extract = effective_parent_dir.join(format!(
         ".tmp_extract_zulu_{feature_version}_{}",
         std::process::id()
     ));
@@ -1401,13 +1526,12 @@ pub async fn download_zulu_java(
         }
     }
 
-    verify_java_executable(&final_bin).or_else(|_| {
-        probe_java_binary(&final_bin).ok_or_else(|| {
-            MqError::Internal(format!(
-                "installed Zulu Java {feature_version} could not be probed at {}",
-                final_bin.display()
-            ))
-        })
+    verify_java_executable(&final_bin).map_err(|e| {
+        let _ = remove_dir_all_with_retry(&dest_dir);
+        MqError::Internal(format!(
+            "installed Zulu Java {feature_version} at {} failed verification: {e}",
+            final_bin.display()
+        ))
     })
 }
 
@@ -1426,5 +1550,54 @@ mod tests {
         assert_eq!(infer_java_major_from_mc_version("1.20.5"), 21);
         assert_eq!(infer_java_major_from_mc_version("1.21.1"), 21);
         assert_eq!(infer_java_major_from_mc_version("26.1"), 25);
+    }
+
+    #[test]
+    fn parse_java_version_output_with_arch_ignores_leading_vm_warning() {
+        let output = "\
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader libraries, but bootstrap classpath has not been appended
+openjdk version \"21.0.5\" 2024-10-15
+OpenJDK Runtime Environment Temurin-21.0.5+11 (build 21.0.5+11-LTS)
+OpenJDK 64-Bit Server VM Temurin-21.0.5+11 (build 21.0.5+11-LTS, mixed mode, sharing)";
+        let parsed = parse_java_version_output_with_arch(output).expect("parse version");
+        assert_eq!(parsed.0, 21);
+        assert_eq!(parsed.1, "21.0.5");
+        assert_eq!(parsed.2, "Eclipse Adoptium");
+        assert_eq!(parsed.3, Some(true));
+
+        let unquoted_output = "\
+OpenJDK 64-Bit Server VM warning: Option UseConcMarkSweepGC was deprecated in version 9.0
+openjdk 21.0.5 2024-10-15
+OpenJDK 64-Bit Server VM (build 21.0.5+11, mixed mode)";
+        let parsed_unquoted =
+            parse_java_version_output_with_arch(unquoted_output).expect("parse unquoted version");
+        assert_eq!(parsed_unquoted.0, 21);
+        assert_eq!(parsed_unquoted.3, Some(true));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn select_java_runtime_skips_32bit_runtimes_on_64bit_hosts() {
+        let rt_32 = JavaRuntime {
+            path: PathBuf::from(r"C:\Program Files (x86)\Java\jdk-21\bin\java.exe"),
+            home_dir: PathBuf::from(r"C:\Program Files (x86)\Java\jdk-21"),
+            major_version: 21,
+            full_version: "21.0.5".to_owned(),
+            vendor: "Eclipse Adoptium".to_owned(),
+            is_64bit: false,
+        };
+        assert!(select_java_runtime(std::slice::from_ref(&rt_32), 21, None).is_err());
+
+        let rt_64 = JavaRuntime {
+            path: PathBuf::from(r"C:\Program Files\Java\jdk-21\bin\java.exe"),
+            home_dir: PathBuf::from(r"C:\Program Files\Java\jdk-21"),
+            major_version: 21,
+            full_version: "21.0.5".to_owned(),
+            vendor: "Eclipse Adoptium".to_owned(),
+            is_64bit: true,
+        };
+        let selected =
+            select_java_runtime(&[rt_32, rt_64.clone()], 21, None).expect("select 64-bit runtime");
+        assert_eq!(selected, rt_64);
     }
 }

@@ -22,7 +22,7 @@ use mq_core::{resolve_safe_path, MqError, MqResult};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-use crate::java::{probe_java_binary, verify_java_executable, JavaRuntime};
+use crate::java::{verify_java_executable, JavaRuntime};
 
 /// Mojang Java Runtime product catalog URL.
 pub const MOJANG_JAVA_RUNTIME_ALL_URL: &str =
@@ -163,7 +163,8 @@ pub fn parse_mojang_package_manifest(json: &str) -> MqResult<MojangPackageManife
 }
 
 /// Finds the catalog entry for the specified platform and component,
-/// applying safe Windows architecture fallbacks (`windows-arm64` -> `windows-x64` -> `windows-x86`).
+/// applying safe Windows architecture fallback (`windows-arm64` -> `windows-x64`).
+/// Never downgrades 64-bit `windows-x64` to 32-bit `windows-x86`, allowing Adoptium/Zulu 64-bit fallback instead.
 pub fn find_mojang_runtime_entry<'a>(
     catalog: &'a MojangProductCatalog,
     platform: &str,
@@ -180,15 +181,14 @@ pub fn find_mojang_runtime_entry<'a>(
         return Some(entry);
     }
     match platform {
-        "windows-arm64" => lookup("windows-x64").or_else(|| lookup("windows-x86")),
-        "windows-x64" => lookup("windows-x86"),
+        "windows-arm64" => lookup("windows-x64"),
         _ => None,
     }
 }
 
 /// Resolves or downloads the official Mojang Java runtime for the given component or major version.
 ///
-/// Packages are installed into `<data_dir>/java/mojang-<component>/`.
+/// Packages are installed into `<java_parent_dir>/mojang-<component>/`.
 pub async fn ensure_mojang_java_runtime(
     client: &reqwest::Client,
     java_parent_dir: &Path,
@@ -206,14 +206,16 @@ pub async fn ensure_mojang_java_runtime(
     };
     let java_bin = dest_dir.join("bin").join(bin_name);
 
-    // If already installed and functional, return it immediately.
+    // Return existing installation only when `<java> -version` actually executes cleanly.
     if java_bin.is_file() {
         if let Ok(rt) = verify_java_executable(&java_bin) {
             return Ok(rt);
         }
-        if let Some(rt) = probe_java_binary(&java_bin) {
-            return Ok(rt);
-        }
+        tracing::warn!(
+            path = %java_bin.display(),
+            "existing Mojang Java installation failed verification; removing and reinstalling"
+        );
+        let _ = remove_dir_all_with_retry(&dest_dir);
     }
 
     // 1. Fetch all.json catalog
@@ -314,8 +316,9 @@ pub async fn ensure_mojang_java_runtime(
         }
     }
 
-    // 7. Verify installed JVM with `<java> -version`
+    // 7. Verify installed JVM with `<java> -version`; purge broken runtime directory if it fails.
     verify_java_executable(&installed_bin).map_err(|e| {
+        let _ = remove_dir_all_with_retry(&dest_dir);
         MqError::Internal(format!(
             "installed Mojang Java runtime at {} failed verification: {e}",
             installed_bin.display()
@@ -708,13 +711,14 @@ mod tests {
                 .sha1,
             "aaa"
         );
-        // ARM64 falls back to x86 for jre-legacy when missing on arm64 & x64
-        assert_eq!(
-            find_mojang_runtime_entry(&catalog, "windows-arm64", "jre-legacy")
-                .expect("arm64->x86 fallback")
-                .manifest
-                .sha1,
-            "bbb"
+        // 64-bit platforms must never downgrade to 32-bit x86 (allow Adoptium/Zulu 64-bit fallback instead)
+        assert!(
+            find_mojang_runtime_entry(&catalog, "windows-arm64", "jre-legacy").is_none(),
+            "arm64 must not downgrade to 32-bit x86"
+        );
+        assert!(
+            find_mojang_runtime_entry(&catalog, "windows-x64", "jre-legacy").is_none(),
+            "x64 must not downgrade to 32-bit x86"
         );
     }
 
